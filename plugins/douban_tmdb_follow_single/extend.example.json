@@ -1,0 +1,12 @@
+{
+  "_说明_使用方法": "复制整段到 AList-TVBox：订阅 -> 订阅源管理 -> 插件所在行的配置。所有 _说明_ 字段只作中文注释，插件会忽略。",
+  "_说明_运行模式": "必填，固定值，不要修改，也不要手工添加 api、token、secret、loader、source 或 raw。",
+  "atvp_plugin_mode": "alist-tvbox-raw",
+  "_说明_TMDB": "完整功能必填。登录 themoviedb.org 后打开 设置 -> API，复制 API Read Access Token，并替换下面的占位值。",
+  "tmdb_access_token": "YOUR_TMDB_READ_ACCESS_TOKEN",
+  "_说明_History": "可选。只读取云端 History 时保持空值；需要写回时填写当前 AList-TVBox 可登录的 USER 或 ADMIN 账号，用户名和密码必须同时填写。",
+  "history_username": "",
+  "history_password": "",
+  "_说明_资源模式": "推荐保留。插件会自动检测并隐藏当前后端缺少的模式。",
+  "resource_search_modes": ["vod1", "vod", "pansou", "telegram"]
+}

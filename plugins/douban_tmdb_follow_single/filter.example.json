@@ -1,0 +1,11 @@
+{
+  "_说明_使用方法": "粘贴到过滤器所在行：配置 -> JSON 编辑。拦截点和作用范围在过滤器管理页面选择，不写在这里。所有 _说明_ 字段会被过滤器忽略。",
+  "history_cache_ttl": 30,
+  "timeout": 8,
+  "verify_tls": true,
+  "canonicalize_title": true,
+  "auto_select_episode": true,
+  "inject_position": true,
+  "publish_routes": true,
+  "route_cache_ttl": 300
+}
