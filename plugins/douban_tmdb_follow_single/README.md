@@ -1,7 +1,7 @@
 # 豆瓣 TMDB 追更助手
 
 - 插件 ID：`douban_tmdb_follow_single`
-- 当前版本：`48`
+- 当前版本：`49`
 - 运行环境：AList-TVBox raw Python 插件
 - 已验证基线：AList-TVBox `1.42.0`
 - 发布状态：索引已启用，可通过仓库导入
@@ -10,6 +10,9 @@
 
 - 浏览豆瓣和 TMDB 的电影、剧集与季集信息。
 - 建立追更列表，显示追更动态并管理已看、取消和同步操作。
+- 云端 History 在后台自动同步，日常首页不再显示独立“云端历史”分类。
+- 手动同步、通讯检测和本地收藏导入集中在“追更管理”，空追更列表时同样可用。
+- 无完整写入账号时严格保持只读；上传、导入或进度回写单项失败不会中断其余可执行步骤。
 - 操作结果以页面状态卡持续显示，不依赖 Toast 作为唯一反馈。
 - 首次追更没有播放记录时，也能请求 AList-TVBox 搜索真实资源。
 - 使用标题、别名、年份和季号进行保守匹配；单季剧不把季号作为硬性门禁。
@@ -29,7 +32,7 @@
 }
 ```
 
-`tmdb_access_token` 从 TMDB 网站的 **设置 -> API -> API Read Access Token** 获取。需要把追更结果写回 AList-TVBox History 时，再填写可登录当前容器的 `USER` 或 `ADMIN` 用户名和密码；留空仍可读取 History。
+`tmdb_access_token` 从 TMDB 网站的 **设置 -> API -> API Read Access Token** 获取。需要把本机播放记录写回 AList-TVBox History 时，再填写可登录当前容器的 `USER` 或 `ADMIN` 用户名和密码；用户名或密码任一留空都会按只读模式运行，仍可读取 History、导入本机并更新追更进度。
 
 推荐直接使用带中文说明的 [extend.example.json](extend.example.json)。不要手工添加 AList-TVBox 生成的 `api`、`token`、`secret`、`loader`、`source` 或 `raw` 外层字段。
 

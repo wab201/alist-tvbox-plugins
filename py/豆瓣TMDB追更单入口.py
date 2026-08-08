@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # //@name:豆瓣TMDB追更助手（AList-TVBox专用）
 # //@id:douban_tmdb_follow_single
-# //@version:48
+# //@version:49
 
 """AList-TVBox raw Python plugin for Douban/TMDB browsing and follow-up playback.
 
@@ -88,6 +88,10 @@ FILTER_CONFIG_SCHEMA = {
 FOLLOWPLAY_PREFIX = "followplay_"
 FOLLOWPLAY_LEGACY_PREFIX = "followplay://"
 FOLLOWPLAY_PREFIXES = (FOLLOWPLAY_PREFIX, FOLLOWPLAY_LEGACY_PREFIX)
+
+
+class _HistorySyncCancelled(RuntimeError):
+    pass
 
 
 class Filter:
@@ -1018,7 +1022,6 @@ class Spider(BaseSpider):
 
     CATEGORIES = (
         ("follow_updates", "追更动态"),
-        ("follow_sync", "云端历史"),
         ("follow_manage", "追更管理"),
         ("hotmovie", "热门电影"),
         ("hottv", "热门剧集"),
@@ -1165,8 +1168,10 @@ class Spider(BaseSpider):
         self._follow_state_loaded = False
         self._follow_cache_origin = ""
         self._follow_enrich_lock = threading.RLock()
+        self._follow_state_persist_lock = threading.Lock()
         self._follow_enrich_jobs = set()
         self._follow_action_state_lock = threading.RLock()
+        self._follow_action_state_persist_lock = threading.Lock()
         self._follow_action_state = {"version": 1, "last": {}, "pending": {}}
         self._series_action_mode = "add"
         self._resume_imported = {}
@@ -1175,6 +1180,9 @@ class Spider(BaseSpider):
         self._atvp_job_lock = threading.RLock()
         self._atvp_jobs = set()
         self._atvp_status = {}
+        self._atvp_status_persist_lock = threading.Lock()
+        self._history_context_lock = threading.RLock()
+        self._history_sync_lock = threading.Lock()
         self._route_probe_cache = {}
         self._route_probe_jobs = set()
         self._resource_search_admissions = 0
@@ -1197,6 +1205,10 @@ class Spider(BaseSpider):
         return self.name
 
     def init(self, extend=""):
+        with self._history_context_lock:
+            return self._init_locked(extend)
+
+    def _init_locked(self, extend=""):
         config = self._parse_config(extend)
         self.timeout = self._bounded_int(config.get("timeout"), 6, 3, 15)
         self.cache_ttl = self._bounded_int(config.get("cache_ttl"), 180, 0, 3600)
@@ -1301,12 +1313,15 @@ class Spider(BaseSpider):
             self._resolve_user_id()
 
     def destroy(self):
-        for session in (self._session, self._tmdb_session, self._atvp_session):
-            if session is not None:
-                try:
-                    session.close()
-                except Exception:
-                    pass
+        with self._history_context_lock:
+            with self._cache_lock:
+                self._cache_generation += 1
+            for session in (self._session, self._tmdb_session, self._atvp_session):
+                if session is not None:
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
         try:
             self._resource_search_executor.shutdown(wait=False, cancel_futures=True)
         except TypeError:
@@ -1816,6 +1831,12 @@ class Spider(BaseSpider):
         mode = self._value(ext, "mode", "view")
         followed = list((self._follow_memory.get("items") or {}).values())
         followed.sort(key=lambda item: str(item.get("title") or ""))
+        histories = self._atvp_history_snapshot(nonblocking=True) if page == 1 or followed else []
+        prefix_cards = self._follow_state_cards(include_pending=True) if page == 1 else []
+        if page == 1 and mode == "view":
+            prefix_cards.extend(self._history_management_cards())
+        elif page == 1:
+            prefix_cards = self._history_alert_cards() + prefix_cards
         if not followed:
             if page > 1:
                 return self._page_result([], page, 1, 0, self.follow_page_size)
@@ -1825,10 +1846,8 @@ class Spider(BaseSpider):
                 "vod_pic": "",
                 "vod_remarks": "当前没有已追更剧集",
             }
-            prefix_cards = self._follow_state_cards(include_pending=True)
-            return self._page_result(prefix_cards + [empty], 1, 1, len(prefix_cards), self.follow_page_size)
+            return self._page_result(prefix_cards + [empty], 1, 1, 0, self.follow_page_size)
         start = (page - 1) * self.follow_page_size
-        histories = self._atvp_history_snapshot(nonblocking=True)
         self._reconcile_follow_histories(histories)
         followed = list((self._follow_memory.get("items") or {}).values())
         followed.sort(key=lambda item: str(item.get("title") or ""))
@@ -1842,7 +1861,7 @@ class Spider(BaseSpider):
             for item in selected
         ]
         if page == 1:
-            cards = self._follow_state_cards(include_pending=True) + cards
+            cards = prefix_cards + cards
         pagecount = max(1, int(math.ceil(float(len(followed)) / self.follow_page_size)))
         return self._page_result(cards, page, pagecount, len(followed), self.follow_page_size)
 
@@ -1860,7 +1879,7 @@ class Spider(BaseSpider):
         paired.sort(key=lambda pair: (0 if self._has_follow_update(pair[0], pair[1]) else 1, str(pair[0].get("next_air_date") or "9999"), str(pair[0].get("title") or "")))
         cards = [self._follow_card(item, "", history) for item, history in paired]
         if page == 1:
-            cards = self._follow_state_cards() + cards
+            cards = self._history_alert_cards() + self._follow_state_cards() + cards
         pagecount = max(1, int(math.ceil(float(len(followed)) / self.follow_page_size)))
         return self._page_result(cards, page, pagecount, len(followed), self.follow_page_size)
 
@@ -1914,21 +1933,32 @@ class Spider(BaseSpider):
 
         thread = threading.Thread(target=worker)
         thread.daemon = True
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            with self._follow_enrich_lock:
+                self._follow_enrich_jobs.discard(job_key)
+            return False
         return True
 
     def _category_follow_sync(self, page):
-        if page > 1:
-            return self._page_result([], page, 1, 3, 3)
+        # Keep the retired category ID usable for clients with a cached class list.
+        return self._category_follow_manage(page, {"mode": "view"})
+
+    def _history_management_cards(self):
         ready = bool(self.atvp_api and self.atvp_token and self._atvp_session is not None)
         probe_remark = self._atvp_status_remark("probe")
         sync_remark = self._atvp_status_remark("sync")
         keep_remark = self._atvp_status_remark("keep")
+        mode = self._history_sync_mode_label()
         sync_card = {
             "vod_id": self.ATVP_SYNC_ACTION,
-            "vod_name": "双向同步播放记录",
+            "vod_name": "立即同步 History",
             "vod_pic": "",
-            "vod_remarks": sync_remark or ("点击开始同步本机与AList云端History" if ready else "点击自动识别地址并开始同步"),
+            "vod_remarks": "%s · %s" % (
+                mode,
+                sync_remark or ("后台同步已启用" if ready else "等待识别 AList-TVBox 地址"),
+            ),
             "action": self.ATVP_SYNC_ACTION,
         }
         keep_card = {
@@ -1938,8 +1968,23 @@ class Spider(BaseSpider):
             "vod_remarks": keep_remark or "读取FongMi本地收藏，严格匹配剧集后加入追更",
             "action": self.KEEP_FOLLOW_ACTION,
         }
-        cards = self._follow_state_cards() + [self._atvp_probe_card(probe_remark), sync_card, keep_card]
-        return self._page_result(cards, 1, 1, len(cards), max(3, len(cards)))
+        return [sync_card, self._atvp_probe_card(probe_remark), keep_card]
+
+    def _history_alert_cards(self):
+        status = self._atvp_status.get("sync") if isinstance(self._atvp_status, dict) else None
+        if not isinstance(status, dict) or status.get("state") not in ("running", "failed"):
+            return []
+        state = str(status.get("state") or "")
+        message = str(status.get("message") or "").strip()
+        updated_at = self._positive_int(status.get("updated_at"), 0)
+        timestamp = time.strftime("%m-%d %H:%M", time.localtime(updated_at)) if updated_at else ""
+        return [{
+            "vod_id": self.ATVP_SYNC_ACTION,
+            "vod_name": "History 正在同步" if state == "running" else "History 同步失败",
+            "vod_pic": "",
+            "vod_remarks": message + ((" · " + timestamp) if timestamp else ""),
+            "action": self.ATVP_SYNC_ACTION,
+        }]
 
     def _request_follow_confirmation(self, operation, raw_id):
         operation = str(operation or "").strip().lower()
@@ -2052,17 +2097,18 @@ class Spider(BaseSpider):
         setter = getattr(self, "setCache", None)
         if not callable(setter):
             return False
-        with self._follow_action_state_lock:
-            payload = {
-                "version": 1,
-                "last": dict((self._follow_action_state or {}).get("last") or {}),
-                "pending": dict((self._follow_action_state or {}).get("pending") or {}),
-            }
-        try:
-            setter(self.FOLLOW_ACTION_STATE_CACHE_KEY, payload)
-            return True
-        except Exception:
-            return False
+        with self._follow_action_state_persist_lock:
+            with self._follow_action_state_lock:
+                payload = {
+                    "version": 1,
+                    "last": dict((self._follow_action_state or {}).get("last") or {}),
+                    "pending": dict((self._follow_action_state or {}).get("pending") or {}),
+                }
+            try:
+                setter(self.FOLLOW_ACTION_STATE_CACHE_KEY, payload)
+                return True
+            except Exception:
+                return False
 
     def _set_follow_action_status(self, state, message, operation="", title=""):
         status = {
@@ -2147,43 +2193,58 @@ class Spider(BaseSpider):
             return json.dumps({"msg": "TMDB 剧集编号无效"}, ensure_ascii=False)
         try:
             self._require_tmdb_credentials()
-            items = dict(self._follow_memory.get("items") or {})
             key = str(tmdb_id)
             if operation == "remove":
-                if key not in items:
-                    return json.dumps({"msg": "该剧集尚未追更"}, ensure_ascii=False)
-                title = str(items[key].get("title") or key)
-                items.pop(key, None)
-                self._save_follow_state(items)
+                with self._follow_enrich_lock:
+                    items = dict(self._follow_memory.get("items") or {})
+                    if key not in items:
+                        return json.dumps({"msg": "该剧集尚未追更"}, ensure_ascii=False)
+                    title = str(items[key].get("title") or key)
+                    items.pop(key, None)
+                    self._save_follow_state(items)
                 return json.dumps({"msg": "已取消追更：" + title}, ensure_ascii=False)
             if operation == "seen":
-                item = dict(items.get(key) or {})
-                if not item:
-                    return json.dumps({"msg": "该剧集尚未追更"}, ensure_ascii=False)
+                with self._follow_enrich_lock:
+                    if key not in (self._follow_memory.get("items") or {}):
+                        return json.dumps({"msg": "该剧集尚未追更"}, ensure_ascii=False)
                 data = self._tmdb_api("/tv/%s" % tmdb_id, {}, self.detail_cache_ttl, allow_stale=False)
-                item = self._follow_item_from_tmdb(data, item)
-                item["seen_episode"] = str(item.get("latest_episode") or item.get("seen_episode") or "")
-                item["tracked_episode"] = str(item.get("latest_episode") or item.get("tracked_episode") or "")
-                item["seen_source"] = "manual"
-                message = "已标记看到 " + (item["seen_episode"] or "当前进度")
-                items[key] = item
-                self._save_follow_state(items)
+                with self._follow_enrich_lock:
+                    items = dict(self._follow_memory.get("items") or {})
+                    current = dict(items.get(key) or {})
+                    if not current:
+                        return json.dumps({"msg": "该剧集已取消追更"}, ensure_ascii=False)
+                    item = self._follow_item_from_tmdb(data, current)
+                    item["seen_episode"] = str(item.get("latest_episode") or item.get("seen_episode") or "")
+                    item["tracked_episode"] = str(item.get("latest_episode") or item.get("tracked_episode") or "")
+                    item["seen_source"] = "manual"
+                    message = "已标记看到 " + (item["seen_episode"] or "当前进度")
+                    items[key] = item
+                    self._save_follow_state(items)
                 return json.dumps({"msg": message}, ensure_ascii=False)
-            if key in items:
-                if items[key].get("pending_metadata") or items[key].get("enrich_error"):
-                    self._start_follow_enrichment("tmdb", key, str(items[key].get("title") or title))
-                return json.dumps({"msg": "已经在追更列表：" + str(items[key].get("title") or key)}, ensure_ascii=False)
-            item = {
-                "tmdb_id": tmdb_id,
-                "title": str(title or ("TMDB剧集 " + key)),
-                "seen_episode": "",
-                "tracked_episode": "",
-                "seen_source": "",
-                "pending_metadata": True,
-                "last_checked": 0,
-            }
-            items[key] = item
-            self._save_follow_state(items)
+            with self._follow_enrich_lock:
+                items = dict(self._follow_memory.get("items") or {})
+                existing = items.get(key)
+                if isinstance(existing, dict):
+                    existing_title = str(existing.get("title") or key)
+                    retry_enrichment = bool(existing.get("pending_metadata") or existing.get("enrich_error"))
+                else:
+                    item = {
+                        "tmdb_id": tmdb_id,
+                        "title": str(title or ("TMDB剧集 " + key)),
+                        "seen_episode": "",
+                        "tracked_episode": "",
+                        "seen_source": "",
+                        "pending_metadata": True,
+                        "last_checked": 0,
+                    }
+                    items[key] = item
+                    self._save_follow_state(items)
+                    existing_title = item["title"]
+                    retry_enrichment = True
+            if isinstance(existing, dict):
+                if retry_enrichment:
+                    self._start_follow_enrichment("tmdb", key, existing_title)
+                return json.dumps({"msg": "已经在追更列表：" + existing_title}, ensure_ascii=False)
             self._start_follow_enrichment("tmdb", key, item["title"])
             return json.dumps({"msg": "已加入追更，分集资料正在后台补全：" + item["title"]}, ensure_ascii=False)
         except Exception as exc:
@@ -2195,25 +2256,30 @@ class Spider(BaseSpider):
             return json.dumps({"msg": "豆瓣条目编号无效"}, ensure_ascii=False)
         try:
             self._require_tmdb_credentials()
-            items = dict(self._follow_memory.get("items") or {})
-            existing = next((item for item in items.values() if str(item.get("douban_id") or "") == subject_id), None)
-            if existing:
-                if existing.get("pending_metadata") or existing.get("enrich_error"):
-                    self._start_follow_enrichment("douban", subject_id, str(existing.get("title") or ""))
-                return json.dumps({"msg": "已经在追更列表：" + str(existing.get("title") or subject_id)}, ensure_ascii=False)
-            key = "douban:" + subject_id
-            item = {
-                "tmdb_id": 0,
-                "douban_id": subject_id,
-                "title": str(title or ("豆瓣剧集 " + subject_id)),
-                "seen_episode": "",
-                "tracked_episode": "",
-                "seen_source": "",
-                "pending_metadata": True,
-                "last_checked": 0,
-            }
-            items[key] = item
-            self._save_follow_state(items)
+            with self._follow_enrich_lock:
+                items = dict(self._follow_memory.get("items") or {})
+                existing = next((item for item in items.values() if str(item.get("douban_id") or "") == subject_id), None)
+                if isinstance(existing, dict):
+                    existing_title = str(existing.get("title") or subject_id)
+                    retry_enrichment = bool(existing.get("pending_metadata") or existing.get("enrich_error"))
+                else:
+                    key = "douban:" + subject_id
+                    item = {
+                        "tmdb_id": 0,
+                        "douban_id": subject_id,
+                        "title": str(title or ("豆瓣剧集 " + subject_id)),
+                        "seen_episode": "",
+                        "tracked_episode": "",
+                        "seen_source": "",
+                        "pending_metadata": True,
+                        "last_checked": 0,
+                    }
+                    items[key] = item
+                    self._save_follow_state(items)
+            if isinstance(existing, dict):
+                if retry_enrichment:
+                    self._start_follow_enrichment("douban", subject_id, existing_title)
+                return json.dumps({"msg": "已经在追更列表：" + existing_title}, ensure_ascii=False)
             self._start_follow_enrichment("douban", subject_id, item["title"])
             return json.dumps({"msg": "已加入追更，豆瓣与TMDB正在后台映射：" + item["title"]}, ensure_ascii=False)
         except Exception as exc:
@@ -2241,7 +2307,12 @@ class Spider(BaseSpider):
 
         thread = threading.Thread(target=worker)
         thread.daemon = True
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            with self._follow_enrich_lock:
+                self._follow_enrich_jobs.discard(job_key)
+            return False
         return True
 
     def _enrich_tmdb_follow(self, raw_id):
@@ -2797,6 +2868,10 @@ class Spider(BaseSpider):
         return empty if empty is not None else (None, "")
 
     def _persist_follow_state(self, state):
+        with self._follow_state_persist_lock:
+            return self._persist_follow_state_locked(state)
+
+    def _persist_follow_state_locked(self, state):
         persisted = False
         setter = getattr(self, "setCache", None)
         if callable(setter):
@@ -2826,8 +2901,8 @@ class Spider(BaseSpider):
         state = {"version": self.FOLLOW_STATE_VERSION, "updated_at": int(time.time()), "items": items}
         with self._follow_enrich_lock:
             self._follow_memory = state
-        self._follow_state_loaded = True
-        self._persist_follow_state(state)
+            self._follow_state_loaded = True
+            self._persist_follow_state(state)
 
     def _refresh_follow_item(self, item):
         tmdb_id = self._positive_int(item.get("tmdb_id"), 0)
@@ -3031,39 +3106,63 @@ class Spider(BaseSpider):
             return stale if isinstance(stale, list) else []
 
     def _schedule_atvp_history_refresh(self, cache_key):
+        with self._atvp_job_lock:
+            if "sync" in self._atvp_jobs or "sync-background" in self._atvp_jobs:
+                return False
+            self._atvp_jobs.add("sync-background")
         with self._cache_lock:
             if cache_key in self._refreshing_cache_keys:
+                with self._atvp_job_lock:
+                    self._atvp_jobs.discard("sync-background")
                 return False
             self._refreshing_cache_keys.add(cache_key)
             generation = self._cache_generation
+        self._set_atvp_status(
+            "sync", "running", "History 后台同步中 · %s" % self._history_sync_mode_label(),
+            persist=False,
+        )
 
         def worker():
             try:
-                local_rows = self._capture_native_history()
-                cloud_rows = self._atvp_fetch_history()
-                merged, uploads = self._merge_native_history(local_rows, cloud_rows)
-                if uploads:
-                    self._atvp_history_push(uploads)
-                self._import_native_history(merged)
-                with self._cache_lock:
-                    active = generation == self._cache_generation
-                if active:
-                    self._cache_set(cache_key, merged)
-                    self._reconcile_follow_histories(merged)
+                with self._history_context_lock:
+                    self._require_history_generation(generation)
+                    self._persist_atvp_status()
+                with self._history_sync_lock:
+                    result = self._sync_history_once(expected_generation=generation)
+                with self._history_context_lock:
+                    self._require_history_generation(generation)
+                    self._apply_history_sync_result(cache_key, result)
                     self._failures.pop(cache_key, None)
+                    state = "failed" if result["errors"] else "done"
+                    self._set_atvp_status(state=state, kind="sync", message=self._history_sync_message(result))
                     self._refresh_follow_categories()
             except Exception as exc:
-                with self._cache_lock:
-                    active = generation == self._cache_generation
-                if active:
-                    self._remember_failure(cache_key, exc)
+                with self._history_context_lock:
+                    if self._history_generation_active(generation):
+                        self._remember_failure(cache_key, exc)
+                        self._set_atvp_status(
+                            "sync", "failed", "History 后台同步失败：%s" % self._short_error(exc),
+                        )
+                        self._refresh_follow_categories()
             finally:
                 with self._cache_lock:
                     self._refreshing_cache_keys.discard(cache_key)
+                with self._atvp_job_lock:
+                    self._atvp_jobs.discard("sync-background")
 
         thread = threading.Thread(target=worker)
         thread.daemon = True
-        thread.start()
+        try:
+            thread.start()
+        except Exception as exc:
+            with self._cache_lock:
+                self._refreshing_cache_keys.discard(cache_key)
+            with self._atvp_job_lock:
+                self._atvp_jobs.discard("sync-background")
+            self._set_atvp_status(
+                "sync", "failed", "History 后台同步启动失败：%s" % self._short_error(exc),
+            )
+            return False
         return True
 
     def _atvp_fetch_history(self):
@@ -3076,6 +3175,114 @@ class Spider(BaseSpider):
         if not isinstance(value, list):
             raise RuntimeError("AList-TVBox 历史格式无效")
         return [entry for entry in value if isinstance(entry, dict) and entry.get("key")]
+
+    def _history_write_enabled(self):
+        return bool(self.history_username and self.history_password)
+
+    def _history_generation_active(self, expected_generation):
+        if expected_generation is None:
+            return True
+        with self._cache_lock:
+            return expected_generation == self._cache_generation
+
+    def _require_history_generation(self, expected_generation):
+        if not self._history_generation_active(expected_generation):
+            raise _HistorySyncCancelled("History 同步已因配置更新而取消")
+
+    def _history_sync_mode_label(self):
+        if self._history_write_enabled():
+            return "双向"
+        if bool(self.history_username) != bool(self.history_password):
+            return "只读（写入账号不完整）"
+        return "只读"
+
+    def _sync_history_once(self, expected_generation=None):
+        errors = []
+        try:
+            with self._history_context_lock:
+                self._require_history_generation(expected_generation)
+                local_rows = self._capture_native_history()
+        except _HistorySyncCancelled:
+            raise
+        except Exception as exc:
+            local_rows = []
+            errors.append(("本机History读取", self._short_error(exc)))
+        cloud_available = False
+        try:
+            with self._history_context_lock:
+                self._require_history_generation(expected_generation)
+                cloud_rows = self._atvp_fetch_history()
+                cloud_available = True
+        except _HistorySyncCancelled:
+            raise
+        except Exception as exc:
+            with self._history_context_lock:
+                self._require_history_generation(expected_generation)
+                stale = self._cache_get(
+                    "atvp-history-snapshot", self.atvp_history_ttl, allow_expired=True,
+                )
+            cloud_rows = stale if isinstance(stale, list) else []
+            errors.append(("云端History读取", self._short_error(exc)))
+        merged, uploads = self._merge_native_history(local_rows, cloud_rows)
+        uploaded = 0
+        if cloud_available and uploads and self._history_write_enabled():
+            try:
+                with self._history_context_lock:
+                    self._require_history_generation(expected_generation)
+                    self._atvp_history_push(uploads)
+                    uploaded = len(uploads)
+            except _HistorySyncCancelled:
+                raise
+            except Exception as exc:
+                errors.append(("云端History写入", self._short_error(exc)))
+        imported = 0
+        try:
+            with self._history_context_lock:
+                self._require_history_generation(expected_generation)
+                imported = self._import_native_history(merged)
+        except _HistorySyncCancelled:
+            raise
+        except Exception as exc:
+            errors.append(("本机History导入", self._short_error(exc)))
+        return {
+            "mode": self._history_sync_mode_label(),
+            "local": len(local_rows),
+            "cloud": len(cloud_rows),
+            "cloud_available": cloud_available,
+            "upload_candidates": len(uploads),
+            "uploaded": uploaded,
+            "imported": imported,
+            "merged": merged,
+            "progress": 0,
+            "errors": errors,
+        }
+
+    def _apply_history_sync_result(self, cache_key, result):
+        merged = result.get("merged") if isinstance(result, dict) else []
+        merged = merged if isinstance(merged, list) else []
+        self._cache_set(cache_key, merged)
+        try:
+            result["progress"] = self._reconcile_follow_histories(merged)
+        except Exception as exc:
+            result.setdefault("errors", []).append(("追更进度回写", self._short_error(exc)))
+        return result
+
+    @staticmethod
+    def _history_sync_message(result):
+        skipped = max(0, int(result.get("upload_candidates") or 0) - int(result.get("uploaded") or 0))
+        detail = "本机 %s，云端 %s，上传 %s，导入 %s，追更进度 %s" % (
+            result.get("local", 0), result.get("cloud", 0), result.get("uploaded", 0),
+            result.get("imported", 0), result.get("progress", 0),
+        )
+        if skipped and str(result.get("mode") or "").startswith("只读"):
+            detail += "，只读跳过上传 %s" % skipped
+        errors = result.get("errors") if isinstance(result.get("errors"), list) else []
+        if errors:
+            failures = "；".join("%s：%s" % (stage, message) for stage, message in errors)
+            return "播放记录同步部分完成，存在失败：%s；%s；模式 %s" % (
+                failures, detail, result.get("mode") or "只读",
+            )
+        return "播放记录同步完成：%s；模式 %s" % (detail, result.get("mode") or "只读")
 
     def _atvp_probe_card(self, status_remark=""):
         ready = bool(self.atvp_api and self.atvp_token and self._atvp_session is not None)
@@ -3090,38 +3297,70 @@ class Spider(BaseSpider):
     def _start_atvp_job(self, kind):
         labels = {
             "probe": "通讯检测",
-            "sync": "播放记录双向同步",
+            "sync": "播放记录同步",
             "keep": "本地收藏自动追更",
         }
         label = labels.get(kind, "后台任务")
+        with self._cache_lock:
+            generation = self._cache_generation
         with self._atvp_job_lock:
+            if kind == "sync" and "sync-background" in self._atvp_jobs:
+                return json.dumps({"msg": "History 后台同步正在进行，请稍后查看管理页状态"}, ensure_ascii=False)
             if kind in self._atvp_jobs:
                 return json.dumps({"msg": "%s正在进行，请稍后查看卡片结果" % label}, ensure_ascii=False)
             self._atvp_jobs.add(kind)
-            self._set_atvp_status(kind, "running", "%s已开始，请稍后查看卡片结果" % label)
-        thread = threading.Thread(target=self._run_atvp_job, args=(kind,))
+            self._set_atvp_status(
+                kind, "running", "%s已开始，请稍后查看卡片结果" % label, persist=False,
+            )
+        thread = threading.Thread(target=self._run_atvp_job, args=(kind, generation))
         thread.daemon = True
-        thread.start()
+        try:
+            thread.start()
+        except Exception as exc:
+            with self._atvp_job_lock:
+                self._atvp_jobs.discard(kind)
+            self._set_atvp_status(
+                kind, "failed", "%s启动失败：%s" % (label, self._short_error(exc)),
+            )
+            return json.dumps({"msg": "%s启动失败，请重试" % label}, ensure_ascii=False)
         return json.dumps({"msg": "%s已开始，完成后本页会自动刷新" % label}, ensure_ascii=False)
 
-    def _run_atvp_job(self, kind):
+    def _run_atvp_job(self, kind, generation=None):
         try:
+            with self._history_context_lock:
+                self._require_history_generation(generation)
+                self._persist_atvp_status()
             if kind == "probe":
-                raw = self._atvp_probe_history()
+                with self._history_context_lock:
+                    self._require_history_generation(generation)
+                    raw = self._atvp_probe_history()
             elif kind == "keep":
-                raw = self._sync_native_keeps_to_follow()
+                with self._history_context_lock:
+                    self._require_history_generation(generation)
+                    raw = self._sync_native_keeps_to_follow()
             else:
-                raw = self._atvp_sync_history()
+                raw = self._atvp_sync_history(expected_generation=generation)
             result = json.loads(raw) if isinstance(raw, str) else raw
             message = str(result.get("msg") or "操作完成") if isinstance(result, dict) else "操作完成"
-            failed = any(word in message for word in ("失败", "未能", "无效", "超时", "不可用"))
-            self._set_atvp_status(kind, "failed" if failed else "done", message)
+            failed = bool(isinstance(result, dict) and result.get("ok") is False)
+            if not failed:
+                failed = any(word in message for word in (
+                    "失败", "未能", "无效", "超时", "不可用", "仅支持",
+                ))
+            with self._history_context_lock:
+                self._require_history_generation(generation)
+                self._set_atvp_status(kind, "failed" if failed else "done", message)
+        except _HistorySyncCancelled:
+            pass
         except Exception as exc:
-            self._set_atvp_status(kind, "failed", "操作失败：%s" % self._short_error(exc))
+            with self._history_context_lock:
+                if self._history_generation_active(generation):
+                    self._set_atvp_status(kind, "failed", "操作失败：%s" % self._short_error(exc))
         finally:
             with self._atvp_job_lock:
                 self._atvp_jobs.discard(kind)
-            self._refresh_current_category()
+            if self._history_generation_active(generation):
+                self._refresh_current_category()
 
     def _load_atvp_status(self):
         getter = getattr(self, "getCache", None)
@@ -3139,21 +3378,27 @@ class Spider(BaseSpider):
                 status.update({"state": "failed", "message": "上次任务被中断，请重新点击"})
                 self._atvp_status[kind] = status
 
-    def _set_atvp_status(self, kind, state, message):
+    def _set_atvp_status(self, kind, state, message, persist=True):
         with self._atvp_job_lock:
             self._atvp_status[kind] = {
                 "state": str(state or ""),
                 "message": str(message or ""),
                 "updated_at": int(time.time()),
             }
-            payload = {"version": 1, "statuses": dict(self._atvp_status)}
+        if not persist:
+            return
+        self._persist_atvp_status()
+
+    def _persist_atvp_status(self):
         setter = getattr(self, "setCache", None)
         if callable(setter):
-            try:
-                setter(self.ATVP_STATUS_CACHE_KEY, payload)
-            except Exception:
-                pass
-        self._set_follow_action_status(state, message, kind)
+            with self._atvp_status_persist_lock:
+                with self._atvp_job_lock:
+                    payload = {"version": 1, "statuses": dict(self._atvp_status)}
+                try:
+                    setter(self.ATVP_STATUS_CACHE_KEY, payload)
+                except Exception:
+                    pass
 
     def _refresh_current_category(self):
         return self._refresh_native_category()
@@ -3166,38 +3411,46 @@ class Spider(BaseSpider):
         if not message:
             return ""
         prefix = {"running": "进行中", "done": "已完成", "failed": "失败"}.get(status.get("state"), "状态")
-        return "%s · %s" % (prefix, message)
+        updated_at = self._positive_int(status.get("updated_at"), 0)
+        timestamp = time.strftime("%m-%d %H:%M", time.localtime(updated_at)) if updated_at else ""
+        return "%s · %s%s" % (prefix, message, (" · " + timestamp) if timestamp else "")
 
-    def _atvp_sync_history(self):
-        stage = "配置桥"
-        if not self._ensure_atvp_connection(force=True):
-            detail = ("：%s" % self._atvp_discovery_error) if self._atvp_discovery_error else ""
-            return json.dumps({"msg": "本插件仅支持通过 AList-TVBox 生成的 raw 插件订阅%s" % detail}, ensure_ascii=False)
+    def _atvp_sync_history(self, expected_generation=None):
+        with self._history_context_lock:
+            self._require_history_generation(expected_generation)
+            if not self._ensure_atvp_connection(force=True):
+                detail = ("：%s" % self._atvp_discovery_error) if self._atvp_discovery_error else ""
+                return json.dumps({
+                    "ok": False,
+                    "msg": "本插件仅支持通过 AList-TVBox 生成的 raw 插件订阅%s" % detail,
+                }, ensure_ascii=False)
         try:
-            stage = "本机History读取"
-            local_rows = self._capture_native_history()
-            stage = "云端History读取"
-            cloud_rows = self._atvp_fetch_history()
-            stage = "播放记录合并"
-            merged, uploads = self._merge_native_history(local_rows, cloud_rows)
-            if uploads:
-                stage = "云端History写入"
-                self._atvp_history_push(uploads)
-            stage = "本机History导入"
-            imported = self._import_native_history(merged)
-            self._cache_set("atvp-history-snapshot", merged)
-            stage = "追更进度回写"
-            progress_updates = self._reconcile_follow_histories(merged)
-            self._refresh_native_category()
+            with self._history_sync_lock:
+                result = self._sync_history_once(expected_generation=expected_generation)
+                with self._history_context_lock:
+                    self._require_history_generation(expected_generation)
+                    self._apply_history_sync_result("atvp-history-snapshot", result)
             return json.dumps({
-                "msg": "播放记录同步完成：配置桥正常，云端读写正常；本机 %s，云端 %s，上传 %s，导入 %s，追更进度 %s" % (
-                    len(local_rows), len(cloud_rows), len(uploads), imported, progress_updates,
-                )
+                "ok": not result["errors"],
+                "msg": self._history_sync_message(result),
+                "mode": result["mode"],
+                "local": result["local"],
+                "cloud": result["cloud"],
+                "uploaded": result["uploaded"],
+                "imported": result["imported"],
+                "progress": result["progress"],
             }, ensure_ascii=False)
+        except _HistorySyncCancelled:
+            raise
         except Exception as exc:
-            return json.dumps({"msg": "播放记录同步失败[%s]：%s" % (stage, self._short_error(exc))}, ensure_ascii=False)
+            return json.dumps({
+                "ok": False,
+                "msg": "播放记录同步失败：%s" % self._short_error(exc),
+            }, ensure_ascii=False)
 
     def _atvp_history_push(self, rows):
+        if not self._history_write_enabled():
+            raise RuntimeError("History 写入未启用：请同时配置用户名和密码")
         response = self._atvp_history_request("POST", json=self._history_upload_payload(rows))
         if response.status_code < 200 or response.status_code >= 300:
             raise RuntimeError(self._atvp_history_http_error(response, "写入"))
@@ -3225,13 +3478,18 @@ class Spider(BaseSpider):
             "verify": self.verify_tls,
         }
         request_kwargs.update(kwargs)
+        if method_name == "post":
+            if not self._history_write_enabled():
+                raise RuntimeError("History 写入未启用：请同时配置用户名和密码")
+            if not self._history_auth_token:
+                self._atvp_history_login(force=True)
         response = sender(
             self._atvp_endpoint("history"),
             **request_kwargs
         )
         if not self._atvp_history_needs_auth(response):
             return response
-        if not self._atvp_history_login():
+        if not self._atvp_history_login(force=True):
             return response
         return sender(
             self._atvp_endpoint("history"),
@@ -3247,10 +3505,13 @@ class Spider(BaseSpider):
         text = str(getattr(response, "text", "") or "")
         return "WebAuthenticationDetails" in text or "cannot be cast to class java.lang.Integer" in text
 
-    def _atvp_history_login(self):
-        if self._history_auth_token:
+    def _atvp_history_login(self, force=False):
+        if self._history_auth_token and not force:
             self._atvp_session.headers["Authorization"] = self._history_auth_token
             return True
+        if force:
+            self._history_auth_token = ""
+            self._atvp_session.headers.pop("Authorization", None)
         if not (self.history_username and self.history_password):
             return False
         response = self._atvp_session.post(
@@ -3723,7 +3984,10 @@ class Spider(BaseSpider):
         stage = "配置桥"
         if not self._ensure_atvp_connection(force=True):
             detail = ("：%s" % self._atvp_discovery_error) if self._atvp_discovery_error else ""
-            return json.dumps({"msg": "本插件仅支持通过 AList-TVBox 生成的 raw 插件订阅%s" % detail}, ensure_ascii=False)
+            return json.dumps({
+                "ok": False,
+                "msg": "本插件仅支持通过 AList-TVBox 生成的 raw 插件订阅%s" % detail,
+            }, ensure_ascii=False)
         try:
             stage = "本机History读取"
             try:
@@ -3736,12 +4000,16 @@ class Spider(BaseSpider):
             histories = self._atvp_fetch_history()
             self._cache_set("atvp-history-snapshot", histories)
             return json.dumps({
+                "ok": True,
                 "msg": "AList-TVBox 通讯正常：配置桥正常，地址和令牌已识别，%s，云端GET %s 条" % (
                     local_status, len(histories),
                 )
             }, ensure_ascii=False)
         except Exception as exc:
-            return json.dumps({"msg": "AList-TVBox 通讯失败[%s]：%s" % (stage, self._short_error(exc))}, ensure_ascii=False)
+            return json.dumps({
+                "ok": False,
+                "msg": "AList-TVBox 通讯失败[%s]：%s" % (stage, self._short_error(exc)),
+            }, ensure_ascii=False)
 
     def _atvp_endpoint(self, resource):
         if not self._alist_tvbox_plugin:
@@ -3827,42 +4095,43 @@ class Spider(BaseSpider):
     def _reconcile_follow_histories(self, histories):
         if not isinstance(histories, list) or not histories:
             return 0
-        items = dict(self._follow_memory.get("items") or {})
-        changed = 0
-        now = int(time.time())
-        for key, value in list(items.items()):
-            if not isinstance(value, dict):
-                continue
-            history = self._atvp_history_for_item(value, histories)
-            resume_fields = self._history_resume_fields(value, history)
-            if not resume_fields:
-                continue
-            episode = resume_fields["history_episode"]
-            resource_id = str(resume_fields.get("alist_vod_id") or "")
-            item = dict(value)
-            history_changed = (
-                str(item.get("history_episode") or "") != episode
-                or self._positive_int(item.get("history_position"), 0) != resume_fields["history_position"]
-                or self._positive_int(item.get("history_duration"), 0) != resume_fields["history_duration"]
-                or str(item.get("history_vod_name") or "") != resume_fields["history_vod_name"]
-                or (resource_id and str(item.get("alist_vod_id") or "") != resource_id)
-            )
-            if history_changed:
-                resume_fields["history_updated_at"] = now
-                item.update(resume_fields)
-            seen_changed = False
-            if self._history_is_complete(history):
-                seen = str(item.get("seen_episode") or "")
-                if self._episode_rank(episode) > self._episode_rank(seen):
-                    item["seen_episode"] = episode
-                    item["seen_source"] = "history"
-                    seen_changed = True
-            if history_changed or seen_changed:
-                items[key] = item
-                changed += 1
-        if changed:
-            self._save_follow_state(items)
-        return changed
+        with self._follow_enrich_lock:
+            items = dict(self._follow_memory.get("items") or {})
+            changed = 0
+            now = int(time.time())
+            for key, value in list(items.items()):
+                if not isinstance(value, dict):
+                    continue
+                history = self._atvp_history_for_item(value, histories)
+                resume_fields = self._history_resume_fields(value, history)
+                if not resume_fields:
+                    continue
+                episode = resume_fields["history_episode"]
+                resource_id = str(resume_fields.get("alist_vod_id") or "")
+                item = dict(value)
+                history_changed = (
+                    str(item.get("history_episode") or "") != episode
+                    or self._positive_int(item.get("history_position"), 0) != resume_fields["history_position"]
+                    or self._positive_int(item.get("history_duration"), 0) != resume_fields["history_duration"]
+                    or str(item.get("history_vod_name") or "") != resume_fields["history_vod_name"]
+                    or (resource_id and str(item.get("alist_vod_id") or "") != resource_id)
+                )
+                if history_changed:
+                    resume_fields["history_updated_at"] = now
+                    item.update(resume_fields)
+                seen_changed = False
+                if self._history_is_complete(history):
+                    seen = str(item.get("seen_episode") or "")
+                    if self._episode_rank(episode) > self._episode_rank(seen):
+                        item["seen_episode"] = episode
+                        item["seen_source"] = "history"
+                        seen_changed = True
+                if history_changed or seen_changed:
+                    items[key] = item
+                    changed += 1
+            if changed:
+                self._save_follow_state(items)
+            return changed
 
     def _append_atvp_progress(self, remark, history):
         progress = self._atvp_progress_text(history)
@@ -4018,7 +4287,7 @@ class Spider(BaseSpider):
         item = dict(item)
         item["_resume_verified"] = False
         try:
-            histories = self._atvp_history_snapshot(nonblocking=False)
+            histories = self._atvp_history_snapshot(nonblocking=True)
             history = self._atvp_history_for_item(item, histories)
             resume_fields = self._history_resume_fields(item, history)
             if resume_fields:
@@ -5460,7 +5729,12 @@ class Spider(BaseSpider):
 
         thread = threading.Thread(target=worker)
         thread.daemon = True
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            with self._cache_lock:
+                self._route_quality_saving = False
+            return False
         return True
 
     def _route_quality_record(self, play_id):
@@ -5914,7 +6188,11 @@ class Spider(BaseSpider):
 
             thread = threading.Thread(target=worker)
             thread.daemon = True
-            thread.start()
+            try:
+                thread.start()
+            except Exception:
+                with self._cache_lock:
+                    self._route_probe_jobs.discard(target)
 
     def _prepare_player_candidates(self, candidates):
         prepared = []
@@ -6993,7 +7271,6 @@ class Spider(BaseSpider):
         ]
         return {
             "follow_updates": [],
-            "follow_sync": [],
             "follow_manage": [self._filter("mode", "操作", (
                 ("查看追更", "view"),
                 ("标记当前集已看（需确认）", "seen"),
@@ -7204,7 +7481,12 @@ class Spider(BaseSpider):
 
         thread = threading.Thread(target=worker)
         thread.daemon = True
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            with self._cache_lock:
+                self._refreshing_cache_keys.discard(key)
+            return False
         return True
 
     def _json_response(self, response):
@@ -7489,7 +7771,12 @@ class Spider(BaseSpider):
 
         thread = threading.Thread(target=worker)
         thread.daemon = True
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            with self._cache_lock:
+                self._persistent_cache_saving = False
+            return False
         return True
 
     def _remember_failure(self, key, exc):
