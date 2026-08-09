@@ -13,13 +13,15 @@
 3. 在仓库地址中填写：
 
 ```text
-https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/spiders_v2.json
+https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/plugins/seedhub/spiders_v2.json
 ```
 
 4. 点击 **导入仓库**。
 5. 在插件列表确认出现 **SeedHub磁力与多网盘**，插件 ID 为 `seedhub`，版本为 `1`。
 6. 保持插件启用。EXT 默认留空；需要调整时填写合法 JSON。
 7. 刷新正在使用的 AList-TVBox 订阅，再由客户端重新加载订阅。
+
+该地址仍属于正式插件仓库，但索引只包含 SeedHub，不会刷新或重复导入仓库中的其他插件。需要一次性导入全部插件时才使用仓库根目录的 `spiders_v2.json`。
 
 不要把源码作为普通静态 Python 站点手工写入订阅。正确导入后，AList-TVBox 会生成：
 

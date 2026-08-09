@@ -12,6 +12,12 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/spiders_v2.j
 
 导入后启用需要的插件、填写其 EXT，再刷新插件和客户端订阅。
 
+只部署 SeedHub 时使用仓库内的单插件索引，避免刷新或重复导入无关插件：
+
+```text
+https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/plugins/seedhub/spiders_v2.json
+```
+
 ## 插件列表
 
 | 插件 | 版本 | 索引状态 | 说明 |
@@ -39,6 +45,7 @@ plugins/
     CHANGELOG.md                        # 插件更新记录
     STATUS.md                           # 发布和验证状态
     extend.example.json                 # 可选插件 EXT 示例
+    spiders_v2.json                     # 仅导入 SeedHub 的仓库索引
 ```
 
 仓库不复制官方项目中的旧索引、JAR、验证工具、测试缓存或第三方插件集合。
@@ -50,6 +57,7 @@ plugins/
 - 明文 raw Python 插件的 `file` 必须以 `.py` 结尾。
 - 只有通过兼容与安全检查的版本才设置 `valid: true`。
 - 每次更新同步维护对应插件的 `CHANGELOG.md` 和 `STATUS.md`。
+- 单插件部署优先使用对应 `plugins/<id>/spiders_v2.json`，避免整仓导入影响其他已配置插件。
 
 ## 安全边界
 
