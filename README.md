@@ -17,6 +17,7 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/spiders_v2.j
 | 插件 | 版本 | 索引状态 | 说明 |
 | --- | ---: | --- | --- |
 | 豆瓣 TMDB 追更助手 | 49 | 可导入 | [能力与配置](plugins/douban_tmdb_follow_single/README.md) |
+| SeedHub 磁力与多网盘 | 1 | 可导入 | [能力与配置](plugins/seedhub/README.md) |
 
 ## 精简结构
 
@@ -32,6 +33,12 @@ plugins/
     STATUS.md                          # 发布和验证状态
     extend.example.json                # 插件 EXT 示例
     filter.example.json                # 过滤器配置示例
+  seedhub/                             # SeedHub 插件文档与维护记录
+    README.md                           # 能力、链路与使用边界
+    DEPLOYMENT.md                       # 部署和人工客户端验证步骤
+    CHANGELOG.md                        # 插件更新记录
+    STATUS.md                           # 发布和验证状态
+    extend.example.json                 # 可选插件 EXT 示例
 ```
 
 仓库不复制官方项目中的旧索引、JAR、验证工具、测试缓存或第三方插件集合。

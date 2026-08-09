@@ -1,0 +1,11 @@
+{
+  "host": "https://sidhub.cc",
+  "hosts": [
+    "https://sidhub.cc",
+    "https://seeduck.cc",
+    "https://hubdog.cc"
+  ],
+  "timeout": 12,
+  "max_magnets": 24,
+  "max_pan_per_provider": 20
+}
