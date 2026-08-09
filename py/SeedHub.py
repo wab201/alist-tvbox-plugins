@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
-# //@name:SeedHub磁力与多网盘
-# //@id:seedhub
-# //@version:1
+"""
+//@name:SeedHub磁力与多网盘
+//@id:seedhub
+//@version:1
+"""
 
 import ast
 import base64
