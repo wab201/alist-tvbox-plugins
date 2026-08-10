@@ -9,7 +9,7 @@
 ## 从仓库导入
 
 1. 打开 AList-TVBox Web 管理界面。
-2. 进入 **订阅 -> 订阅源管理**。
+2. 进入插件管理。
 3. 在仓库地址中填写：
 
 ```text
@@ -22,6 +22,8 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/plugins/seed
 7. 刷新正在使用的 AList-TVBox 订阅，再由客户端重新加载订阅。
 
 该地址仍属于正式插件仓库，但索引只包含 SeedHub，不会刷新或重复导入仓库中的其他插件。需要一次性导入全部插件时才使用仓库根目录的 `spiders_v2.json`。
+
+以后 SeedHub 发布新版本时保持插件 `id=seedhub`，同时递增源码和仓库索引中的版本号，再次导入同一仓库地址即可刷新现有插件。正式更新不删除旧插件，也不改用源码直链。
 
 不要把源码作为普通静态 Python 站点手工写入订阅。正确导入后，AList-TVBox 会生成：
 
