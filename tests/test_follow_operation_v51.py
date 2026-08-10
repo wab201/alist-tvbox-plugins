@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import re
 import sys
 import time
 import types
@@ -39,6 +40,18 @@ class FollowOperationV51Test(unittest.TestCase):
 
     def tearDown(self):
         self.spider.destroy()
+
+    def test_plugin_metadata_is_parseable_by_alist_tvbox(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        expected = {
+            "name": "豆瓣TMDB追更助手（AList-TVBox专用）",
+            "id": "douban_tmdb_follow_single",
+            "version": "51",
+        }
+        for field, value in expected.items():
+            match = re.search(r"(?m)^\s*//@%s:(.+?)\s*$" % field, source)
+            self.assertIsNotNone(match, field)
+            self.assertEqual(match.group(1), value)
 
     def _wait_follow_jobs(self, timeout=2):
         deadline = time.time() + timeout

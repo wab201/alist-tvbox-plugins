@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-# //@name:豆瓣TMDB追更助手（AList-TVBox专用）
-# //@id:douban_tmdb_follow_single
-# //@version:51
+"""
+//@name:豆瓣TMDB追更助手（AList-TVBox专用）
+//@id:douban_tmdb_follow_single
+//@version:51
 
-"""AList-TVBox raw Python plugin for Douban/TMDB browsing and follow-up playback.
+AList-TVBox raw Python plugin for Douban/TMDB browsing and follow-up playback.
 
 Deploy this source through AList-TVBox plugin management and load the generated
 subscription in FongMi/TvBox. The plugin Extend/data must contain
