@@ -1,18 +1,20 @@
 # -*- coding: utf-8 -*-
 # //@name:豆瓣TMDB追更助手（AList-TVBox专用）
 # //@id:douban_tmdb_follow_single
-# //@version:49
+# //@version:51
 
 """AList-TVBox raw Python plugin for Douban/TMDB browsing and follow-up playback.
 
 Deploy this source through AList-TVBox plugin management and load the generated
 subscription in FongMi/TvBox. The plugin Extend/data must contain
-``atvp_plugin_mode=alist-tvbox-raw``. Direct FongMi .py site deployment is not
-supported by this public build. The same source also exports ``Filter`` for
-AList-TVBox detail/player filter reuse.
+``atvp_plugin_mode=alist-tvbox-raw`` for follow, History, and cloud-resource
+features. With an empty ext the same source remains a direct FongMi metadata
+site with category/search/detail and direct-URL player compatibility. The same
+source also exports ``Filter`` for AList-TVBox detail/player filter reuse.
 """
 
 import base64
+import heapq
 import hashlib
 import http.client
 import ipaddress
@@ -950,6 +952,7 @@ class Spider(BaseSpider):
     FOLLOW_EXECUTE_PREFIX = "tmdb-follow:execute:"
     FOLLOW_CONFIRM_CANCEL_PREFIX = "tmdb-follow:confirm-cancel:"
     FOLLOW_STATUS_ACK_ACTION = "tmdb-follow:status-ack"
+    FOLLOW_CANDIDATE_ADD_PREFIX = "follow-candidate:add:"
     GLOBAL_SEARCH_PREFIX = "fongmi-search:"
     SERIES_MODE_PREFIX = "series-mode:"
     SERIES_CARD_PREFIX = "series-card:"
@@ -964,7 +967,7 @@ class Spider(BaseSpider):
     FOLLOWPLAY_PLAY_BUDGET = 60
     ROUTE_PROBE_MAX_BYTES = 4096
     ERROR_PREFIX = "douban-error:"
-    FILTER_CACHE_KEY = "douban_meta_wish_filters_v11_inline_mode"
+    FILTER_CACHE_KEY = "douban_meta_wish_filters_v12_follow_candidates"
     FOLLOW_CACHE_KEY = "douban_tmdb_follow_state_v1"
     SERIES_MODE_CACHE_KEY = "douban_tmdb_series_mode_v1"
     FOLLOW_STATE_VERSION = 2
@@ -1004,6 +1007,13 @@ class Spider(BaseSpider):
     RESOURCE_HOT_GROUPS_PER_RESULT = 1
     RESOURCE_HOT_JOB_LIMIT = 2
     RESOURCE_HOT_JOB_QUEUE_LIMIT = 8
+    RESOURCE_PLAY_URL_MAX_LENGTH = 1024 * 1024
+    RESOURCE_MERGED_PLAY_URL_BUDGET = RESOURCE_PLAY_URL_MAX_LENGTH // 2 - 8192
+    RESOURCE_SOURCE_LABEL_MAX_LENGTH = 16 * 1024
+    RESOURCE_ID_MAX_LENGTH = 512
+    RESOURCE_GROUP_EPISODE_LIMIT = 256
+    RESOURCE_RECORD_LIMIT = 512
+    RESOURCE_COMPLETION_LIMIT = 512
     ROUTE_QUALITY_CACHE_KEY = "douban_tmdb_route_quality_v1"
     ROUTE_QUALITY_VERSION = 1
     ROUTE_QUALITY_LIMIT = 200
@@ -1022,6 +1032,7 @@ class Spider(BaseSpider):
 
     CATEGORIES = (
         ("follow_updates", "追更动态"),
+        ("follow_candidates", "追更确认"),
         ("follow_manage", "追更管理"),
         ("hotmovie", "热门电影"),
         ("hottv", "热门剧集"),
@@ -1425,13 +1436,13 @@ class Spider(BaseSpider):
             data = self._get_json(self.API + "/subject_collection/subject_real_time_hotest/items", params=params, ttl=self.list_cache_ttl)
             items = self._parse_collection_items(data)
             if items:
-                return {"list": items}
+                return self._with_navigation_search({"list": items})
             raise RuntimeError("实时热门列表为空")
         except Exception as primary:
             try:
                 fallback = self._category_media("movie", 1, {"sort": "U"})
                 if fallback.get("list"):
-                    return {"list": fallback["list"]}
+                    return self._with_navigation_search({"list": fallback["list"]})
             except Exception:
                 pass
             return {"list": [self._error_card("首页载入失败", primary)]}
@@ -1440,49 +1451,52 @@ class Spider(BaseSpider):
         page = self._positive_int(pg, 1)
         ext = self._parse_extend(extend)
         try:
-            if tid in ("follow_updates", "follow_sync", "follow_manage"):
+            if tid in ("follow_updates", "follow_candidates", "follow_sync", "follow_manage"):
                 self._load_follow_state(force=True)
             if tid == "follow_updates":
                 return self._category_follow_updates(page)
+            if tid == "follow_candidates":
+                return self._category_follow_candidates(page)
             if tid == "follow_sync":
                 return self._category_follow_sync(page)
             if tid == "follow_manage":
                 return self._category_follow_manage(page, ext)
             if tid == "tmdb_trending":
-                return self._with_series_mode_cards(self._category_tmdb_trending(page, ext), page)
+                return self._with_navigation_search(self._category_tmdb_trending(page, ext))
             if tid == "tmdb_movie":
-                return self._category_tmdb_discover("movie", page, ext)
+                return self._with_navigation_search(self._category_tmdb_discover("movie", page, ext))
             if tid == "tmdb_tv":
-                return self._with_series_mode_cards(self._category_tmdb_discover("tv", page, ext), page)
+                return self._with_navigation_search(self._category_tmdb_discover("tv", page, ext))
             if tid == "tmdb_anime":
-                result = self._category_tmdb_anime(page, ext)
-                return self._with_series_mode_cards(result, page) if self._value(ext, "kind", "tv") == "tv" else result
+                return self._with_navigation_search(self._category_tmdb_anime(page, ext))
             if tid == "hotmovie":
-                return self._category_media("movie", page, ext)
+                return self._with_navigation_search(self._category_media("movie", page, ext))
             if tid == "hottv":
-                return self._with_series_mode_cards(self._category_media("tv", page, ext), page)
+                return self._with_navigation_search(self._category_media("tv", page, ext))
             if tid == "hotzy":
-                return self._with_series_mode_cards(self._category_media("show", page, ext), page)
+                return self._with_navigation_search(self._category_media("show", page, ext))
             if tid == "movielist":
-                return self._category_movie_list(page, self._value(ext, "1", "movie_real_time_hotest"), ext)
+                return self._with_navigation_search(
+                    self._category_movie_list(page, self._value(ext, "1", "movie_real_time_hotest"), ext)
+                )
             if tid == "tvlist":
-                return self._with_series_mode_cards(
-                    self._category_collection(page, self._value(ext, "1", "tv_real_time_hotest"), ext), page,
+                return self._with_navigation_search(
+                    self._category_collection(page, self._value(ext, "1", "tv_real_time_hotest"), ext)
                 )
             if tid == "moviefilter":
-                return self._category_recommend("movie", page, ext)
+                return self._with_navigation_search(self._category_recommend("movie", page, ext))
             if tid == "tvfilter":
-                return self._with_series_mode_cards(self._category_recommend("tv", page, ext), page)
+                return self._with_navigation_search(self._category_recommend("tv", page, ext))
             if tid == "anime":
                 region_key = self._value(ext, "region", "cn")
                 result = self._category_anime(self.ANIME_REGIONS.get(region_key, "中国大陆"), page, ext)
-                return self._with_series_mode_cards(result, page) if self._value(ext, "kind", "tv") == "tv" else result
+                return self._with_navigation_search(result)
             if tid in self.LEGACY_ANIME_REGIONS:
-                return self._with_series_mode_cards(
-                    self._category_anime(self.LEGACY_ANIME_REGIONS[tid], page, ext), page,
+                return self._with_navigation_search(
+                    self._category_anime(self.LEGACY_ANIME_REGIONS[tid], page, ext)
                 )
             if tid == "wishlist":
-                return self._category_wishlist(page)
+                return self._with_navigation_search(self._category_wishlist(page))
             return self._page_result([], page, page, 0, 20)
         except Exception as exc:
             return self._page_result([self._error_card("分类载入失败", exc)], page, page, 1, 20)
@@ -1528,16 +1542,45 @@ class Spider(BaseSpider):
             return {"list": [self._error_card("详情载入失败", exc, subject_id)]}
 
     def searchContent(self, key, quick=False, pg="1"):
-        return {"list": []}
+        page = self._positive_int(pg, 1)
+        query = str(key or "").strip()[:128]
+        if not query:
+            return self._page_result([], page, page, 0, 20)
+        try:
+            limit = 20
+            data = self._get_json(
+                self.API + "/search",
+                params={"q": query, "start": (page - 1) * limit, "count": limit},
+                ttl=self.list_cache_ttl,
+            )
+            subjects = data.get("subjects") if isinstance(data.get("subjects"), dict) else {}
+            cards = []
+            for row in subjects.get("items") or []:
+                if not isinstance(row, dict):
+                    continue
+                target = row.get("target") if isinstance(row.get("target"), dict) else row
+                subject_id = self._subject_id(target.get("id") or row.get("target_id"))
+                title = str(target.get("title") or row.get("title") or "").strip()
+                if not subject_id or not title:
+                    continue
+                card = self._collection_card(target, {})
+                card["vod_id"] = subject_id
+                card["vod_name"] = title
+                cards.append(card)
+            total = self._positive_int(subjects.get("total"), 0)
+            pagecount = int(math.ceil(float(total) / limit)) if total else page + (1 if len(cards) >= limit else 0)
+            return self._page_result(cards, page, max(page, pagecount), total or len(cards), limit)
+        except Exception as exc:
+            return self._page_result([self._error_card("搜索失败", exc)], page, page, 1, 20)
 
     def playerContent(self, flag, id, vipFlags=None):
         if str(id or "").startswith(self.SELECT_PROMPT_ID):
-            return {"parse": 0, "jx": 0, "url": "", "header": {}, "msg": "请选择具体集数"}
+            return {"parse": 0, "jx": 0, "playUrl": "", "url": "", "header": {}, "msg": "请选择具体集数"}
         parsed = self._parse_followplay(id)
         if not parsed:
             if str(id or "").startswith(FOLLOWPLAY_PREFIXES):
-                return {"parse": 0, "jx": 0, "url": "", "header": {}, "msg": "播放参数无效或已损坏"}
-            return {"parse": 0, "jx": 0, "url": str(id or ""), "header": {}}
+                return {"parse": 0, "jx": 0, "playUrl": "", "url": "", "header": {}, "msg": "播放参数无效或已损坏"}
+            return {"parse": 0, "jx": 0, "playUrl": "", "url": str(id or ""), "header": {}}
         candidates = [{
             "url": str(parsed.get("url") or ""),
             "resourceId": str(parsed.get("resourceId") or ""),
@@ -1622,6 +1665,7 @@ class Spider(BaseSpider):
                     quality_probe = checked
                 output.setdefault("parse", 0)
                 output.setdefault("jx", 0)
+                output.setdefault("playUrl", "")
                 output.setdefault("header", {})
                 output = self._sanitize_route_output(output)
                 effective = dict(parsed)
@@ -1647,6 +1691,7 @@ class Spider(BaseSpider):
         return {
             "parse": 0,
             "jx": 0,
+            "playUrl": "",
             "url": "",
             "header": {},
             "msg": "当前集所有播放源均不可达，已尝试 %s：%s" % (attempt_text, detail),
@@ -1683,10 +1728,14 @@ class Spider(BaseSpider):
             or value.startswith(self.FOLLOW_SEEN_PREFIX)
             or value.startswith(self.FOLLOW_REMOVE_PREFIX)
             or value.startswith(self.FOLLOW_EXECUTE_PREFIX)
+            or value.startswith(self.FOLLOW_CANDIDATE_ADD_PREFIX)
         ):
             self._load_follow_state(force=True)
         if value == self.KEEP_FOLLOW_ACTION:
-            return self._start_atvp_job("keep")
+            message = "本地收藏已改为追更待选，请进入追更确认操作"
+            self._set_follow_action_status("info", message, "candidate")
+            self._refresh_follow_categories()
+            return json.dumps({"msg": message}, ensure_ascii=False)
         if value == self.ATVP_PROBE_ACTION:
             return self._start_atvp_job("probe")
         if value == self.ATVP_SYNC_ACTION:
@@ -1697,12 +1746,13 @@ class Spider(BaseSpider):
             return self._set_series_action_mode(value[len(self.SERIES_MODE_PREFIX):])
         if value.startswith(self.SERIES_CARD_PREFIX):
             return self._run_series_card_action(value[len(self.SERIES_CARD_PREFIX):])
-        if value.startswith(self.DOUBAN_FOLLOW_ADD_PREFIX):
-            result = self._follow_action_from_douban(value[len(self.DOUBAN_FOLLOW_ADD_PREFIX):])
-            return self._remember_follow_action_result(result, "add")
-        if value.startswith(self.FOLLOW_ADD_PREFIX):
-            result = self._follow_action("add", value[len(self.FOLLOW_ADD_PREFIX):])
-            return self._remember_follow_action_result(result, "add")
+        if value.startswith((self.DOUBAN_FOLLOW_ADD_PREFIX, self.FOLLOW_ADD_PREFIX)):
+            message = "旧版直接追更入口已停用，请从收藏或播放记录进入追更确认"
+            self._set_follow_action_status("info", message, "candidate")
+            self._refresh_follow_categories()
+            return json.dumps({"msg": message}, ensure_ascii=False)
+        if value.startswith(self.FOLLOW_CANDIDATE_ADD_PREFIX):
+            return self._start_follow_candidate_add(value[len(self.FOLLOW_CANDIDATE_ADD_PREFIX):])
         if value.startswith(self.FOLLOW_SEEN_PREFIX):
             return self._request_follow_confirmation("seen", value[len(self.FOLLOW_SEEN_PREFIX):])
         if value.startswith(self.FOLLOW_REMOVE_PREFIX):
@@ -1821,11 +1871,277 @@ class Spider(BaseSpider):
             }
             if media_type == "tv":
                 tracked = str(tmdb_id) in followed
-                card["action"] = self._series_card_action("tmdb", tmdb_id, title)
-                state = "已追更" if tracked else "按当前模式执行"
+                state = "已追更" if tracked else "全局搜索"
                 card["vod_remarks"] = state + ((" · " + remark) if remark else "")
             result.append(card)
         return result
+
+    def _category_follow_candidates(self, page):
+        candidates, source_cards = self._native_follow_candidates()
+        pending = [candidate for candidate in candidates if not self._candidate_is_followed(candidate)]
+        start = (page - 1) * self.follow_page_size
+        selected = pending[start:start + self.follow_page_size]
+        cards = [self._follow_candidate_card(candidate) for candidate in selected]
+        if page == 1:
+            cards = self._follow_state_cards() + source_cards + cards
+        if not pending and page == 1:
+            cards.append({
+                "vod_id": self.ERROR_PREFIX + quote("当前没有待确认追更", safe=""),
+                "vod_name": "暂无追更待选",
+                "vod_pic": "",
+                "vod_remarks": "本机收藏和播放记录中没有未追更剧集",
+            })
+        pagecount = max(1, int(math.ceil(float(len(pending)) / self.follow_page_size)))
+        return self._page_result(cards, page, pagecount, len(pending), self.follow_page_size)
+
+    def _native_follow_candidates(self):
+        merged = {}
+        status_cards = []
+        try:
+            keeps = self._native_keep_export_java(self.keep_follow_scan_limit)
+            if keeps is None:
+                raise RuntimeError("当前运行时未提供FongMi收藏读取桥")
+            for row in self._recent_follow_candidate_rows(keeps):
+                self._merge_follow_candidate(merged, row, "keep")
+        except Exception as exc:
+            status_cards.append(self._follow_candidate_source_card("收藏读取失败", exc))
+        try:
+            exported = self._native_history_export_java(self.keep_follow_scan_limit)
+            if exported is None:
+                raise RuntimeError("当前运行时未提供FongMi播放记录读取桥")
+            for row in self._recent_follow_candidate_rows(exported.get("rows")):
+                self._merge_follow_candidate(merged, row, "history")
+        except Exception as exc:
+            status_cards.append(self._follow_candidate_source_card("播放记录读取失败", exc))
+        candidates = list(merged.values())
+        candidates.sort(key=lambda row: (
+            self._positive_int(row.get("create_time"), 0),
+            str(row.get("title") or ""),
+        ), reverse=True)
+        return candidates[:self.keep_follow_scan_limit * 2], status_cards
+
+    def _recent_follow_candidate_rows(self, rows):
+        return heapq.nlargest(
+            self.keep_follow_scan_limit,
+            (row for row in (rows or []) if isinstance(row, dict)),
+            key=lambda row: self._positive_int(row.get("create_time") or row.get("createTime"), 0),
+        )
+
+    def _merge_follow_candidate(self, merged, row, source):
+        if not isinstance(row, dict):
+            return
+        raw_title = str(row.get("title") or row.get("vodName") or "").strip()[:256]
+        title, year, explicit_series = self._keep_search_profile(raw_title)
+        title = str(title or raw_title).strip()[:256]
+        title_identity = self._normalize_media_title(title)
+        if not title_identity:
+            return
+        identity = "%s|%s" % (title_identity, str(year or "")[:4])
+        candidate = merged.setdefault(identity, {
+            "title": title,
+            "match_title": raw_title,
+            "pic": "",
+            "create_time": 0,
+            "sources": [],
+            "keep_keys": [],
+            "history_keys": [],
+            "site_names": [],
+            "history_remark": "",
+        })
+        if explicit_series or not candidate.get("match_title"):
+            candidate["match_title"] = raw_title
+        pic = str(row.get("pic") or row.get("vodPic") or "").strip()[:1024]
+        if pic and not candidate.get("pic"):
+            candidate["pic"] = pic
+        created = self._positive_int(row.get("create_time") or row.get("createTime"), 0)
+        candidate["create_time"] = max(self._positive_int(candidate.get("create_time"), 0), created)
+        source_label = "收藏" if source == "keep" else "播放记录"
+        if source_label not in candidate["sources"]:
+            candidate["sources"].append(source_label)
+        source_key = str(row.get("key") or "").strip()[:256]
+        key_name = "keep_keys" if source == "keep" else "history_keys"
+        if source_key and source_key not in candidate[key_name] and len(candidate[key_name]) < 3:
+            candidate[key_name].append(source_key)
+        site_name = str(row.get("site_name") or row.get("siteName") or "").strip()[:128]
+        if site_name and site_name not in candidate["site_names"] and len(candidate["site_names"]) < 4:
+            candidate["site_names"].append(site_name)
+        if source == "history" and not candidate.get("history_remark"):
+            candidate["history_remark"] = str(row.get("vodRemarks") or "").strip()[:256]
+        if year and not candidate.get("year"):
+            candidate["year"] = year
+
+    def _candidate_is_followed(self, candidate):
+        keep_keys = set(str(value) for value in candidate.get("keep_keys") or [] if value)
+        history_keys = set(str(value) for value in candidate.get("history_keys") or [] if value)
+        candidate_title = self._normalize_media_title(candidate.get("title"))
+        candidate_year = str(candidate.get("year") or "")[:4]
+        for item in (self._follow_memory.get("items") or {}).values():
+            if not isinstance(item, dict):
+                continue
+            if keep_keys.intersection(str(value) for value in item.get("keep_keys") or [] if value):
+                return True
+            if history_keys.intersection(str(value) for value in item.get("history_keys") or [] if value):
+                return True
+            for alias in self._follow_title_alias_values(item):
+                clean_alias = self._keep_search_profile(alias)[0]
+                if candidate_title and candidate_title == self._normalize_media_title(clean_alias):
+                    item_year = str(
+                        item.get("year") or item.get("first_air_date") or item.get("release_date") or ""
+                    )[:4]
+                    if candidate_year and item_year and candidate_year != item_year:
+                        continue
+                    return True
+        return False
+
+    def _follow_candidate_card(self, candidate):
+        action = self.FOLLOW_CANDIDATE_ADD_PREFIX + self._encode_follow_candidate(candidate)
+        sources = " + ".join(candidate.get("sources") or ["本机记录"])
+        year = str(candidate.get("year") or "")[:4]
+        remark = " · ".join(value for value in ("追更待选", year, sources) if value)
+        history_remark = str(candidate.get("history_remark") or "").strip()
+        if history_remark:
+            remark += " · " + history_remark
+        return {
+            "vod_id": action,
+            "vod_name": str(candidate.get("title") or "待确认剧集"),
+            "vod_pic": str(candidate.get("pic") or ""),
+            "vod_remarks": remark,
+            "action": action,
+        }
+
+    def _follow_candidate_source_card(self, title, exc):
+        message = "%s：%s" % (title, self._short_error(exc))
+        return {
+            "vod_id": self.ERROR_PREFIX + quote(message, safe=""),
+            "vod_name": title,
+            "vod_pic": "",
+            "vod_remarks": message,
+        }
+
+    @staticmethod
+    def _encode_follow_candidate(candidate):
+        payload = {
+            "title": str(candidate.get("title") or "")[:256],
+            "match_title": str(candidate.get("match_title") or candidate.get("title") or "")[:256],
+            "pic": str(candidate.get("pic") or "")[:1024],
+            "sources": list(candidate.get("sources") or [])[:2],
+            "keep_keys": [str(value)[:256] for value in (candidate.get("keep_keys") or [])[:3]],
+            "history_keys": [str(value)[:256] for value in (candidate.get("history_keys") or [])[:3]],
+            "site_names": [str(value)[:128] for value in (candidate.get("site_names") or [])[:4]],
+            "year": str(candidate.get("year") or "")[:4],
+        }
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _decode_follow_candidate(value):
+        try:
+            encoded = str(value or "")
+            if not encoded or len(encoded) > 8192:
+                return None
+            raw = encoded + "=" * ((4 - len(encoded) % 4) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(raw.encode("ascii")).decode("utf-8"))
+            if not isinstance(payload, dict) or not str(payload.get("title") or "").strip():
+                return None
+            return payload
+        except Exception:
+            return None
+
+    def _start_follow_candidate_add(self, payload):
+        candidate = self._decode_follow_candidate(payload)
+        if not candidate:
+            result = json.dumps({"msg": "追更待选参数无效"}, ensure_ascii=False)
+            return self._remember_follow_action_result(result, "candidate")
+        title = str(candidate.get("title") or "").strip()
+        identity = "|".join((
+            self._normalize_media_title(title),
+            str(candidate.get("year") or "")[:4],
+            self._normalize_media_title(candidate.get("match_title")),
+        ))
+        with self._cache_lock:
+            generation = self._cache_generation
+        job_key = "candidate:%s:%s" % (
+            generation, hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16],
+        )
+        with self._follow_enrich_lock:
+            if job_key in self._follow_enrich_jobs:
+                return json.dumps({"msg": "正在确认追更：" + title}, ensure_ascii=False)
+            self._follow_enrich_jobs.add(job_key)
+        self._set_follow_action_status("running", "正在确认追更：" + title, "candidate", title)
+        self._refresh_follow_categories()
+
+        def worker():
+            result = None
+            try:
+                item, reason = self._resolve_follow_candidate(candidate)
+                if not isinstance(item, dict):
+                    labels = {
+                        "empty_title": "标题为空",
+                        "no_confident_tv": "未找到可信剧集",
+                        "ambiguous_tv": "存在多个同名剧集",
+                        "movie_conflict": "匹配结果更可能是电影",
+                    }
+                    raise RuntimeError(labels.get(str(reason or ""), str(reason or "无法确认剧集")))
+                key = str(self._positive_int(item.get("tmdb_id"), 0))
+                if not key or key == "0":
+                    raise RuntimeError("TMDB剧集编号无效")
+                with self._history_context_lock:
+                    self._require_history_generation(generation)
+                    with self._follow_enrich_lock:
+                        items = dict(self._follow_memory.get("items") or {})
+                        previous = items.get(key)
+                        output = dict(previous) if isinstance(previous, dict) else dict(item)
+                        for field in ("keep_keys", "history_keys", "site_names"):
+                            values = list(output.get(field) or [])
+                            for value in candidate.get(field) or []:
+                                text = str(value or "").strip()
+                                if text and text not in values:
+                                    values.append(text)
+                            if values:
+                                output[field] = values
+                        output.update({
+                            "follow_source": output.get("follow_source") or "fongmi_candidate",
+                            "candidate_last_confirmed": int(time.time()),
+                        })
+                        items[key] = output
+                        self._save_follow_state(items)
+                    message = ("已在追更管理：" if isinstance(previous, dict) else "已加入追更：") + str(output.get("title") or title)
+                    result = json.dumps({"msg": message}, ensure_ascii=False)
+                    self._remember_follow_action_result(result, "candidate", title)
+            except _HistorySyncCancelled:
+                result = None
+            except Exception as exc:
+                result = json.dumps({"msg": "确认追更失败：%s" % self._short_error(exc)}, ensure_ascii=False)
+                with self._history_context_lock:
+                    if self._history_generation_active(generation):
+                        self._remember_follow_action_result(result, "candidate", title)
+            finally:
+                with self._follow_enrich_lock:
+                    self._follow_enrich_jobs.discard(job_key)
+
+        thread = threading.Thread(target=worker)
+        thread.daemon = True
+        try:
+            thread.start()
+        except Exception as exc:
+            with self._follow_enrich_lock:
+                self._follow_enrich_jobs.discard(job_key)
+            result = json.dumps({"msg": "确认追更启动失败：%s" % self._short_error(exc)}, ensure_ascii=False)
+            return self._remember_follow_action_result(result, "candidate", title)
+        return json.dumps({"msg": "已开始确认追更：" + title}, ensure_ascii=False)
+
+    def _resolve_follow_candidate(self, candidate):
+        probe = {
+            "title": str(candidate.get("match_title") or candidate.get("title") or ""),
+            "pic": str(candidate.get("pic") or ""),
+        }
+        item, reason = self._resolve_keep_follow_item(probe)
+        if isinstance(item, dict):
+            item = dict(item)
+            item["follow_source"] = "fongmi_candidate"
+            if not item.get("pic"):
+                item["pic"] = probe["pic"]
+        return item, reason
 
     def _category_follow_manage(self, page, ext):
         mode = self._value(ext, "mode", "view")
@@ -1949,7 +2265,6 @@ class Spider(BaseSpider):
         ready = bool(self.atvp_api and self.atvp_token and self._atvp_session is not None)
         probe_remark = self._atvp_status_remark("probe")
         sync_remark = self._atvp_status_remark("sync")
-        keep_remark = self._atvp_status_remark("keep")
         mode = self._history_sync_mode_label()
         sync_card = {
             "vod_id": self.ATVP_SYNC_ACTION,
@@ -1961,14 +2276,7 @@ class Spider(BaseSpider):
             ),
             "action": self.ATVP_SYNC_ACTION,
         }
-        keep_card = {
-            "vod_id": self.KEEP_FOLLOW_ACTION,
-            "vod_name": "本地收藏自动追更",
-            "vod_pic": "",
-            "vod_remarks": keep_remark or "读取FongMi本地收藏，严格匹配剧集后加入追更",
-            "action": self.KEEP_FOLLOW_ACTION,
-        }
-        return [sync_card, self._atvp_probe_card(probe_remark), keep_card]
+        return [sync_card, self._atvp_probe_card(probe_remark)]
 
     def _history_alert_cards(self):
         status = self._atvp_status.get("sync") if isinstance(self._atvp_status, dict) else None
@@ -2087,11 +2395,20 @@ class Spider(BaseSpider):
         pending = value.get("pending") if isinstance(value, dict) else {}
         last = dict(last) if isinstance(last, dict) else {}
         pending = dict(pending) if isinstance(pending, dict) else {}
+        interrupted = last.get("state") == "running"
+        if interrupted:
+            last.update({
+                "state": "failed",
+                "message": "上次确认追更被中断，请重新操作",
+                "updated_at": int(time.time()),
+            })
         requested_at = self._positive_int(pending.get("requested_at"), 0)
         if requested_at <= 0 or int(time.time()) - requested_at > self.FOLLOW_CONFIRM_TTL:
             pending = {}
         with self._follow_action_state_lock:
             self._follow_action_state = {"version": 1, "last": last, "pending": pending}
+        if interrupted:
+            self._persist_follow_action_state()
 
     def _persist_follow_action_state(self):
         setter = getattr(self, "setCache", None)
@@ -2446,8 +2763,11 @@ class Spider(BaseSpider):
     def _schedule_active_detail_refresh(self, item):
         thread = threading.Thread(target=self._refresh_active_detail, args=(dict(item or {}),))
         thread.daemon = True
-        thread.start()
-        return True
+        try:
+            thread.start()
+            return True
+        except Exception:
+            return False
 
     def _refresh_follow_categories(self):
         direct = self._queue_instantiated_follow_refresh()
@@ -2459,7 +2779,10 @@ class Spider(BaseSpider):
             generation = self._follow_refresh_generation
         thread = threading.Thread(target=self._refresh_follow_categories_worker, args=(generation,))
         thread.daemon = True
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            return False
         print("[follow-refresh] direct=false fallback=scheduled")
         return True
 
@@ -2549,7 +2872,7 @@ class Spider(BaseSpider):
 
     @staticmethod
     def _refresh_instantiated_follow_fragments(activity):
-        targets = {"follow_updates", "follow_sync", "follow_manage"}
+        targets = {"follow_updates", "follow_candidates", "follow_sync", "follow_manage"}
         try:
             if hasattr(activity, "isFinishing") and activity.isFinishing():
                 return 0
@@ -2651,7 +2974,7 @@ class Spider(BaseSpider):
                 return False
             current = result.getTypes().get(pager.getCurrentItem())
             type_id = str(current.getTypeId() or "") if current is not None else ""
-            if type_id not in ("follow_updates", "follow_sync", "follow_manage"):
+            if type_id not in ("follow_updates", "follow_candidates", "follow_sync", "follow_manage"):
                 return False
             return self._refresh_native_category()
         except Exception:
@@ -2900,9 +3223,11 @@ class Spider(BaseSpider):
     def _save_follow_state(self, items):
         state = {"version": self.FOLLOW_STATE_VERSION, "updated_at": int(time.time()), "items": items}
         with self._follow_enrich_lock:
+            if not self._persist_follow_state(state):
+                raise RuntimeError("追更状态未能持久保存")
             self._follow_memory = state
             self._follow_state_loaded = True
-            self._persist_follow_state(state)
+        return True
 
     def _refresh_follow_item(self, item):
         tmdb_id = self._positive_int(item.get("tmdb_id"), 0)
@@ -3295,10 +3620,14 @@ class Spider(BaseSpider):
         }
 
     def _start_atvp_job(self, kind):
+        if kind not in ("probe", "sync"):
+            message = "收藏和播放记录请在追更确认中选择，确认后才会加入追更"
+            self._set_follow_action_status("info", message, "candidate")
+            self._refresh_follow_categories()
+            return json.dumps({"msg": message}, ensure_ascii=False)
         labels = {
             "probe": "通讯检测",
             "sync": "播放记录同步",
-            "keep": "本地收藏自动追更",
         }
         label = labels.get(kind, "后台任务")
         with self._cache_lock:
@@ -3334,10 +3663,6 @@ class Spider(BaseSpider):
                 with self._history_context_lock:
                     self._require_history_generation(generation)
                     raw = self._atvp_probe_history()
-            elif kind == "keep":
-                with self._history_context_lock:
-                    self._require_history_generation(generation)
-                    raw = self._sync_native_keeps_to_follow()
             else:
                 raw = self._atvp_sync_history(expected_generation=generation)
             result = json.loads(raw) if isinstance(raw, str) else raw
@@ -3594,7 +3919,7 @@ class Spider(BaseSpider):
             "rows": [row for row in rows if isinstance(row, dict) and row.get("key")],
         }
 
-    def _native_history_export_java(self):
+    def _native_history_export_java(self, limit=None):
         """Read FongMi's active VOD config and History through Chaquopy when available."""
         try:
             from java import jclass
@@ -3610,11 +3935,17 @@ class Spider(BaseSpider):
         # Config.vod().id can briefly lag behind the active runtime config.
         rows = history_cls.get()
         values = []
+        row_limit = max(0, self._int_value(limit, 0))
         if hasattr(rows, "size") and hasattr(rows, "get"):
-            source_rows = (rows.get(index) for index in range(int(rows.size())))
+            count = int(rows.size())
+            if row_limit:
+                count = min(count, row_limit)
+            source_rows = (rows.get(index) for index in range(count))
         else:
             source_rows = rows
-        for row in source_rows:
+        for index, row in enumerate(source_rows):
+            if row_limit and index >= row_limit:
+                break
             if isinstance(row, dict):
                 value = row
             else:
@@ -3687,7 +4018,7 @@ class Spider(BaseSpider):
         return imported
 
     @staticmethod
-    def _native_keep_export_java():
+    def _native_keep_export_java(limit=None):
         """Read FongMi VOD favorites without relying on obfuscated config classes."""
         try:
             from java import jclass
@@ -3695,12 +4026,21 @@ class Spider(BaseSpider):
             return None
         keep_cls = jclass("com.fongmi.android.tv.bean.Keep")
         rows = keep_cls.getVod()
+        try:
+            row_limit = max(0, int(limit or 0))
+        except Exception:
+            row_limit = 0
         if hasattr(rows, "size") and hasattr(rows, "get"):
-            source_rows = (rows.get(index) for index in range(int(rows.size())))
+            count = int(rows.size())
+            if row_limit:
+                count = min(count, row_limit)
+            source_rows = (rows.get(index) for index in range(count))
         else:
             source_rows = rows
         values = []
-        for row in source_rows:
+        for index, row in enumerate(source_rows):
+            if row_limit and index >= row_limit:
+                break
             key = row.getKey()
             title = row.getVodName()
             if key is None or title is None:
@@ -3717,88 +4057,9 @@ class Spider(BaseSpider):
         return values
 
     def _sync_native_keeps_to_follow(self):
-        try:
-            self._require_tmdb_credentials()
-            rows = self._native_keep_export_java()
-            if rows is None:
-                raise RuntimeError("当前运行时不可用FongMi原生Keep桥")
-            rows = [row for row in rows if isinstance(row, dict) and row.get("key") and row.get("title")]
-            rows.sort(key=lambda row: self._positive_int(row.get("create_time"), 0), reverse=True)
-            total = len(rows)
-            rows = rows[:self.keep_follow_scan_limit]
-            with self._follow_enrich_lock:
-                current = dict(self._follow_memory.get("items") or {})
-            known_keep_keys = {
-                str(keep_key)
-                for item in current.values() if isinstance(item, dict)
-                for keep_key in (item.get("keep_keys") or [])
-                if keep_key
-            }
-            existing = sum(1 for row in rows if str(row.get("key")) in known_keep_keys)
-            pending = [row for row in rows if str(row.get("key")) not in known_keep_keys]
-            resolved = []
-            if pending:
-                with ThreadPoolExecutor(max_workers=min(4, len(pending))) as executor:
-                    futures = {executor.submit(self._resolve_keep_follow_item, row): row for row in pending}
-                    for future in as_completed(futures):
-                        row = futures[future]
-                        try:
-                            item, reason = future.result()
-                        except Exception as exc:
-                            item, reason = None, "error:" + self._short_error(exc)
-                        resolved.append((row, item, reason))
-
-            added = 0
-            skipped = 0
-            errors = 0
-            changed = False
-            with self._follow_enrich_lock:
-                items = dict(self._follow_memory.get("items") or {})
-                for keep, item, reason in resolved:
-                    if not isinstance(item, dict):
-                        if str(reason or "").startswith("error:"):
-                            errors += 1
-                        else:
-                            skipped += 1
-                        continue
-                    key = str(self._positive_int(item.get("tmdb_id"), 0))
-                    if not key or key == "0":
-                        skipped += 1
-                        continue
-                    previous = items.get(key)
-                    if isinstance(previous, dict):
-                        output = dict(previous)
-                        existing += 1
-                    else:
-                        output = dict(item)
-                        added += 1
-                    keep_keys = list(output.get("keep_keys") or [])
-                    if str(keep.get("key")) not in keep_keys:
-                        keep_keys.append(str(keep.get("key")))
-                    site_names = list(output.get("keep_site_names") or [])
-                    site_name = str(keep.get("site_name") or "").strip()
-                    if site_name and site_name not in site_names:
-                        site_names.append(site_name)
-                    output.update({
-                        "keep_keys": keep_keys,
-                        "keep_site_names": site_names,
-                        "keep_last_synced": int(time.time()),
-                        "follow_source": output.get("follow_source") or "fongmi_keep",
-                    })
-                    items[key] = output
-                    changed = True
-                if changed:
-                    self._save_follow_state(items)
-            if changed:
-                self._refresh_follow_categories()
-            limited = "，本次扫描前 %s 条" % len(rows) if total > len(rows) else ""
-            return json.dumps({
-                "msg": "本地收藏自动追更完成：读取 %s%s，新增 %s，已追更 %s，跳过电影/歧义 %s，处理错误 %s" % (
-                    total, limited, added, existing, skipped, errors,
-                )
-            }, ensure_ascii=False)
-        except Exception as exc:
-            return json.dumps({"msg": "本地收藏自动追更失败：%s" % self._short_error(exc)}, ensure_ascii=False)
+        return json.dumps({
+            "msg": "本地收藏自动追更已停用，请在追更确认中逐项确认",
+        }, ensure_ascii=False)
 
     def _resolve_keep_follow_item(self, keep):
         match, reason = self._match_keep_to_tmdb(keep)
@@ -4283,6 +4544,8 @@ class Spider(BaseSpider):
         if (str(base_vod.get("vod_id") or "").startswith(self.ERROR_PREFIX)
                 or str(base_vod.get("vod_name") or "").endswith("详情载入失败")):
             return metadata
+        if not self._alist_tvbox_plugin:
+            return {"list": [base_vod]}
         item = self._resource_item(raw_id, base_vod)
         item = dict(item)
         item["_resume_verified"] = False
@@ -4317,6 +4580,7 @@ class Spider(BaseSpider):
                     if vod:
                         rewritten = self._rewrite_resource_vod(
                             vod, item, resource_id, mode=row.get("_resource_mode") or "vod",
+                            provider_hint=row.get("vod_remarks") or row.get("type_name") or row.get("type"),
                             validated=bool(
                                 row.get("_validated_groups")
                                 and self._validated_resource_detail(row) is not None
@@ -5087,12 +5351,189 @@ class Spider(BaseSpider):
             score += 30
         return score
 
-    def _rewrite_resource_vod(self, vod, item, resource_id, mode="", validated=False):
-        source_groups = str(vod.get("vod_play_from") or resource_id or "AList资源").split("$$$")
+    @staticmethod
+    def _resource_provider_key(*values):
+        providers = (
+            ("quark", ("pan.quark.cn",), ("夸克", "quark")),
+            ("uc", ("drive.uc.cn", "fast.uc.cn"), ("uc网盘", "uc云盘", "uc分享")),
+            ("ali", ("alipan.com", "aliyundrive.com"), ("阿里云盘", "阿里网盘", "阿里分享")),
+            ("baidu", ("pan.baidu.com",), ("百度网盘", "百度云盘", "百度分享")),
+            ("xunlei", ("pan.xunlei.com",), ("迅雷网盘", "迅雷云盘", "迅雷分享")),
+            ("pikpak", ("mypikpak.com",), ("pikpak",)),
+            ("pan123", (
+                "123pan.com", "123pan.cn", "123684.com", "123685.com", "123865.com",
+                "123912.com", "123592.com", "123684.cn", "123685.cn", "123865.cn",
+                "123912.cn", "123592.cn",
+            ), ("123网盘", "123云盘", "123分享")),
+            ("pan115", ("115.com",), ("115网盘", "115云盘", "115分享")),
+            ("tianyi", ("cloud.189.cn",), ("天翼网盘", "天翼云盘", "天翼分享")),
+            ("mobile", ("caiyun.139.com", "yun.139.com"), ("移动网盘", "移动云盘", "移动分享")),
+            ("guangya", ("guangyapan.com",), ("光鸭网盘", "光鸭云盘", "光鸭分享")),
+        )
+        exact_labels = {
+            "夸克": "quark", "uc": "uc", "阿里": "ali", "百度": "baidu",
+            "迅雷": "xunlei", "123": "pan123", "115": "pan115",
+            "天翼": "tianyi", "移动": "mobile", "光鸭": "guangya",
+        }
+        resolved = set()
+        for value in values:
+            normalized = unicodedata.normalize("NFKC", unquote(str(value or ""))).casefold()
+            if not normalized:
+                continue
+            url_candidates = re.findall(r"(?i)(?:https?:)?//[^\s<>\"']+", normalized)
+            if not url_candidates and re.match(r"^[a-z0-9.-]+\.[a-z]{2,}(?:[/:?#]|$)", normalized):
+                url_candidates = ["//" + normalized]
+            matches = set()
+            if url_candidates:
+                hosts = set()
+                for candidate in url_candidates:
+                    parsed = urlparse(candidate if "://" in candidate else "https:" + candidate)
+                    host = str(parsed.hostname or "").rstrip(".")
+                    if host:
+                        hosts.add(host)
+                matches.update(
+                    provider for provider, domains, _labels in providers
+                    if any(host == domain or host.endswith("." + domain) for host in hosts for domain in domains)
+                )
+            else:
+                matches.update(
+                    provider for provider, domains, labels in providers
+                    if any(label in normalized for label in labels)
+                    or any(re.search(r"(?<![a-z0-9.-])%s(?=$|[/:?#])" % re.escape(domain), normalized)
+                           for domain in domains)
+                )
+                exact = exact_labels.get(re.sub(r"[\s._-]+", "", normalized))
+                if exact:
+                    matches.add(exact)
+            if len(matches) > 1:
+                return ""
+            resolved.update(matches)
+            if len(resolved) > 1:
+                return ""
+        return next(iter(resolved)) if resolved else ""
+
+    @staticmethod
+    def _completion_episode_name(name, season, episode):
+        value = str(name or "").strip() or "S%02dE%02d" % (season, episode)
+        return value if value.endswith("补全") else value + "补全"
+
+    def _complete_same_provider_groups(self, records, completion_char_budget=None):
+        grouped = {}
+        group_order = []
+        coverage = {}
+        donors = {}
+        for record in records:
+            group_index = self._int_value(record.get("group"), -1)
+            if group_index not in grouped:
+                group_order.append(group_index)
+            grouped.setdefault(group_index, []).append(record)
+            provider = str(record.get("provider") or "")
+            episode_key = record.get("episode_key")
+            if (
+                    not provider
+                    or not isinstance(episode_key, tuple)
+                    or len(episode_key) != 2
+                    or not isinstance(episode_key[0], int)
+                    or not isinstance(episode_key[1], int)
+                    or episode_key[0] <= 0
+                    or episode_key[1] <= 0):
+                continue
+            season_key = (provider, episode_key[0])
+            coverage.setdefault(season_key, {}).setdefault(group_index, set()).add(episode_key[1])
+            donors.setdefault((provider, episode_key[0], episode_key[1]), []).append(record)
+
+        completed = 0
+        limited = False
+        remaining_chars = (
+            self.RESOURCE_MERGED_PLAY_URL_BUDGET
+            if completion_char_budget is None
+            else max(0, self._int_value(completion_char_budget, 0))
+        )
+        supplements = {}
+        for season_key, group_episodes in coverage.items():
+            if len(group_episodes) < 2:
+                continue
+            provider, season = season_key
+            available = set().union(*group_episodes.values())
+            for group_index, existing in group_episodes.items():
+                for episode in sorted(available - existing):
+                    if completed >= self.RESOURCE_COMPLETION_LIMIT:
+                        limited = True
+                        break
+                    candidates = [
+                        record for record in donors.get((provider, season, episode), [])
+                        if self._int_value(record.get("group"), -1) != group_index
+                    ]
+                    if not candidates:
+                        continue
+                    donor = min(candidates, key=lambda record: (
+                        self._int_value(record.get("group"), 0),
+                        self._int_value(record.get("part"), 0),
+                    ))
+                    completion_name = self._completion_episode_name(donor.get("name"), season, episode)
+                    completion_cost = len(completion_name) + len(str(donor.get("play_id") or "")) + 2
+                    if completion_cost > remaining_chars:
+                        limited = True
+                        break
+                    supplement = dict(donor)
+                    supplement.update({
+                        "group": group_index,
+                        "name": completion_name,
+                        "completed": True,
+                    })
+                    supplements.setdefault(group_index, []).append(supplement)
+                    completed += 1
+                    remaining_chars -= completion_cost
+                if limited:
+                    break
+            if limited:
+                break
+
+        if not completed:
+            return records, 0, limited
+        output = []
+        for group_index in group_order:
+            group_records = list(grouped[group_index])
+            for supplement in sorted(
+                    supplements.get(group_index, []), key=lambda record: record.get("episode_key") or (0, 0)):
+                supplement_key = supplement.get("episode_key")
+                insert_at = len(group_records)
+                for index, record in enumerate(group_records):
+                    episode_key = record.get("episode_key")
+                    if (
+                            isinstance(episode_key, tuple)
+                            and len(episode_key) == 2
+                            and isinstance(episode_key[0], int)
+                            and isinstance(episode_key[1], int)
+                            and episode_key > supplement_key):
+                        insert_at = index
+                        break
+                group_records.insert(insert_at, supplement)
+            for part_index, record in enumerate(group_records):
+                record["part"] = part_index
+                output.append(record)
+        return output, completed, limited
+
+    def _rewrite_resource_vod(
+            self, vod, item, resource_id, mode="", provider_hint="", validated=False):
         rewritten_sources = []
         rewritten_urls = []
         rewritten_seasons = []
+        rewritten_providers = []
         rewritten_quality = []
+        resource_limited = False
+        resource_id = str(resource_id or "").strip()
+        if len(resource_id) > self.RESOURCE_ID_MAX_LENGTH:
+            resource_id = resource_id[:self.RESOURCE_ID_MAX_LENGTH]
+            resource_limited = True
+        raw_source = vod.get("vod_play_from")
+        if not isinstance(raw_source, str):
+            raw_source = ""
+        source_seed = raw_source or resource_id or "AList资源"
+        if len(source_seed) > self.RESOURCE_SOURCE_LABEL_MAX_LENGTH:
+            source_seed = source_seed[:self.RESOURCE_SOURCE_LABEL_MAX_LENGTH]
+            resource_limited = True
+        source_groups = source_seed.split("$$$")
         declared_quality = vod.get("_route_quality") if isinstance(vod.get("_route_quality"), list) else []
         tracking_season = self._tracking_season(item)
         vod_season = Filter._season(vod.get("vod_name"))
@@ -5101,7 +5542,35 @@ class Spider(BaseSpider):
             resume = re.match(r"^S0*(\d{1,2})E0*\d{1,3}$", str(item.get("history_episode") or ""), re.I)
             if resume:
                 resume_season = int(resume.group(1))
-        for group_index, group in enumerate(str(vod.get("vod_play_url") or "").split("$$$")):
+        raw_play_url = vod.get("vod_play_url")
+        if not isinstance(raw_play_url, str) or not raw_play_url:
+            return None
+        if len(raw_play_url) > self.RESOURCE_PLAY_URL_MAX_LENGTH:
+            resource_limited = True
+            raw_play_url = raw_play_url[:self.RESOURCE_PLAY_URL_MAX_LENGTH]
+            cut_points = [raw_play_url.rfind("#"), raw_play_url.rfind("$$$")]
+            cut_at = max(cut_points)
+            if cut_at <= 0:
+                raise RuntimeError("资源播放项过长，已拒绝异常线路")
+            raw_play_url = raw_play_url[:cut_at]
+        if not raw_play_url:
+            return None
+        raw_groups = raw_play_url.split("$$$")
+        if len(raw_groups) > self.resource_limit:
+            raw_groups = raw_groups[:self.resource_limit]
+            resource_limited = True
+        accepted_entries = 0
+        invalid_entries = 0
+        rewritten_play_length = 0
+        output_budget_exhausted = False
+        for group_index, group in enumerate(raw_groups):
+            parts = group.split("#")
+            if len(parts) > self.RESOURCE_GROUP_EPISODE_LIMIT:
+                parts = parts[:self.RESOURCE_GROUP_EPISODE_LIMIT]
+                resource_limited = True
+            if not parts:
+                break
+            group = "#".join(parts)
             source_name = source_groups[group_index] if group_index < len(source_groups) else "AList资源"
             if mode:
                 source_name = self._resource_mode_label(mode, source_name, validated=validated)
@@ -5111,6 +5580,7 @@ class Spider(BaseSpider):
             for index, part in enumerate(group.split("#"), 1):
                 name, separator, target = part.rpartition("$")
                 if not separator:
+                    invalid_entries += 1
                     continue
                 season, episode, explicit = self._episode_from_text_info(name, index, default_season)
                 label_season = Filter._season(name)
@@ -5142,13 +5612,30 @@ class Spider(BaseSpider):
                 for row in parsed_entries:
                     row["episode"] -= offset
             entries = []
+            kept_parsed_entries = []
             for row in parsed_entries:
+                if accepted_entries >= self.RESOURCE_RECORD_LIMIT:
+                    resource_limited = True
+                    output_budget_exhausted = True
+                    break
                 play_id = self._build_followplay(
                     row["target"], item, resource_id, row["season"], row["episode"], row["name"],
                     episode_explicit=row["explicit"],
                 )
                 if play_id:
-                    entries.append("%s$%s" % (row["name"] or ("第%s集" % row["episode"]), play_id))
+                    entry = "%s$%s" % (row["name"] or ("第%s集" % row["episode"]), play_id)
+                    separator_length = 1 if entries else (3 if rewritten_urls else 0)
+                    if rewritten_play_length + separator_length + len(entry) > self.RESOURCE_PLAY_URL_MAX_LENGTH:
+                        resource_limited = True
+                        output_budget_exhausted = True
+                        break
+                    entries.append(entry)
+                    kept_parsed_entries.append(row)
+                    accepted_entries += 1
+                    rewritten_play_length += separator_length + len(entry)
+                else:
+                    invalid_entries += 1
+            parsed_entries = kept_parsed_entries
             if entries:
                 preferred_keys = []
                 for value in (item.get("history_episode"), item.get("latest_episode")):
@@ -5168,15 +5655,45 @@ class Spider(BaseSpider):
                 rewritten_sources.append(source_name)
                 rewritten_urls.append("#".join(entries))
                 rewritten_seasons.append(group_season or default_season)
+                metadata_provider = self._resource_provider_key(provider_hint, resource_id, source_name)
+                target_providers = {
+                    provider for provider in (
+                        self._resource_provider_key(row.get("target")) for row in parsed_entries
+                    ) if provider
+                }
+                unknown_target_url = any(
+                    urlparse(str(row.get("target") or "")).scheme in ("http", "https")
+                    and bool(urlparse(str(row.get("target") or "")).hostname)
+                    and not self._resource_provider_key(row.get("target"))
+                    for row in parsed_entries
+                )
+                if unknown_target_url or len(target_providers) > 1:
+                    resolved_provider = ""
+                elif target_providers:
+                    target_provider = next(iter(target_providers))
+                    resolved_provider = (
+                        target_provider
+                        if not metadata_provider or metadata_provider == target_provider
+                        else ""
+                    )
+                else:
+                    resolved_provider = metadata_provider
+                rewritten_providers.append(resolved_provider)
                 rewritten_quality.append(quality)
+            if output_budget_exhausted:
+                break
         if not rewritten_urls:
+            if invalid_entries:
+                raise RuntimeError("资源播放项无效，已拒绝异常线路")
             return None
         return {
             "vod_play_from": "$$$".join(rewritten_sources),
             "vod_play_url": "$$$".join(rewritten_urls),
             "resource_id": str(resource_id or ""),
             "group_seasons": rewritten_seasons,
+            "group_providers": rewritten_providers,
             "group_quality": rewritten_quality,
+            "_resource_limited": resource_limited,
         }
 
     def _resume_episode_match(self, urls, resource_ids, item):
@@ -5219,7 +5736,24 @@ class Spider(BaseSpider):
         return ranked[0][3], ranked[0][4]
 
     def _merge_resource_vods(self, vods, item, raw_id, base_vod):
-        valid = [vod for vod in vods if isinstance(vod, dict) and vod.get("vod_play_url")]
+        valid = []
+        resource_limited = False
+        total_play_url_length = 0
+        for vod in vods or []:
+            if not isinstance(vod, dict):
+                continue
+            play_url = vod.get("vod_play_url")
+            resource_limited = resource_limited or bool(vod.get("_resource_limited"))
+            if not isinstance(play_url, str) or not play_url:
+                resource_limited = True
+                continue
+            if (
+                    len(play_url) > self.RESOURCE_PLAY_URL_MAX_LENGTH
+                    or total_play_url_length + len(play_url) > self.RESOURCE_PLAY_URL_MAX_LENGTH):
+                resource_limited = True
+                continue
+            total_play_url_length += len(play_url)
+            valid.append(vod)
         if not valid:
             return None
         output = dict(base_vod)
@@ -5227,18 +5761,50 @@ class Spider(BaseSpider):
         urls = []
         resource_ids = []
         group_seasons = []
+        group_providers = []
         quality_scores = []
+        accepted_episode_count = 0
+        merged_play_length = 0
+        play_budget_exhausted = False
         for vod in valid:
-            if len(urls) >= self.resource_limit:
+            if (
+                    len(urls) >= self.resource_limit
+                    or accepted_episode_count >= self.RESOURCE_RECORD_LIMIT
+                    or play_budget_exhausted):
                 break
             groups = str(vod.get("vod_play_from") or "AList资源").split("$$$")
             group_urls = str(vod.get("vod_play_url") or "").split("$$$")
             resource_id = str(vod.get("resource_id") or "").strip()
             declared_seasons = vod.get("group_seasons") if isinstance(vod.get("group_seasons"), list) else []
+            declared_providers = vod.get("group_providers") if isinstance(vod.get("group_providers"), list) else []
             declared_quality = vod.get("group_quality") if isinstance(vod.get("group_quality"), list) else []
             for group_index, group_url in enumerate(group_urls):
-                if len(urls) >= self.resource_limit:
+                if len(urls) >= self.resource_limit or accepted_episode_count >= self.RESOURCE_RECORD_LIMIT:
+                    resource_limited = True
                     break
+                parts = str(group_url or "").split("#")
+                if len(parts) > self.RESOURCE_GROUP_EPISODE_LIMIT:
+                    parts = parts[:self.RESOURCE_GROUP_EPISODE_LIMIT]
+                    resource_limited = True
+                remaining = self.RESOURCE_RECORD_LIMIT - accepted_episode_count
+                if len(parts) > remaining:
+                    parts = parts[:remaining]
+                    resource_limited = True
+                kept_parts = []
+                for part in parts:
+                    separator_length = 1 if kept_parts else (3 if urls else 0)
+                    if (
+                            merged_play_length + separator_length + len(part)
+                            > self.RESOURCE_MERGED_PLAY_URL_BUDGET):
+                        resource_limited = True
+                        play_budget_exhausted = True
+                        break
+                    kept_parts.append(part)
+                    merged_play_length += separator_length + len(part)
+                group_url = "#".join(kept_parts)
+                if not group_url:
+                    break
+                accepted_episode_count += len(kept_parts)
                 base_source = groups[group_index] if group_index < len(groups) else "AList资源"
                 sources.append(str(base_source or "AList资源").strip() or "AList资源")
                 urls.append(group_url)
@@ -5248,23 +5814,30 @@ class Spider(BaseSpider):
                     0,
                 )
                 group_seasons.append(declared or self._resource_group_season(group_url))
+                if group_index < len(declared_providers):
+                    provider = str(declared_providers[group_index] or "").strip()
+                else:
+                    provider = self._resource_provider_key(base_source, resource_id)
+                group_providers.append(provider)
                 quality_scores.append(
                     dict(declared_quality[group_index])
                     if group_index < len(declared_quality) and isinstance(declared_quality[group_index], dict)
                     else {}
                 )
+                if play_budget_exhausted:
+                    break
         quality_order = sorted(
             range(len(urls)),
             key=lambda index: self._positive_int(quality_scores[index].get("total"), 0),
             reverse=True,
         )
-        for values in (sources, urls, resource_ids, group_seasons, quality_scores):
+        for values in (sources, urls, resource_ids, group_seasons, group_providers, quality_scores):
             values[:] = [values[index] for index in quality_order]
         resume_match = self._resume_episode_match(urls, resource_ids, item)
         resume_part_index = -1
         if resume_match:
             group_index, resume_part_index = resume_match
-            for values in (sources, urls, resource_ids, group_seasons, quality_scores):
+            for values in (sources, urls, resource_ids, group_seasons, group_providers, quality_scores):
                 values.insert(0, values.pop(group_index))
         source_names = set()
         for group_index, base_source in enumerate(list(sources)):
@@ -5305,24 +5878,35 @@ class Spider(BaseSpider):
                     "name": name,
                     "play_id": play_id,
                     "resource_id": resource_id,
+                    "provider": group_providers[group_index] if group_index < len(group_providers) else "",
+                    "origin_part": part_index,
                     "episode_key": episode_key,
                     "payload": payload,
                 })
-        self._schedule_route_preheat(records, item)
+        records, completion_total, completion_limited = self._complete_same_provider_groups(
+            records,
+            self.RESOURCE_MERGED_PLAY_URL_BUDGET - merged_play_length,
+        )
         fallback_options = {}
         fallback_targets = {}
         for record in records:
             payload = record.get("payload")
             target = str(payload.get("url") or "") if payload else ""
             episode_key = record["episode_key"]
-            seen = fallback_targets.setdefault(episode_key, set())
+            provider = str(record.get("provider") or "")
+            fallback_key = (
+                ("provider", provider, episode_key)
+                if provider
+                else ("group", self._int_value(record.get("group"), -1), episode_key)
+            )
+            seen = fallback_targets.setdefault(fallback_key, set())
             probe = self._route_probe_snapshot(target)
             fingerprint = str((probe or {}).get("fingerprint") or "")
             identity = ("fingerprint", fingerprint) if fingerprint else ("target", target)
             if not target or identity in seen:
                 continue
             seen.add(identity)
-            fallback_options.setdefault(episode_key, []).append({
+            fallback_options.setdefault(fallback_key, []).append({
                 "url": target,
                 "resourceId": str(payload.get("resourceId") or record.get("resource_id") or ""),
                 "name": str(record.get("name") or ""),
@@ -5330,6 +5914,8 @@ class Spider(BaseSpider):
             })
         fallback_total = 0
         for record in records:
+            if record.get("completed"):
+                continue
             payload = record.get("payload")
             if not payload:
                 continue
@@ -5337,7 +5923,13 @@ class Spider(BaseSpider):
             current_target = str(payload.get("url") or "")
             current_probe = self._route_probe_snapshot(current_target)
             current_fingerprint = str((current_probe or {}).get("fingerprint") or "")
-            for candidate in fallback_options.get(record["episode_key"], []):
+            provider = str(record.get("provider") or "")
+            fallback_key = (
+                ("provider", provider, record["episode_key"])
+                if provider
+                else ("group", self._int_value(record.get("group"), -1), record["episode_key"])
+            )
+            for candidate in fallback_options.get(fallback_key, []):
                 target = str(candidate.get("url") or "")
                 if target == current_target or (
                         current_fingerprint
@@ -5350,6 +5942,44 @@ class Spider(BaseSpider):
             if updated != record["play_id"]:
                 fallback_total = max(fallback_total, len(unique_fallbacks))
                 record["play_id"] = updated
+
+        final_records = []
+        final_length = 0
+        final_group = None
+        for record in records:
+            group_index = self._int_value(record.get("group"), -1)
+            part = "%s$%s" % (record.get("name") or "", record.get("play_id") or "")
+            separator_length = 1 if final_group == group_index else (3 if final_records else 0)
+            if final_length + separator_length + len(part) > self.RESOURCE_MERGED_PLAY_URL_BUDGET:
+                resource_limited = True
+                break
+            final_records.append(record)
+            final_length += separator_length + len(part)
+            final_group = group_index
+        records = final_records
+        if not records:
+            return None
+
+        kept_group_order = []
+        for record in records:
+            group_index = self._int_value(record.get("group"), -1)
+            if group_index not in kept_group_order:
+                kept_group_order.append(group_index)
+        group_remap = {group_index: index for index, group_index in enumerate(kept_group_order)}
+        for record in records:
+            record["group"] = group_remap[self._int_value(record.get("group"), -1)]
+        for values in (sources, urls, resource_ids, group_seasons, group_providers, quality_scores):
+            values[:] = [values[index] for index in kept_group_order]
+
+        completion_total = sum(1 for record in records if record.get("completed"))
+        fallback_total = 0
+        for record in records:
+            payload = self._parse_followplay(record.get("play_id"))
+            fallback_total = max(
+                fallback_total,
+                len(payload.get("fallbacks") or []) if isinstance(payload, dict) else 0,
+            )
+        self._schedule_route_preheat(records, item)
         rebuilt_groups = {}
         for record in records:
             rebuilt_groups.setdefault(record["group"], []).append(record)
@@ -5357,7 +5987,7 @@ class Spider(BaseSpider):
         for group_index, group_records in rebuilt_groups.items():
             if resume_match and group_index == 0:
                 for record in group_records:
-                    if record["part"] == resume_part_index:
+                    if record.get("origin_part", record["part"]) == resume_part_index and not record.get("completed"):
                         target_season, target_episode = record["episode_key"]
                         later_records = [
                             candidate for candidate in group_records
@@ -5435,6 +6065,8 @@ class Spider(BaseSpider):
         old_remark = str(output.get("vod_remarks") or "").strip()
         resume_remark = ("续播定位 " + str(item.get("history_episode") or "")) if resume_ready else ""
         fallback_remark = ("同集备用线路 %d 条" % fallback_total) if fallback_total else ""
+        completion_remark = ("同盘补全 %d 集" % completion_total) if completion_total else ""
+        limit_remark = "资源分集过多 已截断" if resource_limited or completion_limited else ""
         _hot_ready, hot_pending = self._supplement_resource_state(item)
         shown_verified = sum("已验证 ·" in str(source) for source in sources)
         shown_candidates = max(0, len(sources) - shown_verified)
@@ -5453,7 +6085,8 @@ class Spider(BaseSpider):
             "vod_id": raw_id,
             "vod_name": history_name or str(output.get("vod_name") or item.get("title") or "影视资源"),
             "vod_remarks": " · ".join(value for value in (
-                old_remark, "%s 条播放线路" % len(urls), hot_remark, resume_remark, fallback_remark,
+                old_remark, "%s 条播放线路" % len(urls), hot_remark, resume_remark,
+                fallback_remark, completion_remark, limit_remark,
             ) if value),
             "vod_play_from": "$$$".join(output_sources),
             "vod_play_url": "$$$".join(prompted_urls),
@@ -7101,22 +7734,23 @@ class Spider(BaseSpider):
             for item in (self._follow_memory.get("items") or {}).values()
         )
         old_remark = str(card.get("vod_remarks") or "")
-        card["action"] = self._series_card_action("douban", subject_id, card.get("vod_name"))
-        card["vod_remarks"] = ("已追更" if tracked else "按当前模式执行") + ((" · " + old_remark) if old_remark else "")
+        card["vod_remarks"] = ("已追更" if tracked else "全局搜索") + ((" · " + old_remark) if old_remark else "")
         return card
 
     def _with_series_mode_cards(self, result, page):
+        return self._with_navigation_search(result)
+
+    def _with_navigation_search(self, result):
         if not isinstance(result, dict) or not isinstance(result.get("list"), list):
             return result
-        cards = [{
-            "vod_id": self.SERIES_MODE_PREFIX + "toggle",
-            "vod_name": "模式切换",
-            "vod_pic": "",
-            "vod_remarks": "短按轮转追更/浏览模式 · 当前位置不变",
-            "action": self.SERIES_MODE_PREFIX + "toggle",
-        }]
         output = dict(result)
-        output["list"] = cards + list(result.get("list") or [])
+        cards = []
+        for source in result.get("list") or []:
+            card = dict(source) if isinstance(source, dict) else source
+            if isinstance(card, dict) and not str(card.get("vod_id") or "").startswith(self.ERROR_PREFIX):
+                self._apply_global_search_action(card)
+            cards.append(card)
+        output["list"] = cards
         return output
 
     def _load_series_action_mode(self):
@@ -7132,19 +7766,8 @@ class Spider(BaseSpider):
         self._series_action_mode = "browse" if str(value or "") == "browse" else "add"
 
     def _set_series_action_mode(self, mode):
-        value = str(mode or "")
-        if value == "toggle":
-            self._series_action_mode = "browse" if self._series_action_mode == "add" else "add"
-        else:
-            self._series_action_mode = "browse" if value == "browse" else "add"
-        setter = getattr(self, "setCache", None)
-        if callable(setter):
-            try:
-                setter(self.SERIES_MODE_CACHE_KEY, {"mode": self._series_action_mode})
-            except Exception:
-                pass
-        label = "浏览模式：短按剧集进入全局搜索" if self._series_action_mode == "browse" else "追更模式：短按剧集加入追更"
-        return json.dumps({"msg": "已切换至" + label + "，当前位置保持不变"}, ensure_ascii=False)
+        self._series_action_mode = "browse"
+        return json.dumps({"msg": "导航页已固定为全局搜索；追更请在追更确认操作"}, ensure_ascii=False)
 
     def _series_card_action(self, source, item_id, title):
         return "%s%s:%s:%s" % (
@@ -7159,22 +7782,17 @@ class Spider(BaseSpider):
         if len(parts) != 3:
             return json.dumps({"msg": "剧集操作参数无效"}, ensure_ascii=False)
         source, item_id, title = (unquote(part).strip() for part in parts)
-        if self._series_action_mode == "browse":
-            return self._open_global_search(quote(title, safe=""))
-        if source == "tmdb":
-            result = self._follow_action("add", item_id, title)
-            return self._remember_follow_action_result(result, "add", title)
-        if source == "douban":
-            result = self._follow_action_from_douban(item_id, title)
-            return self._remember_follow_action_result(result, "add", title)
-        return json.dumps({"msg": "剧集来源无效"}, ensure_ascii=False)
+        if source not in ("tmdb", "douban"):
+            return json.dumps({"msg": "剧集来源无效"}, ensure_ascii=False)
+        return self._open_global_search(quote(title, safe=""))
 
     def _apply_global_search_action(self, card):
         title = str(card.get("vod_name") or "").strip() if isinstance(card, dict) else ""
         if title:
             card["action"] = self.GLOBAL_SEARCH_PREFIX + quote(title, safe="")
             old_remark = str(card.get("vod_remarks") or "")
-            card["vod_remarks"] = "点击全局搜索" + ((" · " + old_remark) if old_remark else "")
+            if not old_remark.startswith("全局搜索"):
+                card["vod_remarks"] = "全局搜索" + ((" · " + old_remark) if old_remark else "")
         return card
 
     def _open_global_search(self, raw_title):
@@ -7271,6 +7889,7 @@ class Spider(BaseSpider):
         ]
         return {
             "follow_updates": [],
+            "follow_candidates": [],
             "follow_manage": [self._filter("mode", "操作", (
                 ("查看追更", "view"),
                 ("标记当前集已看（需确认）", "seen"),
