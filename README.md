@@ -24,8 +24,16 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/plugins/seed
 
 | 插件 | 版本 | 索引状态 | 说明 |
 | --- | ---: | --- | --- |
-| 豆瓣 TMDB 追更助手 | 53 | 可导入 | [能力与配置](plugins/douban_tmdb_follow_single/README.md) |
+| 豆瓣 TMDB 追更助手 | 55 | 可导入 | [能力与配置](plugins/douban_tmdb_follow_single/README.md) |
 | SeedHub 磁力与多网盘 | 1 | 可导入 | [能力与配置](plugins/seedhub/README.md) |
+
+### 豆瓣 TMDB 追更助手 v55
+
+- 加强 `vod1`、`vod`、`pansou`、`telegram` 四类资源反馈识别，保留不同来源的有效播放列表，并优先采用标题、提取码和更新时间更完整的分享。
+- 兼容 PanSou 原始分组与嵌套链接结构，避免通用父记录挤掉真正可用的网盘线路。
+- 详情页最多保留 5 条独立有效线路，先完成多来源质量选择，再应用线路、分集和输出限制。
+- 改进私网 HTTP/HTTPS History 双向适配，防止云端旧快照覆盖较新的本地播放进度。
+- 补强播放入口、资源搜索并发和详情缓存边界，降低异常返回或大数据输入造成的线路丢失与资源占用。
 
 ## 精简结构
 
