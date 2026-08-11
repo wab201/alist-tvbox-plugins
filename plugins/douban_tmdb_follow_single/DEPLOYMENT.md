@@ -12,7 +12,7 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/spiders_v2.j
 https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMDB追更单入口.py
 ```
 
-本插件用于豆瓣/TMDB 浏览、剧集追更、AList-TVBox 资源搜索、线路评分和 History 续播。当前发布版本为 v52，适配 AList-TVBox 1.42.0 raw Python 插件，由 AList-TVBox 生成订阅后交给 FongMi/TvBox 使用。同一源码空 EXT 直载时保留 FongMi 元数据分类、搜索、详情和直链播放合同，但追更、History 与网盘资源功能必须使用 AList-TVBox 生成的订阅。
+本插件用于豆瓣/TMDB 浏览、剧集追更、AList-TVBox 资源搜索、线路评分和 History 续播。当前发布版本为 v52，最低兼容基线为 AList-TVBox 1.42.0，当前已在 1.43.0 验证。插件由 AList-TVBox 生成订阅后交给 FongMi/TvBox 使用。同一源码空 EXT 直载时保留 FongMi 元数据分类、搜索、详情和直链播放合同，但追更、History 与网盘资源功能必须使用 AList-TVBox 生成的订阅。
 
 完整功能不要把 `.py` 文件直接添加为普通 FongMi 站点，也不要手工填写外层 `api`、`token`、`secret`、`loader`、`source` 或 `raw`。
 
@@ -118,7 +118,7 @@ py/
 ## History 说明
 
 - History 会在进入追更、资源详情等需要记录的页面时后台刷新，不需要日常手动操作。
-- 播放成功不会立即同步；播放超过 8 分钟后进入待同步状态，退出播放器时立即触发同步。播放器仍在运行或同步暂不可用时每 5 秒重试。
+- 播放成功不会立即同步；播放超过 8 分钟后进入待同步状态。收到退出回调时立即触发同步，没有回调时约 5 秒检测一次；播放器仍在运行或同步暂不可用时继续按 5 秒间隔重试。
 - 插件 History 快照默认缓存 60 秒，详情读取过期快照时只启动一个后台刷新任务；过滤器自己的 History 缓存默认 30 秒。
 - “追更确认”每次进入都会直接读取 FongMi 本机收藏和播放记录；未确认的条目保持待选，确认后才写入追更列表。
 - “追更确认”“追更管理”和“追更动态”每次进入都会检查待同步播放记录，并刷新已追更剧集的最新观看集数。

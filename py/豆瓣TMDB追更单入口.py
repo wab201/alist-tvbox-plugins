@@ -90,6 +90,131 @@ FOLLOWPLAY_PREFIX = "followplay_"
 FOLLOWPLAY_LEGACY_PREFIX = "followplay://"
 FOLLOWPLAY_PREFIXES = (FOLLOWPLAY_PREFIX, FOLLOWPLAY_LEGACY_PREFIX)
 
+HISTORY_RESPONSE_MAX_BYTES = 4 * 1024 * 1024
+HISTORY_ROW_MAX_BYTES = 128 * 1024
+HISTORY_CONFIG_MAX_BYTES = 128 * 1024
+HISTORY_ROW_LIMIT = 2048
+HISTORY_FIELD_MAX_LENGTH = 65536
+HISTORY_FIELDS = (
+    "key", "vodPic", "vodName", "vodFlag", "vodRemarks", "episodeUrl",
+    "revSort", "revPlay", "createTime", "opening", "ending", "position",
+    "duration", "speed", "scale", "cid", "episode", "uid",
+)
+HISTORY_INTEGER_FIELDS = frozenset((
+    "revSort", "revPlay", "createTime", "opening", "ending", "position",
+    "duration", "cid", "episode", "uid",
+))
+HISTORY_FIELD_LIMITS = {
+    "key": 2048,
+    "vodPic": 8192,
+    "vodName": 1024,
+    "vodFlag": 1024,
+    "vodRemarks": 4096,
+    "episodeUrl": HISTORY_FIELD_MAX_LENGTH,
+    "speed": 64,
+    "scale": 64,
+}
+
+
+def _history_utf8_size(value):
+    return len(str(value or "").encode("utf-8", errors="ignore"))
+
+
+def _history_clip_text(value, limit):
+    text = str(value or "")
+    encoded = text.encode("utf-8", errors="ignore")
+    if len(encoded) <= limit:
+        return text
+    return encoded[:limit].decode("utf-8", errors="ignore")
+
+
+def _normalize_history_row_shared(row):
+    if not isinstance(row, dict):
+        return None
+    output = {}
+    for key in HISTORY_FIELDS:
+        if key not in row or row.get(key) is None:
+            continue
+        value = row.get(key)
+        if key in HISTORY_INTEGER_FIELDS:
+            try:
+                output[key] = int(value)
+            except Exception:
+                try:
+                    output[key] = int(float(value))
+                except Exception:
+                    output[key] = 0
+            continue
+        if isinstance(value, (dict, list, tuple, set)):
+            continue
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            output[key] = value
+            continue
+        output[key] = _history_clip_text(
+            value, HISTORY_FIELD_LIMITS.get(key, HISTORY_FIELD_MAX_LENGTH),
+        )
+    if not str(output.get("key") or "").strip():
+        return None
+    try:
+        size = _history_utf8_size(json.dumps(output, ensure_ascii=False, separators=(",", ":")))
+    except Exception:
+        return None
+    return output if size <= HISTORY_ROW_MAX_BYTES else None
+
+
+def _normalize_history_rows_shared(rows):
+    output = []
+    total_bytes = 2
+    for input_index, row in enumerate(rows if isinstance(rows, (list, tuple)) else []):
+        if input_index >= HISTORY_ROW_LIMIT:
+            break
+        normalized = _normalize_history_row_shared(row)
+        if not normalized:
+            continue
+        try:
+            row_bytes = _history_utf8_size(json.dumps(normalized, ensure_ascii=False, separators=(",", ":")))
+        except Exception:
+            continue
+        separator_bytes = 1 if output else 0
+        if total_bytes + separator_bytes + row_bytes > HISTORY_RESPONSE_MAX_BYTES:
+            break
+        output.append(normalized)
+        total_bytes += separator_bytes + row_bytes
+        if len(output) >= HISTORY_ROW_LIMIT:
+            break
+    return output
+
+
+def _read_bounded_json_shared(response, label, max_bytes, deadline=None):
+    try:
+        try:
+            content_length = int((getattr(response, "headers", {}) or {}).get("Content-Length") or 0)
+        except Exception:
+            content_length = 0
+        if content_length > max_bytes:
+            raise RuntimeError("%s 响应过大" % label)
+        chunks = []
+        received = 0
+        iterator = getattr(response, "iter_content", None)
+        parts = iterator(chunk_size=65536) if callable(iterator) else [getattr(response, "content", b"")]
+        for chunk in parts:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise RuntimeError("%s 响应超过总时限" % label)
+            if not chunk:
+                continue
+            received += len(chunk)
+            if received > max_bytes:
+                raise RuntimeError("%s 响应过大" % label)
+            chunks.append(chunk)
+        try:
+            return json.loads(b"".join(chunks))
+        except Exception:
+            raise RuntimeError("%s 返回无效 JSON" % label)
+    finally:
+        closer = getattr(response, "close", None)
+        if callable(closer):
+            closer()
+
 
 class _HistorySyncCancelled(RuntimeError):
     pass
@@ -100,6 +225,10 @@ class Filter:
 
     FOLLOW_CACHE_KEY = "douban_tmdb_follow_state_v1"
     SAFE_ROUTE_HEADERS = frozenset(("user-agent", "referer", "origin"))
+    HISTORY_RESPONSE_MAX_BYTES = HISTORY_RESPONSE_MAX_BYTES
+    HISTORY_ROW_LIMIT = HISTORY_ROW_LIMIT
+    FOLLOWPLAY_MAX_ID_LENGTH = 65536
+    FOLLOWPLAY_MAX_DECODED_LENGTH = 49152
 
     def __init__(self):
         self.history_cache_ttl = 30
@@ -519,12 +648,15 @@ class Filter:
                 timeout=self.timeout,
                 verify=self.verify_tls,
                 headers={"Accept": "application/json"},
+                stream=True,
             )
             if response.status_code < 200 or response.status_code >= 300:
+                response.close()
                 return []
-            payload = response.json()
-            rows = payload if isinstance(payload, list) else []
-            rows = [row for row in rows if isinstance(row, dict)]
+            payload = _read_bounded_json_shared(
+                response, "AList-TVBox Filter History", self.HISTORY_RESPONSE_MAX_BYTES,
+            )
+            rows = _normalize_history_rows_shared(payload)
         except Exception:
             return []
         with self._lock:
@@ -541,10 +673,14 @@ class Filter:
                 "http://127.0.0.1:%s/cache" % port,
                 params={"do": "get", "key": self.FOLLOW_CACHE_KEY},
                 timeout=min(self.timeout, 5),
+                stream=True,
             )
             if response.status_code < 200 or response.status_code >= 300:
+                response.close()
                 return []
-            value = response.json()
+            value = _read_bounded_json_shared(
+                response, "FongMi 追更缓存", self.HISTORY_RESPONSE_MAX_BYTES,
+            )
         except Exception:
             return []
         return self._follow_state_history_rows(value)
@@ -556,7 +692,9 @@ class Filter:
             return []
         rows = []
         state_updated = Filter._int(state.get("updated_at"), 0)
-        for key, item in items.items():
+        for index, (key, item) in enumerate(items.items()):
+            if index >= Filter.HISTORY_ROW_LIMIT:
+                break
             if not isinstance(item, dict):
                 continue
             match = re.match(r"^S0*(\d{1,2})E0*(\d{1,3})$", str(item.get("history_episode") or ""), re.I)
@@ -564,13 +702,16 @@ class Filter:
                 continue
             season, episode = int(match.group(1)), int(match.group(2))
             tmdb_id = Filter._int(item.get("tmdb_id") or key, 0)
-            title = str(item.get("title") or item.get("history_vod_name") or "").strip()
+            title = _history_clip_text(
+                item.get("title") or item.get("history_vod_name") or "", 1024,
+            ).strip()
             if not tmdb_id or not title:
                 continue
             aliases = item.get("title_aliases")
             if not isinstance(aliases, list):
                 aliases = [value.strip() for value in str(aliases or "").split("\n") if value.strip()]
-            history_title = str(item.get("history_vod_name") or "").strip()
+            aliases = [_history_clip_text(value, 1024) for value in aliases[:16]]
+            history_title = _history_clip_text(item.get("history_vod_name") or "", 1024).strip()
             if history_title and history_title not in aliases:
                 aliases.append(history_title)
             payload = {
@@ -578,13 +719,15 @@ class Filter:
                 "mediaType": "tv",
                 "tmdbId": str(tmdb_id),
                 "title": title,
-                "originalTitle": str(item.get("original_title") or ""),
+                "originalTitle": _history_clip_text(item.get("original_title") or "", 1024),
                 "titleAliases": json.dumps(aliases, ensure_ascii=False, separators=(",", ":")),
                 "year": str(item.get("year") or ""),
                 "season": str(season),
                 "episode": str(episode),
             }
             encoded = base64.urlsafe_b64encode(urlencode(payload).encode("utf-8")).decode("ascii").rstrip("=")
+            if len(encoded) + len(FOLLOWPLAY_PREFIX) > Filter.FOLLOWPLAY_MAX_ID_LENGTH:
+                continue
             updated = Filter._int(item.get("history_updated_at"), state_updated)
             rows.append({
                 "key": "douban_tmdb_follow_single@@@tmdb:tv:%s@@@1" % tmdb_id,
@@ -595,7 +738,7 @@ class Filter:
                 "duration": Filter._int(item.get("history_duration"), 0),
                 "createTime": updated * 1000 if updated < 100000000000 else updated,
             })
-        return rows
+        return _normalize_history_rows_shared(rows)
 
     @staticmethod
     def _vod_groups(vod):
@@ -625,20 +768,29 @@ class Filter:
     @staticmethod
     def _followplay(value):
         text = str(value or "").strip()
-        for _index in range(2):
+        if not text or len(text) > Filter.FOLLOWPLAY_MAX_ID_LENGTH:
+            return None
+        for _index in range(min(len(text) + 1, 512)):
             if text.startswith(FOLLOWPLAY_PREFIXES):
                 break
             decoded = unquote(text)
             if decoded == text:
                 break
             text = decoded
+            if len(text) > Filter.FOLLOWPLAY_MAX_ID_LENGTH:
+                return None
         prefix = next((item for item in FOLLOWPLAY_PREFIXES if text.startswith(item)), "")
         if not prefix:
             return None
         try:
             raw = text[len(prefix):].replace("-", "+").replace("_", "/")
+            if len(raw) > Filter.FOLLOWPLAY_MAX_ID_LENGTH:
+                return None
             raw += "=" * ((4 - len(raw) % 4) % 4)
-            values = parse_qs(base64.b64decode(raw).decode("utf-8"), keep_blank_values=True)
+            decoded = base64.b64decode(raw)
+            if len(decoded) > Filter.FOLLOWPLAY_MAX_DECODED_LENGTH:
+                return None
+            values = parse_qs(decoded.decode("utf-8"), keep_blank_values=True)
             return {key: items[0] if items else "" for key, items in values.items()}
         except Exception:
             return None
@@ -830,6 +982,23 @@ class Spider(BaseSpider):
     FOLLOW_CACHE_KEY = "douban_tmdb_follow_state_v1"
     SERIES_MODE_CACHE_KEY = "douban_tmdb_series_mode_v1"
     FOLLOW_STATE_VERSION = 2
+    FOLLOW_STATE_MAX_BYTES = 4 * 1024 * 1024
+    FOLLOW_STATE_ITEM_MAX_BYTES = 128 * 1024
+    FOLLOW_STATE_ITEM_LIMIT = 2048
+    FOLLOW_STATE_TEXT_FIELD_LIMITS = {
+        "title": 1024,
+        "original_title": 1024,
+        "history_vod_name": 1024,
+        "pic": 8192,
+        "source_id": 2048,
+        "latest_episode": 64,
+        "next_episode": 64,
+        "seen_episode": 64,
+        "tracked_episode": 64,
+        "history_episode": 64,
+        "seen_source": 64,
+        "next_air_date": 32,
+    }
     RESUME_IMPORT_CACHE_KEY = "douban_tmdb_resume_import_v1"
     ATVP_STATUS_CACHE_KEY = "douban_tmdb_atvp_job_status_v1"
     HISTORY_SHARE_POLICY_CACHE_KEY = "douban_tmdb_history_share_policy_v1"
@@ -880,11 +1049,15 @@ class Spider(BaseSpider):
     ROUTE_QUALITY_VERSION = 1
     ROUTE_QUALITY_LIMIT = 200
     ROUTE_QUALITY_MAX_AGE = 30 * 86400
-    HISTORY_FIELDS = (
-        "key", "vodPic", "vodName", "vodFlag", "vodRemarks", "episodeUrl",
-        "revSort", "revPlay", "createTime", "opening", "ending", "position",
-        "duration", "speed", "scale", "cid", "episode", "uid",
-    )
+    HISTORY_FIELDS = HISTORY_FIELDS
+    HISTORY_RESPONSE_MAX_BYTES = HISTORY_RESPONSE_MAX_BYTES
+    HISTORY_ROW_MAX_BYTES = HISTORY_ROW_MAX_BYTES
+    HISTORY_CONFIG_MAX_BYTES = HISTORY_CONFIG_MAX_BYTES
+    HISTORY_LOCAL_PROXY_MAX_BYTES = HISTORY_RESPONSE_MAX_BYTES
+    HISTORY_ROW_LIMIT = HISTORY_ROW_LIMIT
+    HISTORY_FIELD_MAX_LENGTH = HISTORY_FIELD_MAX_LENGTH
+    HISTORY_FIELD_LIMITS = HISTORY_FIELD_LIMITS
+    HISTORY_INTEGER_FIELDS = HISTORY_INTEGER_FIELDS
     SYNC_SITE_KEYS = {
         "csp_AList", "douban_tmdb_follow_single", "豆瓣TMDB追更单入口",
     }
@@ -1042,6 +1215,7 @@ class Spider(BaseSpider):
         self._follow_memory = {"version": self.FOLLOW_STATE_VERSION, "items": {}}
         self._follow_state_loaded = False
         self._follow_cache_origin = ""
+        self._follow_state_load_lock = threading.RLock()
         self._follow_enrich_lock = threading.RLock()
         self._follow_state_persist_lock = threading.Lock()
         self._follow_enrich_jobs = set()
@@ -1294,6 +1468,8 @@ class Spider(BaseSpider):
     def _apply_native_subscription_config(self, raw_config):
         value = raw_config
         if isinstance(value, str):
+            if self._utf8_size(value) > self.HISTORY_CONFIG_MAX_BYTES:
+                raise RuntimeError("FongMi 当前订阅配置过大")
             try:
                 value = json.loads(value)
             except Exception:
@@ -1595,6 +1771,19 @@ class Spider(BaseSpider):
     def localProxy(self, param):
         value = param
         if isinstance(value, str):
+            if self._utf8_size(value) > self.HISTORY_LOCAL_PROXY_MAX_BYTES:
+                callback_match = re.search(
+                    r'"follow_sync_callback"\s*:\s*"([^"\\]{1,256})"',
+                    value[:8192],
+                )
+                if callback_match:
+                    nonce = callback_match.group(1)
+                    with self._native_export_lock:
+                        pending = self._native_exports.get(nonce)
+                    if pending:
+                        pending["captured"]["error"] = "FongMi 本机 History 回调请求过大"
+                        pending["event"].set()
+                return [413, "application/json; charset=utf-8", "{\"error\":\"request too large\"}"]
             try:
                 value = json.loads(value)
             except Exception:
@@ -1605,10 +1794,17 @@ class Spider(BaseSpider):
                 with self._native_export_lock:
                     pending = self._native_exports.get(nonce)
                 if pending:
-                    pending["captured"].update({
-                        "config": value.get("config") or "",
-                        "targets": value.get("targets") or "[]",
-                    })
+                    config_text = str(value.get("config") or "")
+                    targets_text = str(value.get("targets") or "[]")
+                    if self._utf8_size(config_text) > self.HISTORY_CONFIG_MAX_BYTES:
+                        pending["captured"]["error"] = "FongMi 本机订阅配置过大"
+                    elif self._utf8_size(targets_text) > self.HISTORY_RESPONSE_MAX_BYTES:
+                        pending["captured"]["error"] = "FongMi 本机 History 响应过大"
+                    else:
+                        pending["captured"].update({
+                            "config": config_text,
+                            "targets": targets_text,
+                        })
                     pending["event"].set()
                     return [200, "application/json; charset=utf-8", "{}"]
             if str(value.get("playback_exit") or value.get("history_sync") or "").strip():
@@ -3153,37 +3349,46 @@ class Spider(BaseSpider):
         return ranked[0][1]
 
     def _load_follow_state(self, force=False):
+        with self._follow_state_load_lock:
+            return self._load_follow_state_locked(force)
+
+    def _load_follow_state_locked(self, force=False):
         if self._follow_state_loaded and not force:
             return True
-        state = None
-        cache_read = False
-        persisted = False
         getter = getattr(self, "getCache", None)
+        if not callable(getter):
+            return bool(self._follow_state_loaded)
+        with self._follow_enrich_lock:
+            self._follow_state_loaded = False
+        state = None
+        cache_known = False
+        persisted = False
         if callable(getter):
             try:
                 value = getter(self.FOLLOW_CACHE_KEY)
-                cache_read = True
-                if isinstance(value, dict) and isinstance(value.get("items"), dict):
+                if value is None:
+                    cache_known = True
+                elif self._valid_follow_state_payload(value):
                     state = value
+                    cache_known = True
                     persisted = True
             except Exception:
-                cache_read = False
-        if callable(getter) and (state is None or not (state.get("items") or {})):
+                cache_known = False
+        if not cache_known:
             loopback_state, loopback_origin = self._load_follow_state_from_loopback()
-            if loopback_state is not None and (state is None or loopback_state.get("items")):
+            if loopback_state is not None:
                 state = loopback_state
-                cache_read = True
+                cache_known = True
                 persisted = True
                 if loopback_origin != self._follow_cache_origin:
                     print("[follow-cache] loopback=%s items=%s" % (
                         loopback_origin.rsplit(":", 1)[-1], len(loopback_state.get("items") or {}),
                     ))
                 self._follow_cache_origin = loopback_origin
-        if not cache_read:
-            self._follow_state_loaded = False
+        if not cache_known:
             return False
         if state is None:
-            state = self._follow_memory if isinstance(self._follow_memory, dict) else {"version": 1, "items": {}}
+            state = {"version": self.FOLLOW_STATE_VERSION, "items": {}}
         state_version = self._positive_int(state.get("version"), 1)
         items = dict(state.get("items") or {})
         migrated = persisted and state_version < self.FOLLOW_STATE_VERSION
@@ -3202,17 +3407,45 @@ class Spider(BaseSpider):
         for key, value in list(items.items()):
             if not isinstance(value, dict):
                 continue
-            item = self._compact_follow_title_aliases(value)
+            item = self._sanitize_follow_persisted_item(
+                self._compact_follow_title_aliases(value)
+            )
             if item != value:
                 items[key] = item
                 migrated = True
         for tmdb_id in self.follow_tv_ids:
             key = str(tmdb_id)
             items.setdefault(key, {"tmdb_id": tmdb_id, "title": "TMDB剧集 " + key, "seen_episode": "", "tracked_episode": ""})
-        self._follow_memory = {"version": self.FOLLOW_STATE_VERSION, "updated_at": int(time.time()), "items": items}
-        self._follow_state_loaded = True
+        with self._follow_enrich_lock:
+            self._follow_memory = {
+                "version": self.FOLLOW_STATE_VERSION,
+                "updated_at": int(time.time()),
+                "items": items,
+            }
+            self._follow_state_loaded = True
         if migrated:
             self._persist_follow_state(self._follow_memory)
+        return True
+
+    def _valid_follow_state_payload(self, value):
+        if not isinstance(value, dict) or not isinstance(value.get("items"), dict):
+            return False
+        items = value.get("items") or {}
+        if len(items) > self.FOLLOW_STATE_ITEM_LIMIT:
+            return False
+        try:
+            if _history_utf8_size(json.dumps(value, ensure_ascii=False, separators=(",", ":"))) > self.FOLLOW_STATE_MAX_BYTES:
+                return False
+        except Exception:
+            return False
+        for item in items.values():
+            if not isinstance(item, dict):
+                continue
+            try:
+                if _history_utf8_size(json.dumps(item, ensure_ascii=False, separators=(",", ":"))) > self.FOLLOW_STATE_ITEM_MAX_BYTES:
+                    return False
+            except Exception:
+                return False
         return True
 
     def _load_follow_state_from_loopback(self):
@@ -3223,10 +3456,8 @@ class Spider(BaseSpider):
             origins.append(self._fongmi_local_origin())
         except Exception:
             pass
-        origins.extend("http://127.0.0.1:%s" % port for port in range(9978, 9999))
         session = requests.Session()
         session.trust_env = False
-        empty = None
         checked = set()
         try:
             for origin in origins:
@@ -3238,23 +3469,27 @@ class Spider(BaseSpider):
                         origin + "/cache",
                         params={"do": "get", "key": self.FOLLOW_CACHE_KEY},
                         timeout=0.15,
+                        stream=True,
                     )
-                    if response.status_code != 200 or not str(response.text or "").strip():
+                    if response.status_code != 200:
+                        response.close()
                         continue
-                    value = response.json()
-                    if not isinstance(value, dict) or not isinstance(value.get("items"), dict):
+                    value = _read_bounded_json_shared(
+                        response, "FongMi 追更缓存", self.FOLLOW_STATE_MAX_BYTES,
+                    )
+                    if not self._valid_follow_state_payload(value):
                         continue
-                    if value.get("items"):
-                        return value, origin
-                    if empty is None:
-                        empty = (value, origin)
+                    return value, origin
                 except Exception:
                     continue
         finally:
             session.close()
-        return empty if empty is not None else (None, "")
+        return (None, "")
 
     def _persist_follow_state(self, state):
+        with self._follow_enrich_lock:
+            if not self._follow_state_loaded:
+                return False
         with self._follow_state_persist_lock:
             return self._persist_follow_state_locked(state)
 
@@ -3287,6 +3522,8 @@ class Spider(BaseSpider):
     def _save_follow_state(self, items):
         state = {"version": self.FOLLOW_STATE_VERSION, "updated_at": int(time.time()), "items": items}
         with self._follow_enrich_lock:
+            if not self._follow_state_loaded:
+                raise RuntimeError("追更状态尚未成功读取，已暂停修改")
             if not self._persist_follow_state(state):
                 raise RuntimeError("追更状态未能持久保存")
             self._follow_memory = state
@@ -3363,11 +3600,76 @@ class Spider(BaseSpider):
         if not aliases:
             return output
         chinese = [value for value in aliases if re.search(r"[\u3400-\u9fff]", value)]
-        compact = (chinese if chinese else aliases)[:6 if chinese else 4]
+        compact = [
+            _history_clip_text(value, 1024)
+            for value in (chinese if chinese else aliases)[:6 if chinese else 4]
+        ]
         if compact:
             output["title_aliases"] = compact
         else:
             output.pop("title_aliases", None)
+        return output
+
+    def _sanitize_follow_persisted_item(self, item):
+        output = dict(item or {})
+        for key, limit in self.FOLLOW_STATE_TEXT_FIELD_LIMITS.items():
+            if key in output and output.get(key) is not None:
+                output[key] = _history_clip_text(output.get(key), limit)
+        resource_id = str(output.get("alist_vod_id") or "").strip()
+        decoded_resource_id = self._unquote_limited(resource_id)
+        if resource_id and (
+                len(resource_id) > self.RESOURCE_ID_MAX_LENGTH
+                or len(decoded_resource_id) > self.RESOURCE_ID_MAX_LENGTH
+                or self._contains_url_reference(decoded_resource_id)):
+            output.pop("alist_vod_id", None)
+            output.pop("alist_resource_mode", None)
+            output.pop("binding_updated_at", None)
+
+        route = output.get("last_play_route")
+        if not isinstance(route, dict):
+            output.pop("last_play_route", None)
+            return output
+        route_resource_id = str(route.get("resourceId") or "").strip()
+        decoded_route_resource_id = self._unquote_limited(route_resource_id)
+        if (
+                len(route_resource_id) > self.RESOURCE_ID_MAX_LENGTH
+                or len(decoded_route_resource_id) > self.RESOURCE_ID_MAX_LENGTH
+                or self._contains_url_reference(decoded_route_resource_id)):
+            route_resource_id = ""
+        play_id = str(route.get("playId") or "").strip()
+        decoded_play_id = self._unquote_limited(play_id)
+        if (
+                len(play_id) > self.FOLLOWPLAY_ROUTE_FIELD_MAX_LENGTH
+                or not re.match(r"^(?:\d+@[^\s?#]+|\d+-\d+|\d+)$", play_id)
+                or self._contains_url_reference(decoded_play_id.split("@", 1)[-1])):
+            play_id = ""
+        route_name = str(route.get("name") or "").strip()[:256]
+        if self._contains_url_reference(route_name):
+            route_name = ""
+        resource_mode = str(route.get("resourceMode") or "vod").strip().lower() or "vod"
+        if resource_mode not in self.RESOURCE_SEARCH_MODES:
+            resource_mode = ""
+        if not play_id and not route_resource_id:
+            output.pop("last_play_route", None)
+            return output
+        quality = route.get("quality") if isinstance(route.get("quality"), dict) else {}
+        output["last_play_route"] = {
+            "version": 1,
+            "backend": str(route.get("backend") or "")[:64],
+            "resourceId": route_resource_id,
+            "resourceMode": resource_mode,
+            "playId": play_id,
+            "season": self._positive_int(route.get("season"), 0),
+            "episode": self._positive_int(route.get("episode"), 0),
+            "name": route_name,
+            "quality": {
+                "height": self._positive_int(quality.get("height"), 0),
+                "codec": str(quality.get("codec") or "")[:16],
+                "subtitle": quality.get("subtitle") if isinstance(quality.get("subtitle"), bool) else None,
+                "startupMs": self._positive_int(quality.get("startupMs"), 0),
+            },
+            "updatedAt": self._positive_int(route.get("updatedAt"), 0),
+        }
         return output
 
     def _merge_follow_title_aliases(self, item, values):
@@ -3760,16 +4062,32 @@ class Spider(BaseSpider):
             return False
         return True
 
+    @staticmethod
+    def _utf8_size(value):
+        return _history_utf8_size(value)
+
+    @classmethod
+    def _normalize_history_rows(cls, rows):
+        return _normalize_history_rows_shared(rows)
+
     def _atvp_fetch_history(self):
-        response = self._atvp_history_request("GET")
+        response = self._atvp_history_request("GET", stream=True)
         if response.status_code in (401, 403):
+            response.close()
             raise RuntimeError("AList-TVBox 历史令牌无效")
         if response.status_code != 200:
-            raise RuntimeError(self._atvp_history_http_error(response, "读取"))
-        value = response.json()
+            try:
+                raise RuntimeError(self._atvp_history_http_error(response, "读取"))
+            finally:
+                response.close()
+        value = self._read_bounded_json_response(
+            response,
+            "AList-TVBox History",
+            max_bytes=self.HISTORY_RESPONSE_MAX_BYTES,
+        )
         if not isinstance(value, list):
             raise RuntimeError("AList-TVBox 历史格式无效")
-        return [entry for entry in value if isinstance(entry, dict) and entry.get("key")]
+        return self._normalize_history_rows(value)
 
     def _history_write_enabled(self):
         return bool(self.history_username and self.history_password)
@@ -4064,10 +4382,7 @@ class Spider(BaseSpider):
     @classmethod
     def _history_upload_payload(cls, rows):
         payload = []
-        for row in rows:
-            if not isinstance(row, dict):
-                payload.append(row)
-                continue
+        for row in cls._normalize_history_rows(rows):
             upload = dict(row)
             for key in ("vodPic", "vod_pic"):
                 upload.pop(key, None)
@@ -4095,6 +4410,10 @@ class Spider(BaseSpider):
         )
         if not self._atvp_history_needs_auth(response):
             return response
+        try:
+            response.close()
+        except Exception:
+            pass
         if not self._atvp_history_login(force=True):
             return response
         return sender(
@@ -4163,7 +4482,13 @@ class Spider(BaseSpider):
         try:
             native = self._native_history_export_java()
             if native:
-                return native
+                config_text = str(native.get("config") or "")
+                if self._utf8_size(config_text) > self.HISTORY_CONFIG_MAX_BYTES:
+                    raise RuntimeError("FongMi 当前影视订阅配置过大")
+                return {
+                    "config": config_text,
+                    "rows": self._normalize_history_rows(native.get("rows") or []),
+                }
         except Exception as exc:
             native_error = self._short_error(exc)
             self._atvp_discovery_error = native_error
@@ -4189,6 +4514,8 @@ class Spider(BaseSpider):
                 raise RuntimeError("FongMi 原生History读取失败：%s；本机HTTP导出超时" % native_error)
             raise RuntimeError("FongMi 本机 History 导出超时")
         captured = pending["captured"]
+        if captured.get("error"):
+            raise RuntimeError(str(captured.get("error")))
         try:
             rows = json.loads(captured.get("targets") or "[]")
         except Exception:
@@ -4197,7 +4524,7 @@ class Spider(BaseSpider):
             raise RuntimeError("FongMi 本机 History 格式无效")
         return {
             "config": captured.get("config") or "",
-            "rows": [row for row in rows if isinstance(row, dict) and row.get("key")],
+            "rows": self._normalize_history_rows(rows),
         }
 
     def _native_history_export_java(self, limit=None):
@@ -4217,25 +4544,31 @@ class Spider(BaseSpider):
         rows = history_cls.get()
         values = []
         row_limit = max(0, self._int_value(limit, 0))
+        row_limit = min(row_limit or self.HISTORY_ROW_LIMIT, self.HISTORY_ROW_LIMIT)
         if hasattr(rows, "size") and hasattr(rows, "get"):
             count = int(rows.size())
-            if row_limit:
-                count = min(count, row_limit)
+            count = min(count, row_limit)
             source_rows = (rows.get(index) for index in range(count))
         else:
             source_rows = rows
         for index, row in enumerate(source_rows):
-            if row_limit and index >= row_limit:
+            if index >= row_limit:
                 break
             if isinstance(row, dict):
                 value = row
             else:
-                value = json.loads(str(row.toString() or "{}"))
+                raw = str(row.toString() or "{}")
+                if self._utf8_size(raw) > self.HISTORY_ROW_MAX_BYTES:
+                    continue
+                value = json.loads(raw)
             if isinstance(value, dict):
                 values.append(value)
+        config_text = str(config.toString() or "")
+        if self._utf8_size(config_text) > self.HISTORY_CONFIG_MAX_BYTES:
+            raise RuntimeError("FongMi 当前影视订阅配置过大")
         return {
-            "config": str(config.toString() or ""),
-            "rows": [row for row in values if isinstance(row, dict) and row.get("key")],
+            "config": config_text,
+            "rows": self._normalize_history_rows(values),
         }
 
     def _native_history_callback_url(self, nonce):
@@ -4249,11 +4582,11 @@ class Spider(BaseSpider):
         exported = self._native_history_export()
         if not self.atvp_api and exported.get("config"):
             self._apply_native_subscription_config(exported.get("config"))
-        return exported.get("rows") or []
+        return self._normalize_history_rows(exported.get("rows") or [])
 
     def _import_native_history(self, cloud_rows):
         rows = []
-        for row in cloud_rows:
+        for row in self._normalize_history_rows(cloud_rows):
             normalized = self._history_for_local(row)
             if normalized:
                 rows.append(normalized)
@@ -4453,6 +4786,8 @@ class Spider(BaseSpider):
         return json.dumps({"id": 1, "type": 0, "url": url}, ensure_ascii=False, separators=(",", ":"))
 
     def _merge_native_history(self, local_rows, cloud_rows):
+        local_rows = self._normalize_history_rows(local_rows)
+        cloud_rows = self._normalize_history_rows(cloud_rows)
         cloud_uid = next((self._history_int(row.get("uid"), 1) for row in cloud_rows if self._history_int(row.get("uid"), 0) > 0), 1)
         merged = {}
         for row in cloud_rows:
@@ -4852,6 +5187,9 @@ class Spider(BaseSpider):
             resource_deadline = time.monotonic() + self.RESOURCE_FOREGROUND_BUDGET
             bound_resource = self._bound_resource_row(item)
             bound_resource_id = str((bound_resource or {}).get("vod_id") or "").strip()
+            bound_groups = []
+            preferred_resource_id = ""
+            bound_invalidated = False
             if bound_resource:
                 try:
                     bound_detail = self._resource_detail(bound_resource, deadline=resource_deadline)
@@ -4882,6 +5220,7 @@ class Spider(BaseSpider):
                     if bound_vod:
                         if bound_validated:
                             self._store_validated_resource_detail(bound_resource, validated_bound)
+                            item["_bound_route_validated"] = True
                         rewritten = self._rewrite_resource_vod(
                             bound_vod, item, bound_resource_id,
                             mode=bound_resource.get("_resource_mode") or "vod",
@@ -4889,24 +5228,24 @@ class Spider(BaseSpider):
                             validated=True,
                         )
                         if rewritten:
-                            merged = self._merge_resource_vods(
-                                [rewritten], item, raw_id, base_vod,
-                            )
-                            if merged:
-                                return {"list": [merged]}
+                            bound_groups.append(rewritten)
+                            if bound_validated:
+                                preferred_resource_id = bound_resource_id
                 except Exception:
                     # A stale bound source is deliberately a soft failure; only now
                     # do we prepare independent replacement routes below.
                     if bound_resource_id:
                         self._schedule_bound_route_replacement(item, bound_resource_id)
-                        return {"list": [self._resource_error_vod(
-                            base_vod, "原绑定线路失效，后台备选线路验证中",
-                        )]}
+                        bound_resource = None
+                        bound_invalidated = True
             candidates = self._resource_candidates(
                 item, deadline=min(resource_deadline, time.monotonic() + self.RESOURCE_SEARCH_BUDGET),
             )
-            groups = []
-            group_count = 0
+            groups = list(bound_groups)
+            group_count = sum(
+                len(str(group.get("vod_play_url") or "").split("$$$"))
+                for group in groups if isinstance(group, dict)
+            )
             candidate_group_limit = self.RESOURCE_ROUTE_CANDIDATE_LIMIT
             resource_error = ""
             detail_deadline = resource_deadline
@@ -4939,9 +5278,18 @@ class Spider(BaseSpider):
                 except Exception as exc:
                     resource_error = "AList 资源失败：%s" % self._short_error(exc)
                     continue
-            merged = self._merge_resource_vods(groups, item, raw_id, base_vod)
+            if not groups and bound_resource_id:
+                self._schedule_bound_route_replacement(item, bound_resource_id)
+            merged = self._merge_resource_vods(
+                groups, item, raw_id, base_vod,
+                preferred_resource_id=preferred_resource_id,
+            )
             if merged:
                 return {"list": [merged]}
+            if bound_invalidated:
+                return {"list": [self._resource_error_vod(
+                    base_vod, "原绑定线路失效，后台备选线路验证中",
+                )]}
             _ready, pending = self._supplement_resource_state(item)
             if pending:
                 return {"list": [self._resource_error_vod(base_vod, "后台线路验证中，当前没有已就绪线路")]}
@@ -6113,6 +6461,19 @@ class Spider(BaseSpider):
                 output.append(record)
         return output, completed, limited
 
+    def _route_resume_episode(self, item):
+        if not isinstance(item, dict):
+            return ""
+        history_episode = str(item.get("history_episode") or "").strip()
+        if item.get("_resume_verified") is True and history_episode:
+            return history_episode
+        if item.get("_bound_route_validated") is not True:
+            return ""
+        route = item.get("last_play_route") if isinstance(item.get("last_play_route"), dict) else {}
+        season = self._positive_int(route.get("season"), 0)
+        episode = self._positive_int(route.get("episode"), 0)
+        return "S%02dE%02d" % (season, episode) if season and episode else ""
+
     def _rewrite_resource_vod(
             self, vod, item, resource_id, mode="", provider_hint="", validated=False):
         rewritten_sources = []
@@ -6138,8 +6499,9 @@ class Spider(BaseSpider):
         tracking_season = self._tracking_season(item)
         vod_season = Filter._season(vod.get("vod_name"))
         resume_season = 0
-        if item.get("_resume_verified") is True:
-            resume = re.match(r"^S0*(\d{1,2})E0*\d{1,3}$", str(item.get("history_episode") or ""), re.I)
+        resume_episode = self._route_resume_episode(item)
+        if resume_episode:
+            resume = re.match(r"^S0*(\d{1,2})E0*\d{1,3}$", resume_episode, re.I)
             if resume:
                 resume_season = int(resume.group(1))
         raw_play_url = vod.get("vod_play_url")
@@ -6239,7 +6601,7 @@ class Spider(BaseSpider):
             parsed_entries = kept_parsed_entries
             if entries:
                 preferred_keys = []
-                for value in (item.get("history_episode"), item.get("latest_episode")):
+                for value in (resume_episode, item.get("latest_episode")):
                     match = re.match(r"^S0*(\d{1,2})E0*(\d{1,3})$", str(value or ""), re.I)
                     if match:
                         preferred_keys.append((int(match.group(1)), int(match.group(2))))
@@ -6299,9 +6661,10 @@ class Spider(BaseSpider):
         }
 
     def _resume_episode_match(self, urls, resource_ids, item):
-        if item.get("_resume_verified") is not True:
+        resume_episode = self._route_resume_episode(item)
+        if not resume_episode:
             return None
-        target = re.match(r"^S(\d{2})E(\d{2,3})$", str(item.get("history_episode") or ""))
+        target = re.match(r"^S(\d{2})E(\d{2,3})$", resume_episode)
         if not target:
             return None
         target_season, target_episode = int(target.group(1)), int(target.group(2))
@@ -6337,7 +6700,7 @@ class Spider(BaseSpider):
         ranked.sort(reverse=True)
         return ranked[0][3], ranked[0][4]
 
-    def _merge_resource_vods(self, vods, item, raw_id, base_vod):
+    def _merge_resource_vods(self, vods, item, raw_id, base_vod, preferred_resource_id=""):
         valid = []
         resource_limited = False
         route_candidates_limited = False
@@ -6446,6 +6809,7 @@ class Spider(BaseSpider):
         quality_order = sorted(
             range(len(urls)),
             key=lambda index: (
+                1 if preferred_resource_id and resource_ids[index] == preferred_resource_id else 0,
                 self._positive_int(quality_scores[index].get("resolution"), 0),
                 self._positive_int(quality_scores[index].get("total"), 0),
                 self._positive_int(quality_scores[index].get("startup"), 0),
@@ -6572,12 +6936,17 @@ class Spider(BaseSpider):
                                 continue
                             seen_episodes.add(episode_number)
                             unique_later_records.append(candidate)
-                        resume_records = [record] + unique_later_records
+                        prioritized_ids = {id(candidate) for candidate in unique_later_records}
+                        remaining_records = [
+                            candidate for candidate in group_records
+                            if candidate is not record and id(candidate) not in prioritized_ids
+                        ]
+                        resume_records = [record] + unique_later_records + remaining_records
                         resume_parts = []
                         for resume_index, resume_record in enumerate(resume_records):
                             resume_name = resume_record["name"]
                             if resume_index == 0:
-                                resume_name = "继续播放 %s（从选集播放记录恢复）" % str(item.get("history_episode") or resume_name)
+                                resume_name = "继续播放 %s（从选集播放记录恢复）" % str(self._route_resume_episode(item) or resume_name)
                             resume_parts.append("%s$%s" % (resume_name, resume_record["play_id"]))
                         resume_group_url = "#".join(resume_parts)
                         break
@@ -6607,6 +6976,8 @@ class Spider(BaseSpider):
                 "episodes": resume_episodes,
             })
         for index, source in enumerate(sources):
+            if resume_ready and index == 0:
+                continue
             real_group = urls[index] if index < len(urls) else ""
             episodes = []
             for part_index, part in enumerate(real_group.split("#")):
@@ -6629,7 +7000,7 @@ class Spider(BaseSpider):
                 "episodes": structured_episodes,
             })
         old_remark = str(output.get("vod_remarks") or "").strip()
-        resume_remark = ("续播定位 " + str(item.get("history_episode") or "")) if resume_ready else ""
+        resume_remark = ("续播定位 " + str(self._route_resume_episode(item) or "")) if resume_ready else ""
         completion_remark = ("同盘补全 %d 集" % completion_total) if completion_total else ""
         limit_remark = "资源分集过多 已截断" if resource_limited or completion_limited else ""
         route_remark = "线路候选已按清晰度筛选" if route_candidates_limited else ""
@@ -6708,39 +7079,9 @@ class Spider(BaseSpider):
         value = str(source or "AList资源").strip() or "AList资源"
         return value if value.startswith(prefix + " · ") else "%s · %s" % (prefix, value)
 
-    def _read_bounded_json_response(self, response, label, deadline=None):
-        max_bytes = self.RESOURCE_API_RESPONSE_MAX_BYTES
-        try:
-            try:
-                content_length = int((response.headers or {}).get("Content-Length") or 0)
-            except Exception:
-                content_length = 0
-            if content_length > max_bytes:
-                raise RuntimeError("%s 响应过大" % label)
-            chunks = []
-            received = 0
-            iterator = getattr(response, "iter_content", None)
-            if callable(iterator):
-                parts = iterator(chunk_size=65536)
-            else:
-                parts = [getattr(response, "content", b"")]
-            for chunk in parts:
-                if deadline is not None and time.monotonic() >= deadline:
-                    raise RuntimeError("%s 响应超过总时限" % label)
-                if not chunk:
-                    continue
-                received += len(chunk)
-                if received > max_bytes:
-                    raise RuntimeError("%s 响应过大" % label)
-                chunks.append(chunk)
-            try:
-                return json.loads(b"".join(chunks))
-            except Exception:
-                raise RuntimeError("%s 返回无效 JSON" % label)
-        finally:
-            closer = getattr(response, "close", None)
-            if callable(closer):
-                closer()
+    def _read_bounded_json_response(self, response, label, deadline=None, max_bytes=None):
+        max_bytes = self._positive_int(max_bytes, 0) or self.RESOURCE_API_RESPONSE_MAX_BYTES
+        return _read_bounded_json_shared(response, label, max_bytes, deadline=deadline)
 
     def _resource_api_get(self, mode, params, deadline=None):
         if mode not in self.RESOURCE_SEARCH_MODES:
@@ -7916,8 +8257,10 @@ class Spider(BaseSpider):
                 return fallback
 
     @staticmethod
-    def _unquote_limited(value, rounds=16):
+    def _unquote_limited(value, rounds=None):
         current = str(value or "")
+        if rounds is None:
+            rounds = min(512, max(32, len(current) + 1))
         for _index in range(max(0, int(rounds))):
             decoded = unquote(current)
             if decoded == current:
@@ -7925,9 +8268,25 @@ class Spider(BaseSpider):
             current = decoded
         return current
 
-    @staticmethod
-    def _contains_url_reference(value):
-        return bool(re.search(r"(?i)(?:[a-z][a-z0-9+.-]*:)?//", str(value or "")))
+    @classmethod
+    def _contains_url_reference(cls, value):
+        text = str(value or "").strip()
+        if not text:
+            return False
+        scheme_pattern = re.compile(
+            r"(?i)(?:[a-z][a-z0-9+.-]*:)?//|"
+            r"(?<![a-z0-9+.-])(?:https?|ftp|ftps|file|magnet|data|javascript|"
+            r"vbscript|rtsp|rtmp|mms|ed2k|thunder|flashget|qqdl|ws|wss|blob|"
+            r"content|intent):"
+        )
+        for _index in range(min(512, max(32, len(text) + 1))):
+            if scheme_pattern.search(text):
+                return True
+            decoded = unquote(text)
+            if decoded == text:
+                return False
+            text = decoded
+        return True
 
     def _tmdb_detail(self, raw_id):
         match = re.match(r"^tmdb:(movie|tv):(\d+)$", str(raw_id or ""))
@@ -8784,7 +9143,7 @@ class Spider(BaseSpider):
                 read=2,
                 status=0,
                 backoff_factor=0.4,
-                allowed_methods=frozenset(("GET", "POST")),
+                allowed_methods=frozenset(("GET",)),
             )
             return HTTPAdapter(max_retries=retry, pool_connections=4, pool_maxsize=4)
         except TypeError:
