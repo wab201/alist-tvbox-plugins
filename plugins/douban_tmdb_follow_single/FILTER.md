@@ -1,6 +1,6 @@
 # 过滤器复用说明
 
-过滤器是可选功能。同一份 `豆瓣TMDB追更单入口.py` 同时包含 `Spider` 和 `Filter`，可给其他 AList-TVBox 受管站点补充 History 选集、续播位置和最近可播线路。
+过滤器是可选功能。同一份 `豆瓣TMDB追更单入口.py` 同时包含 `Spider` 和 `Filter`，可给其他 AList-TVBox 受管站点补充 History 选集和续播位置。追更助手的独立备选线路不会共享给其他站点。
 
 ## 准备
 
@@ -37,8 +37,6 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMD
 | `canonicalize_title` | `true` | 统一标题后再匹配 History。 |
 | `auto_select_episode` | `true` | 优先选中上次未完成的同集线路。 |
 | `inject_position` | `true` | 在确认可播放后注入毫秒续播位置。 |
-| `publish_routes` | `true` | 短期共享最近可播线路。 |
-| `route_cache_ttl` | `300` | 最近线路共享秒数。 |
 
 所有配置都有默认值，不填写也能工作。`filter.example.json` 中的 `_说明_*` 只是合法 JSON 注释字段，过滤器会忽略。
 
@@ -57,11 +55,11 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMD
 - 按剧名、年份、季和集匹配 AList-TVBox History。
 - 把未完成的同集线路置前。
 - 在外站确认可播放后注入续播位置。
-- 短期共享最近可播线路，减少重复搜索。
 
 过滤器不会：
 
 - 搜索新的网盘或影视资源。
+- 共享本追更助手的主线路或独立备选线路。
 - 接管本追更助手自身的播放。
 - 修改外站最终播放地址。
 - 接收播放器解码失败回调。

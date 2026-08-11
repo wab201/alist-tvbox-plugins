@@ -46,7 +46,7 @@ class FollowOperationV51Test(unittest.TestCase):
         expected = {
             "name": "豆瓣TMDB追更助手（AList-TVBox专用）",
             "id": "douban_tmdb_follow_single",
-            "version": "51",
+            "version": "52",
         }
         for field, value in expected.items():
             match = re.search(r"(?m)^\s*//@%s:(.+?)\s*$" % field, source)
@@ -64,6 +64,216 @@ class FollowOperationV51Test(unittest.TestCase):
         ids = [row["type_id"] for row in result["class"]]
         self.assertEqual(ids[:3], ["follow_updates", "follow_candidates", "follow_manage"])
         self.assertIn("follow_candidates", result["filters"])
+
+    def test_history_share_policy_defaults_to_both_categories_enabled(self):
+        self.spider._history_share_policy = {"follow": False, "watch": False}
+        self.spider.getCache = Mock(return_value=None)
+
+        policy = self.spider._load_history_share_policy()
+
+        self.assertEqual(policy, {"follow": True, "watch": True})
+        self.assertEqual(self.spider._history_share_policy, policy)
+
+    def test_history_share_policy_cache_read_failure_preserves_disabled_state(self):
+        self.spider._history_share_policy = {"follow": False, "watch": False}
+        self.spider._history_share_policy_loaded = True
+        self.spider.getCache = Mock(side_effect=RuntimeError("cache unavailable"))
+
+        policy = self.spider._load_history_share_policy()
+
+        self.assertEqual(policy, {"follow": False, "watch": False})
+        self.assertEqual(self.spider._history_share_policy, policy)
+        self.assertFalse(self.spider._history_share_policy_loaded)
+
+    def test_history_share_policy_cold_start_cache_failure_blocks_uploads(self):
+        fresh = Spider()
+        try:
+            fresh.getCache = Mock(side_effect=RuntimeError("cache unavailable"))
+            fresh._load_history_share_policy()
+
+            self.assertFalse(fresh._history_share_policy_loaded)
+            self.assertEqual(
+                fresh._history_share_uploads([{"key": "watch", "episodeUrl": "normal-play-id"}]),
+                [],
+            )
+        finally:
+            fresh.destroy()
+
+    def test_history_share_unknown_toggle_unlocks_only_selected_category(self):
+        cache = {}
+        self.spider._history_share_policy = {"follow": True, "watch": True}
+        self.spider._history_share_policy_loaded = False
+        self.spider.setCache = Mock(side_effect=lambda key, value: cache.__setitem__(key, value))
+        self.spider._refresh_follow_categories = Mock(return_value=True)
+        follow = {"key": "follow", "episodeUrl": "S01E01$followplay_invalid"}
+        watch = {"key": "watch", "episodeUrl": "normal-play-id"}
+
+        result = json.loads(self.spider.action("history-share:follow"))
+
+        self.assertIn("已允许异地同步", result["msg"])
+        self.assertEqual(self.spider._history_share_policy, {"follow": True, "watch": False})
+        self.assertTrue(self.spider._history_share_policy_loaded)
+        self.assertEqual(
+            cache[self.spider.HISTORY_SHARE_POLICY_CACHE_KEY]["watch"],
+            False,
+        )
+        self.assertEqual(self.spider._history_share_uploads([follow, watch]), [follow])
+
+    def test_history_share_policy_loads_and_toggle_persists_locally(self):
+        cache = {
+            self.spider.HISTORY_SHARE_POLICY_CACHE_KEY: {
+                "version": 1, "follow": False, "watch": True,
+            },
+        }
+        self.spider.getCache = Mock(side_effect=lambda key: cache.get(key))
+        self.spider.setCache = Mock(side_effect=lambda key, value: cache.__setitem__(key, value))
+        self.spider._refresh_follow_categories = Mock(return_value=True)
+
+        self.spider._load_history_share_policy()
+        result = json.loads(self.spider.action("history-share:follow"))
+
+        self.assertTrue(self.spider._history_share_policy["follow"])
+        self.assertTrue(cache[self.spider.HISTORY_SHARE_POLICY_CACHE_KEY]["follow"])
+        self.assertTrue(cache[self.spider.HISTORY_SHARE_POLICY_CACHE_KEY]["watch"])
+        self.assertIn("仅影响本机未来上传", result["msg"])
+        self.spider._refresh_follow_categories.assert_called_once()
+
+    def test_history_share_toggle_failure_does_not_change_memory(self):
+        self.spider._history_share_policy = {"follow": True, "watch": False}
+        self.spider.setCache = Mock(return_value="failed")
+        self.spider._refresh_follow_categories = Mock(return_value=True)
+
+        result = json.loads(self.spider.action("history-share:follow"))
+
+        self.assertEqual(self.spider._history_share_policy, {"follow": True, "watch": False})
+        self.assertIn("未能保存", result["msg"])
+        self.spider._refresh_follow_categories.assert_not_called()
+
+    def test_history_share_filters_follow_and_watch_uploads_independently(self):
+        play_id = self.spider._build_followplay(
+            "1@episode-1",
+            {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集"},
+            "resource-101", 1, 1, "S01E01",
+        )
+        follow = {"key": "follow", "episodeUrl": "S01E01$" + play_id}
+        watch = {"key": "watch", "episodeUrl": "normal-play-id"}
+
+        self.spider._history_share_policy = {"follow": False, "watch": True}
+        self.spider._history_share_policy_loaded = True
+        self.assertEqual(self.spider._history_share_uploads([follow, watch]), [watch])
+
+        self.spider._history_share_policy = {"follow": True, "watch": False}
+        self.assertEqual(self.spider._history_share_uploads([follow, watch]), [follow])
+
+    def test_invalid_followplay_reference_fails_closed_as_follow_upload(self):
+        malformed_follow = {"key": "follow", "episodeUrl": "S01E01$followplay_invalid"}
+        watch = {"key": "watch", "episodeUrl": "normal-play-id"}
+        self.spider._history_share_policy = {"follow": False, "watch": True}
+        self.spider._history_share_policy_loaded = True
+
+        self.assertEqual(
+            self.spider._history_share_uploads([malformed_follow, watch]),
+            [watch],
+        )
+
+    def test_history_sync_still_pulls_and_imports_when_all_uploads_are_disabled(self):
+        merged = [{"key": "cloud-row"}]
+        uploads = [
+            {"key": "follow", "episodeUrl": "followplay_invalid"},
+            {"key": "watch", "episodeUrl": "normal-play-id"},
+        ]
+        self.spider._history_share_policy = {"follow": False, "watch": False}
+        self.spider._history_share_policy_loaded = True
+        self.spider._capture_native_history = Mock(return_value=uploads)
+        self.spider._atvp_fetch_history = Mock(return_value=merged)
+        self.spider._merge_native_history = Mock(return_value=(merged, uploads))
+        self.spider._atvp_history_push = Mock()
+        self.spider._import_native_history = Mock(return_value=1)
+        self.spider.history_username = "user"
+        self.spider.history_password = "password"
+
+        result = self.spider._sync_history_once()
+
+        self.spider._atvp_fetch_history.assert_called_once()
+        self.spider._import_native_history.assert_called_once_with(merged)
+        self.spider._atvp_history_push.assert_not_called()
+        self.assertEqual(result["upload_candidates"], 2)
+        self.assertEqual(result["upload_allowed"], 0)
+        self.assertEqual(result["upload_blocked"], 2)
+
+    def test_history_sync_uploads_only_permitted_category_and_keeps_import(self):
+        play_id = self.spider._build_followplay(
+            "1@episode-1",
+            {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集"},
+            "resource-101", 1, 1, "S01E01",
+        )
+        follow = {"key": "follow", "episodeUrl": "S01E01$" + play_id}
+        watch = {"key": "watch", "episodeUrl": "normal-play-id"}
+        merged = [{"key": "cloud-row"}]
+        self.spider._history_share_policy = {"follow": False, "watch": True}
+        self.spider._history_share_policy_loaded = True
+        self.spider._capture_native_history = Mock(return_value=[follow, watch])
+        self.spider._atvp_fetch_history = Mock(return_value=merged)
+        self.spider._merge_native_history = Mock(return_value=(merged, [follow, watch]))
+        self.spider._atvp_history_push = Mock()
+        self.spider._import_native_history = Mock(return_value=1)
+        self.spider.history_username = "user"
+        self.spider.history_password = "password"
+
+        result = self.spider._sync_history_once()
+
+        self.spider._atvp_history_push.assert_called_once_with([watch])
+        self.spider._import_native_history.assert_called_once_with(merged)
+        self.assertEqual(result["uploaded"], 1)
+        self.assertEqual(result["upload_blocked"], 1)
+
+    def test_history_share_toggle_prevents_pending_sync_from_using_old_policy(self):
+        watch = {"key": "watch", "episodeUrl": "normal-play-id"}
+        merge_started = MODULE.threading.Event()
+        merge_release = MODULE.threading.Event()
+        result = {}
+
+        def merge(_local, _cloud):
+            merge_started.set()
+            self.assertTrue(merge_release.wait(2))
+            return [watch], [watch]
+
+        self.spider._history_share_policy = {"follow": True, "watch": True}
+        self.spider._history_share_policy_loaded = True
+        self.spider.setCache = Mock(return_value=None)
+        self.spider._refresh_follow_categories = Mock(return_value=True)
+        self.spider._capture_native_history = Mock(return_value=[watch])
+        self.spider._atvp_fetch_history = Mock(return_value=[])
+        self.spider._merge_native_history = Mock(side_effect=merge)
+        self.spider._atvp_history_push = Mock()
+        self.spider._import_native_history = Mock(return_value=1)
+        self.spider.history_username = "user"
+        self.spider.history_password = "password"
+
+        worker = MODULE.threading.Thread(
+            target=lambda: result.setdefault("value", self.spider._sync_history_once())
+        )
+        worker.start()
+        self.assertTrue(merge_started.wait(2))
+        toggle = json.loads(self.spider.action("history-share:watch"))
+        merge_release.set()
+        worker.join(2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertIn("已禁止异地同步", toggle["msg"])
+        self.spider._atvp_history_push.assert_not_called()
+        self.assertEqual(result["value"]["upload_blocked"], 1)
+
+    def test_history_management_cards_reflect_local_share_policy(self):
+        self.spider._history_share_policy = {"follow": False, "watch": True}
+        self.spider._history_share_policy_loaded = True
+
+        cards = self.spider._history_management_cards()
+        by_action = {card.get("action"): card for card in cards}
+
+        self.assertIn("禁止异地同步", by_action["history-share:follow"]["vod_name"])
+        self.assertIn("允许异地同步", by_action["history-share:watch"]["vod_name"])
+        self.assertIn("不影响云端读取", by_action["history-share:follow"]["vod_remarks"])
 
     def test_navigation_cards_search_directly_without_mode_card(self):
         self.spider._tmdb_api = Mock(return_value={
@@ -340,6 +550,45 @@ class FollowOperationV51Test(unittest.TestCase):
         self.assertIn("已开始确认追更", second_result["msg"])
         self.assertEqual(len(self.spider._follow_enrich_jobs), 2)
         self.spider._follow_enrich_jobs.clear()
+
+    def test_concurrent_candidate_jobs_publish_terminal_state_only_after_last_job(self):
+        releases = {
+            "先完成剧集": MODULE.threading.Event(),
+            "后完成剧集": MODULE.threading.Event(),
+        }
+        started = {title: MODULE.threading.Event() for title in releases}
+
+        def resolve(candidate):
+            title = candidate["title"]
+            started[title].set()
+            releases[title].wait(2)
+            tmdb_id = 101 if title == "先完成剧集" else 202
+            return {"tmdb_id": tmdb_id, "title": title, "latest_episode": "S01E03"}, ""
+
+        self.spider._resolve_follow_candidate = resolve
+        self.spider._refresh_follow_categories = Mock(return_value=True)
+        for title in releases:
+            candidate = {"title": title, "match_title": title}
+            self.spider.action(
+                self.spider.FOLLOW_CANDIDATE_ADD_PREFIX
+                + self.spider._encode_follow_candidate(candidate)
+            )
+            self.assertTrue(started[title].wait(1))
+
+        releases["先完成剧集"].set()
+        deadline = time.time() + 1
+        while len(self.spider._follow_enrich_jobs) > 1 and time.time() < deadline:
+            time.sleep(0.01)
+
+        self.assertEqual(len(self.spider._follow_enrich_jobs), 1)
+        self.assertEqual(self.spider._follow_action_state["last"]["state"], "running")
+        self.assertIn("剩余 1 项", self.spider._follow_action_state["last"]["message"])
+
+        releases["后完成剧集"].set()
+        self._wait_follow_jobs()
+
+        self.assertEqual(self.spider._follow_action_state["last"]["state"], "done")
+        self.assertIn("成功 2 项", self.spider._follow_action_state["last"]["message"])
 
     def test_seen_and_remove_confirmations_report_completion_status(self):
         self.spider._refresh_follow_categories = Mock(return_value=True)
@@ -825,8 +1074,1372 @@ class FollowOperationV51Test(unittest.TestCase):
                 payload = self.spider._parse_followplay(part.rpartition("$")[2])
                 if payload:
                     parsed_payloads.append(payload)
-        self.assertTrue(any(payload.get("fallbacks") for payload in parsed_payloads))
-        self.assertIn("资源分集过多 已截断", merged["vod_remarks"])
+        self.assertFalse(any(payload.get("fallbacks") for payload in parsed_payloads))
+        self.assertEqual(len(merged["vod_play_from"].split("$$$")), 3)
+
+    def test_bound_resource_is_validated_before_global_search(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {
+                "tmdb_id": 101,
+                "title": "测试剧集",
+                "alist_vod_id": "bound-resource",
+                "last_play_route": {
+                    "version": 1,
+                    "backend": self.spider._resource_capability_identity(),
+                    "resourceId": "bound-resource",
+                    "resourceMode": "vod",
+                    "playId": "1@bound-episode",
+                    "season": 1,
+                    "episode": 6,
+                    "updatedAt": int(time.time()),
+                },
+            },
+        }}
+        metadata = {"list": [{
+            "vod_id": "tmdb:tv:101",
+            "vod_name": "测试剧集",
+            "vod_pic": "poster.jpg",
+            "vod_year": "2026",
+        }]}
+        validated = {"list": [{
+            "vod_name": "测试剧集",
+            "vod_play_from": "4K线路",
+            "vod_play_url": "S01E06$1@bound-episode",
+        }]}
+        rewritten = {
+            "vod_play_from": "4K线路",
+            "vod_play_url": "S01E06$bound-packed",
+            "resource_id": "bound-resource",
+            "group_seasons": [1],
+            "group_providers": ["quark"],
+            "group_quality": [{"resolution": 20, "total": 70}],
+        }
+        self.spider._atvp_history_snapshot = Mock(return_value=[])
+        self.spider._resource_detail = Mock(return_value=validated)
+        self.spider._validated_playable_detail = Mock(return_value=validated)
+        self.spider._rewrite_resource_vod = Mock(return_value=rewritten)
+        self.spider._merge_resource_vods = Mock(return_value={"vod_name": "测试剧集", "vod_play_from": "4K线路"})
+        self.spider._resource_candidates = Mock(side_effect=AssertionError("bound route triggered global search"))
+
+        result = self.spider._alist_detail_from_metadata("tmdb:tv:101", metadata)
+
+        self.assertEqual(result["list"][0]["vod_play_from"], "4K线路")
+        bound_row = self.spider._resource_detail.call_args.args[0]
+        self.assertEqual(bound_row["vod_id"], "bound-resource")
+        self.assertEqual(bound_row["_resource_mode"], "vod")
+        self.assertEqual(
+            self.spider._validated_playable_detail.call_args.kwargs["preferred_route"]["playId"],
+            "1@bound-episode",
+        )
+        self.spider._resource_candidates.assert_not_called()
+
+    def test_persisted_route_is_probed_first_after_process_restart(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {
+                "tmdb_id": 101,
+                "title": "测试剧集",
+                "latest_episode": "S01E01",
+                "last_play_route": {
+                    "version": 1,
+                    "backend": self.spider._resource_capability_identity(),
+                    "resourceId": "bound-resource",
+                    "resourceMode": "vod",
+                    "playId": "1@episode-6",
+                    "season": 1,
+                    "episode": 6,
+                    "updatedAt": int(time.time()),
+                },
+            },
+        }}
+        self.assertEqual(self.spider._route_probe_cache, {})
+        self.spider._atvp_history_snapshot = Mock(return_value=[])
+        self.spider._resource_detail = Mock(return_value={"list": [{
+            "vod_name": "测试剧集",
+            "vod_play_from": "绑定线路",
+            "vod_play_url": "S01E01$1@episode-1#S01E06$1@episode-6",
+        }]})
+        played = []
+
+        def atvp_play(play_id, **_kwargs):
+            played.append(play_id)
+            return {"parse": 0, "url": "https://cdn.example/%s.m3u8" % play_id, "header": {}}
+
+        self.spider._atvp_play = Mock(side_effect=atvp_play)
+        self.spider._probe_media_output = Mock(return_value={
+            "checked_at": time.time(),
+            "reachable": True,
+            "startup_ms": 100,
+            "height": 1080,
+            "codec": "h264",
+            "output": {"parse": 0, "url": "https://cdn.example/episode-6.m3u8", "header": {}},
+        })
+        self.spider._resource_candidates = Mock(
+            side_effect=AssertionError("valid persisted route triggered replacement search")
+        )
+
+        result = self.spider._alist_detail_from_metadata(
+            "tmdb:tv:101",
+            {"list": [{"vod_id": "tmdb:tv:101", "vod_name": "测试剧集"}]},
+        )
+
+        self.assertTrue(result["list"][0]["vod_play_url"])
+        self.assertEqual(played[0], "1@episode-6")
+        self.spider._resource_candidates.assert_not_called()
+
+    def test_persisted_route_group_is_validated_before_current_episode_group(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        played = []
+        self.spider._atvp_play = Mock(side_effect=lambda play_id, **_kwargs: (
+            played.append(play_id)
+            or {"parse": 0, "url": "https://cdn.example/%s.m3u8" % play_id, "header": {}}
+        ))
+        self.spider._probe_media_output = Mock(return_value={
+            "checked_at": time.time(), "reachable": True, "startup_ms": 100,
+            "output": {"parse": 0, "url": "https://cdn.example/video.m3u8", "header": {}},
+        })
+
+        result = self.spider._validated_playable_detail(
+            {"list": [{
+                "vod_play_from": "当前集线路$$$上次线路",
+                "vod_play_url": "S01E01$1@episode-1$$$S01E06$1@episode-6",
+            }]},
+            {"latest_episode": "S01E01", "trackingSeason": 1},
+            time.monotonic() + 10,
+            1,
+            resource_id="bound-resource",
+            resource_mode="vod",
+            preferred_route={
+                "resourceId": "bound-resource", "resourceMode": "vod",
+                "playId": "1@episode-6", "season": 1, "episode": 6,
+            },
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(played[0], "1@episode-6")
+        self.assertEqual(result["list"][0]["vod_play_from"], "上次线路")
+
+    def test_reused_play_id_is_not_bound_to_a_different_episode_label(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        played = []
+        self.spider._atvp_play = Mock(side_effect=lambda play_id, **_kwargs: (
+            played.append(play_id)
+            or {"parse": 0, "url": "https://cdn.example/%s.m3u8" % play_id, "header": {}}
+        ))
+        self.spider._probe_media_output = Mock(return_value={
+            "checked_at": time.time(), "reachable": True, "startup_ms": 100,
+            "output": {"parse": 0, "url": "https://cdn.example/video.m3u8", "header": {}},
+        })
+
+        self.spider._validated_playable_detail(
+            {"list": [{
+                "vod_play_from": "变更后线路",
+                "vod_play_url": "S01E01$1@reused#S01E06$1@episode-6-new",
+            }]},
+            {"latest_episode": "S01E06", "trackingSeason": 1},
+            time.monotonic() + 10,
+            1,
+            resource_id="bound-resource",
+            resource_mode="vod",
+            preferred_route={
+                "resourceId": "bound-resource", "resourceMode": "vod",
+                "playId": "1@reused", "season": 1, "episode": 6,
+            },
+        )
+
+        self.assertEqual(played[0], "1@episode-6-new")
+
+    def test_bound_probe_is_not_trusted_when_detail_route_changed(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {
+                "tmdb_id": 101,
+                "title": "测试剧集",
+                "alist_vod_id": "bound-resource",
+                "last_play_route": {
+                    "version": 1,
+                    "resourceId": "bound-resource",
+                    "resourceMode": "vod",
+                    "playId": "1@old-episode",
+                    "season": 1,
+                    "episode": 6,
+                    "updatedAt": int(time.time()),
+                },
+            },
+        }}
+        self.spider._cache_route_probe(
+            "1@old-episode",
+            {
+                "checked_at": time.time(),
+                "reachable": True,
+                "output": {"parse": 0, "url": "https://cdn.example/old.m3u8", "header": {}},
+            },
+            resource_id="bound-resource",
+            resource_mode="vod",
+        )
+        self.spider._atvp_history_snapshot = Mock(return_value=[])
+        self.spider._resource_detail = Mock(return_value={"list": [{
+            "vod_name": "测试剧集",
+            "vod_play_from": "已变更线路",
+            "vod_play_url": "S01E06$1@new-episode",
+        }]})
+        self.spider._validated_playable_detail = Mock(return_value=None)
+        self.spider._resource_candidates = Mock(return_value=[])
+        self.spider._supplement_resource_state = Mock(return_value=(False, False))
+        self.spider._schedule_bound_route_replacement = Mock(return_value=True)
+
+        result = self.spider._alist_detail_from_metadata(
+            "tmdb:tv:101",
+            {"list": [{"vod_id": "tmdb:tv:101", "vod_name": "测试剧集"}]},
+        )
+
+        self.spider._validated_playable_detail.assert_called_once()
+        self.assertEqual(result["list"][0]["vod_play_from"], "")
+        self.assertIn("原绑定线路失效，后台备选线路验证中", result["list"][0]["vod_director"])
+        replacement_item, replacement_id = self.spider._schedule_bound_route_replacement.call_args.args
+        self.assertEqual(replacement_id, "bound-resource")
+        self.assertEqual(replacement_item["tmdb_id"], 101)
+        self.assertEqual(replacement_item.get("history_episode", ""), "")
+
+    def test_persisted_binding_remains_valid_without_route_ttl(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {
+                "tmdb_id": 101,
+                "title": "测试剧集",
+                "alist_vod_id": "bound-resource",
+                "alist_resource_mode": "vod",
+                "last_play_route": {
+                    "resourceId": "bound-resource",
+                    "resourceMode": "vod",
+                    "playId": "1@episode-6",
+                    "season": 1,
+                    "episode": 6,
+                    "updatedAt": 1,
+                },
+            },
+        }}
+
+        row = self.spider._bound_resource_row({
+            "tmdb_id": 101,
+            "source_id": "tmdb:tv:101",
+            "alist_vod_id": "bound-resource",
+            "alist_resource_mode": "vod",
+        })
+
+        self.assertEqual(row["vod_id"], "bound-resource")
+        self.assertEqual(row["_resource_mode"], "vod")
+
+    def test_stale_binding_schedules_background_replacement_and_keeps_progress(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {
+                "tmdb_id": 101,
+                "source_id": "tmdb:tv:101",
+                "title": "测试剧集",
+                "history_episode": "S01E06",
+                "history_position": 321000,
+                "history_duration": 1200000,
+                "alist_vod_id": "old-resource",
+                "last_play_route": {
+                    "resourceId": "old-resource",
+                    "resourceMode": "vod",
+                    "playId": "1@old-episode",
+                    "season": 1,
+                    "episode": 6,
+                },
+            },
+        }}
+        self.spider._resource_candidates = Mock(return_value=[{
+            "vod_id": "replacement-resource", "_resource_mode": "pansou",
+        }])
+        self.spider._resource_detail = Mock(return_value={"list": [{
+            "vod_name": "测试剧集", "vod_play_from": "备选网盘",
+            "vod_play_url": "S01E06$1@replacement-episode",
+        }]})
+        self.spider._validated_playable_detail = Mock(return_value={"list": [{
+            "vod_name": "测试剧集", "vod_play_from": "备选网盘",
+            "vod_play_url": "S01E06$1@replacement-episode",
+        }]})
+        self.spider._store_validated_resource_detail = Mock(return_value=True)
+        self.spider._schedule_active_detail_refresh = Mock(return_value=True)
+
+        self.assertTrue(self.spider._schedule_bound_route_replacement(
+            dict(self.spider._follow_memory["items"]["101"]), "old-resource",
+        ))
+        deadline = time.time() + 2
+        while self.spider._bound_replacement_jobs and time.time() < deadline:
+            time.sleep(0.01)
+
+        item = self.spider._follow_memory["items"]["101"]
+        self.assertFalse(self.spider._bound_replacement_jobs)
+        self.assertEqual(item["alist_vod_id"], "replacement-resource")
+        self.assertEqual(item["alist_resource_mode"], "pansou")
+        self.assertEqual(item["history_episode"], "S01E06")
+        self.assertEqual(item["history_position"], 321000)
+        self.assertNotIn("last_play_route", item)
+        self.assertEqual(self.spider._bound_resource_row(item)["vod_id"], "replacement-resource")
+        self.spider._schedule_active_detail_refresh.assert_called_once()
+
+    def test_old_replacement_worker_cannot_clear_new_lifecycle_job_owner(self):
+        self.spider._alist_tvbox_plugin = True
+        item = {
+            "tmdb_id": 101,
+            "source_id": "tmdb:tv:101",
+            "title": "测试剧集",
+            "alist_vod_id": "old-resource",
+        }
+        old_started = MODULE.threading.Event()
+        new_started = MODULE.threading.Event()
+        old_release = MODULE.threading.Event()
+        new_release = MODULE.threading.Event()
+        call_lock = MODULE.threading.Lock()
+        call_count = {"value": 0}
+
+        def candidates(_item, deadline=None):
+            with call_lock:
+                call_count["value"] += 1
+                current = call_count["value"]
+            if current == 1:
+                old_started.set()
+                old_release.wait(1)
+            else:
+                new_started.set()
+                new_release.wait(1)
+            return []
+
+        self.spider._resource_candidates = Mock(side_effect=candidates)
+        self.assertTrue(self.spider._schedule_bound_route_replacement(item, "old-resource"))
+        self.assertTrue(old_started.wait(1))
+
+        self.spider.init({"atvp_plugin_mode": "alist-tvbox-raw"})
+        self.assertTrue(self.spider._schedule_bound_route_replacement(item, "old-resource"))
+        self.assertTrue(new_started.wait(1))
+        job_key = self.spider._bound_replacement_key(item, "old-resource")
+        new_job_owner = self.spider._bound_replacement_jobs[job_key]
+
+        old_release.set()
+        deadline = time.time() + 1
+        while self.spider._bound_replacement_jobs.get(job_key) is not new_job_owner and time.time() < deadline:
+            time.sleep(0.01)
+
+        self.assertIs(self.spider._bound_replacement_jobs.get(job_key), new_job_owner)
+        new_release.set()
+        deadline = time.time() + 1
+        while self.spider._bound_replacement_jobs and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(self.spider._bound_replacement_jobs, {})
+
+    def test_stale_backend_binding_does_not_fall_back_to_old_resource_id(self):
+        self.spider.atvp_api = "https://new-atvp.example"
+        self.spider.atvp_token = "new-token"
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {
+                "tmdb_id": 101,
+                "title": "测试剧集",
+                "alist_vod_id": "old-resource",
+                "last_play_route": {
+                    "backend": "old-backend",
+                    "resourceId": "old-resource",
+                    "resourceMode": "vod",
+                    "playId": "1@old",
+                },
+            },
+        }}
+
+        self.assertIsNone(self.spider._bound_resource_row({"tmdb_id": 101, "source_id": "tmdb:tv:101"}))
+
+    def test_detail_keeps_primary_plus_two_independent_routes_resolution_first(self):
+        self.spider.route_preheat = False
+        self.spider.resource_limit = 5
+        item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集", "trackingSeason": 1}
+        qualities = [
+            ("720P", 12, 99),
+            ("1080P快速", 16, 95),
+            ("1440P", 18, 80),
+            ("4K较慢", 20, 72),
+        ]
+        vods = []
+        for index, (source, resolution, total) in enumerate(qualities):
+            vods.append({
+                "vod_play_from": source,
+                "vod_play_url": "S01E01$route-%d" % index,
+                "resource_id": "resource-%d" % index,
+                "group_seasons": [1],
+                "group_providers": ["provider-%d" % index],
+                "group_quality": [{
+                    "resolution": resolution,
+                    "total": total,
+                    "startup": total,
+                    "stability": 10,
+                }],
+            })
+
+        merged = self.spider._merge_resource_vods(
+            vods, item, "tmdb:tv:101", {"vod_name": "测试剧集", "vod_remarks": "原摘要"},
+        )
+
+        sources = merged["vod_play_from"].split("$$$")
+        self.assertEqual(len(sources), 3)
+        self.assertIn("4K较慢", sources[0])
+        self.assertIn("1440P", sources[1])
+        self.assertIn("1080P快速", sources[2])
+        self.assertNotIn("同集备用线路", merged["vod_remarks"])
+        for group in merged["vod_play_url"].split("$$$"):
+            payload = self.spider._parse_followplay(group.split("#")[-1].rpartition("$")[2])
+            self.assertFalse((payload or {}).get("fallbacks"))
+
+    def test_single_resource_keeps_five_candidates_until_resolution_selection(self):
+        item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集", "trackingSeason": 1}
+        vod = {
+            "vod_name": "测试剧集",
+            "vod_play_from": "720P$$$1080P$$$1440P$$$4K",
+            "vod_play_url": "$$$".join(
+                "S01E01$1@route-%d" % index for index in range(4)
+            ),
+            "_route_quality": [
+                {"resolution": 12, "total": 99, "startup": 99, "stability": 10},
+                {"resolution": 16, "total": 95, "startup": 95, "stability": 10},
+                {"resolution": 18, "total": 80, "startup": 80, "stability": 10},
+                {"resolution": 20, "total": 72, "startup": 72, "stability": 10},
+            ],
+        }
+
+        rewritten = self.spider._rewrite_resource_vod(vod, item, "resource-101", mode="vod", validated=True)
+        merged = self.spider._merge_resource_vods(
+            [rewritten], item, "tmdb:tv:101", {"vod_name": "测试剧集"},
+        )
+
+        sources = merged["vod_play_from"].split("$$$")
+        self.assertEqual(len(sources), 3)
+        self.assertIn("4K", sources[0])
+        self.assertIn("1440P", sources[1])
+        self.assertIn("1080P", sources[2])
+
+    def test_candidate_pool_trim_is_not_reported_as_episode_truncation(self):
+        item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集", "trackingSeason": 1}
+        sources = ["720P", "1080P", "1440P", "4K", "4K高码", "备用低清"]
+        vod = {
+            "vod_name": "测试剧集",
+            "vod_play_from": "$$$".join(sources),
+            "vod_play_url": "$$$".join(
+                "S01E01$1@route-%d" % index for index in range(len(sources))
+            ),
+            "_route_quality": [
+                {"resolution": 12 + index, "total": 70 + index, "startup": 70, "stability": 10}
+                for index in range(len(sources))
+            ],
+        }
+
+        rewritten = self.spider._rewrite_resource_vod(vod, item, "resource-101", mode="vod")
+        merged = self.spider._merge_resource_vods(
+            [rewritten], item, "tmdb:tv:101", {"vod_name": "测试剧集"},
+        )
+
+        self.assertTrue(rewritten["_route_candidates_limited"])
+        self.assertFalse(rewritten["_resource_limited"])
+        self.assertIn("线路候选已按清晰度筛选", merged["vod_remarks"])
+        self.assertNotIn("资源分集过多 已截断", merged["vod_remarks"])
+
+    def test_detail_collects_candidate_pool_before_selecting_three_routes(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.route_preheat = False
+        self.spider.resource_limit = 3
+        self.spider._atvp_history_snapshot = Mock(return_value=[])
+        candidates = [{"vod_id": "resource-%d" % index} for index in range(4)]
+        qualities = {
+            "resource-0": ("720P", 12, 99),
+            "resource-1": ("1080P", 16, 95),
+            "resource-2": ("1440P", 18, 80),
+            "resource-3": ("4K", 20, 72),
+        }
+        self.spider._resource_candidates = Mock(return_value=candidates)
+        self.spider._resource_detail = Mock(side_effect=lambda row, deadline=None: {
+            "list": [{"vod_name": "测试剧集", "vod_play_url": "S01E01$1@raw"}]
+        })
+
+        def rewrite(_vod, _item, resource_id, **_kwargs):
+            source, resolution, total = qualities[resource_id]
+            return {
+                "vod_play_from": source,
+                "vod_play_url": "S01E01$route-%s" % resource_id,
+                "resource_id": resource_id,
+                "group_seasons": [1],
+                "group_providers": ["provider-%s" % resource_id],
+                "group_quality": [{
+                    "resolution": resolution,
+                    "total": total,
+                    "startup": total,
+                    "stability": 10,
+                }],
+            }
+
+        self.spider._rewrite_resource_vod = Mock(side_effect=rewrite)
+
+        result = self.spider._alist_detail_from_metadata(
+            "tmdb:tv:101",
+            {"list": [{"vod_id": "tmdb:tv:101", "vod_name": "测试剧集"}]},
+        )
+
+        sources = result["list"][0]["vod_play_from"].split("$$$")
+        self.assertEqual(self.spider._resource_detail.call_count, 4)
+        self.assertEqual(len(sources), 3)
+        self.assertIn("4K", sources[0])
+        self.assertIn("1440P", sources[1])
+        self.assertIn("1080P", sources[2])
+        self.assertNotIn("资源分集过多 已截断", result["list"][0]["vod_remarks"])
+        self.assertIn("线路候选已按清晰度筛选", result["list"][0]["vod_remarks"])
+
+    def test_removed_shared_route_cache_symbols_stay_out_of_plugin(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        for symbol in (
+                "_publish_route", "_schedule_route_cache_write", "_local_cache_set",
+                "_local_cache_get", "_shared_filter_route_candidates", "_followplay_with_fallbacks",
+        ):
+            self.assertNotIn(symbol, source)
+
+    def test_player_does_not_mix_independent_or_shared_fallback_routes(self):
+        item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集"}
+        play_id = self.spider._build_followplay(
+            "1@primary", item, "resource-primary", 1, 6, "S01E06",
+        )
+        self.spider._atvp_play = Mock(side_effect=RuntimeError("primary failed"))
+
+        result = self.spider.playerContent("测试线路", play_id, [])
+
+        self.assertEqual(self.spider._atvp_play.call_count, 1)
+        self.spider._atvp_play.assert_called_once_with("1@primary", deadline=self.spider._atvp_play.call_args.kwargs["deadline"])
+        self.assertIn("已尝试 1 条线路", result["msg"])
+
+    def test_successful_playback_waits_before_history_sync(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider._schedule_playback_sync_check = Mock(return_value=True)
+        self.spider._trigger_history_sync_now = Mock(return_value=True)
+        parsed = {
+            "tmdbId": 101,
+            "sourceId": "tmdb:tv:101",
+            "resourceId": "resource-101",
+            "resourceMode": "vod",
+            "season": 1,
+            "episode": 6,
+            "name": "S01E06",
+        }
+
+        self.assertTrue(self.spider._register_playback_sync_window(parsed))
+
+        self.spider._schedule_playback_sync_check.assert_called_once()
+        self.assertEqual(
+            self.spider._schedule_playback_sync_check.call_args.args[1],
+            self.spider.PLAYBACK_SYNC_MIN_SECONDS,
+        )
+        scheduled_owner = self.spider._schedule_playback_sync_check.call_args.kwargs["expected_owner"]
+        self.assertIs(
+            scheduled_owner,
+            next(iter(self.spider._playback_sync_pending.values()))["owner"],
+        )
+        self.spider._trigger_history_sync_now.assert_not_called()
+
+    def test_failed_initial_playback_timer_removes_pending_window(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider._schedule_playback_sync_check = Mock(return_value=False)
+        parsed = {
+            "tmdbId": 101,
+            "sourceId": "tmdb:tv:101",
+            "resourceId": "resource-101",
+            "resourceMode": "vod",
+            "season": 1,
+            "episode": 6,
+        }
+
+        self.assertFalse(self.spider._register_playback_sync_window(parsed))
+
+        self.assertEqual(self.spider._playback_sync_pending, {})
+
+    def test_playback_exit_after_eight_minutes_triggers_history_sync(self):
+        self.spider._alist_tvbox_plugin = True
+        owner = object()
+        self.spider._playback_sync_pending["pending"] = {
+            "owner": owner,
+            "started_at": time.time() - self.spider.PLAYBACK_SYNC_MIN_SECONDS - 1,
+            "tmdb_id": 101,
+            "source_id": "tmdb:tv:101",
+            "title": "测试剧集",
+            "resource_id": "resource-101",
+            "season": 1,
+            "episode": 6,
+        }
+        self.spider._playback_activity_active = Mock(return_value=False)
+        self.spider._capture_native_history = Mock(return_value=[{"key": "history-1"}])
+        self.spider._atvp_history_for_item = Mock(return_value={"position": 500000})
+        self.spider._trigger_history_sync_now = Mock(return_value=True)
+
+        self.assertTrue(self.spider._playback_sync_check("pending"))
+
+        self.spider._trigger_history_sync_now.assert_called_once_with()
+        self.assertNotIn("pending", self.spider._playback_sync_pending)
+
+    def test_stale_playback_timer_token_cannot_consume_new_pending_window(self):
+        self.spider._playback_sync_pending["pending"] = {"started_at": time.time()}
+        self.spider._playback_sync_tokens["pending"] = object()
+
+        self.assertFalse(self.spider._playback_sync_check("pending", object()))
+
+        self.assertIn("pending", self.spider._playback_sync_pending)
+
+    def test_navigation_flush_cannot_duplicate_inflight_playback_sync_check(self):
+        started = MODULE.threading.Event()
+        release = MODULE.threading.Event()
+        token = object()
+        self.spider._playback_sync_pending["pending"] = {
+            "owner": object(),
+            "started_at": time.time(),
+        }
+        self.spider._playback_sync_tokens["pending"] = token
+
+        def owned(_key, _marker):
+            started.set()
+            release.wait(1)
+            return True
+
+        self.spider._playback_sync_check_owned = Mock(side_effect=owned)
+        first = MODULE.threading.Thread(
+            target=self.spider._playback_sync_check, args=("pending", token),
+        )
+        first.start()
+        self.assertTrue(started.wait(1))
+
+        self.spider._flush_playback_sync_on_navigation()
+        time.sleep(0.05)
+
+        self.assertEqual(self.spider._playback_sync_check_owned.call_count, 1)
+        release.set()
+        first.join(1)
+
+    def test_navigation_flush_cannot_duplicate_history_sync_trigger(self):
+        started = MODULE.threading.Event()
+        release = MODULE.threading.Event()
+        owner = object()
+        token = object()
+        self.spider._playback_sync_pending["pending"] = {
+            "owner": owner,
+            "started_at": time.time() - self.spider.PLAYBACK_SYNC_MIN_SECONDS - 1,
+            "tmdb_id": 101,
+            "source_id": "tmdb:tv:101",
+            "resource_id": "resource-101",
+            "season": 1,
+            "episode": 6,
+        }
+        self.spider._playback_sync_tokens["pending"] = token
+        self.spider._playback_activity_active = Mock(return_value=False)
+
+        def capture():
+            started.set()
+            release.wait(1)
+            return [{"key": "history-1"}]
+
+        self.spider._capture_native_history = Mock(side_effect=capture)
+        self.spider._atvp_history_for_item = Mock(return_value={"position": 500000})
+        self.spider._trigger_history_sync_now = Mock(return_value=True)
+        first = MODULE.threading.Thread(
+            target=self.spider._playback_sync_check, args=("pending", token),
+        )
+        first.start()
+        self.assertTrue(started.wait(1))
+
+        self.spider._flush_playback_sync_on_navigation()
+        time.sleep(0.05)
+        release.set()
+        first.join(1)
+
+        self.assertEqual(self.spider._capture_native_history.call_count, 1)
+        self.spider._trigger_history_sync_now.assert_called_once_with()
+
+    def test_navigation_flush_does_not_cancel_new_timer_while_old_check_is_inflight(self):
+        started = MODULE.threading.Event()
+        release = MODULE.threading.Event()
+        old_owner = object()
+        old_token = object()
+        self.spider._playback_sync_pending["pending"] = {
+            "owner": old_owner,
+            "started_at": time.time() - self.spider.PLAYBACK_SYNC_MIN_SECONDS - 1,
+            "tmdb_id": 101,
+            "source_id": "tmdb:tv:101",
+            "resource_id": "old-resource",
+            "season": 1,
+            "episode": 6,
+        }
+        self.spider._playback_sync_tokens["pending"] = old_token
+        self.spider._playback_activity_active = Mock(return_value=False)
+
+        def capture():
+            started.set()
+            release.wait(1)
+            return [{"key": "history-1"}]
+
+        self.spider._capture_native_history = Mock(side_effect=capture)
+        self.spider._atvp_history_for_item = Mock(return_value={"position": 500000})
+        first = MODULE.threading.Thread(
+            target=self.spider._playback_sync_check, args=("pending", old_token),
+        )
+        first.start()
+        self.assertTrue(started.wait(1))
+
+        new_owner = object()
+        new_token = object()
+        new_timer = Mock()
+        with self.spider._playback_sync_lock:
+            self.spider._playback_sync_pending["pending"] = {
+                "owner": new_owner,
+                "started_at": time.time(),
+            }
+            self.spider._playback_sync_timers["pending"] = new_timer
+            self.spider._playback_sync_tokens["pending"] = new_token
+
+        self.spider._flush_playback_sync_on_navigation()
+        release.set()
+        first.join(1)
+
+        new_timer.cancel.assert_not_called()
+        self.assertIs(self.spider._playback_sync_pending["pending"]["owner"], new_owner)
+        self.assertIs(self.spider._playback_sync_timers["pending"], new_timer)
+        self.assertIs(self.spider._playback_sync_tokens["pending"], new_token)
+
+    def test_destroy_during_history_capture_cannot_reschedule_old_window(self):
+        started = MODULE.threading.Event()
+        release = MODULE.threading.Event()
+        owner = object()
+        token = object()
+        self.spider._playback_sync_pending["pending"] = {
+            "owner": owner,
+            "started_at": time.time() - self.spider.PLAYBACK_SYNC_MIN_SECONDS - 1,
+            "tmdb_id": 101,
+            "source_id": "tmdb:tv:101",
+            "resource_id": "resource-101",
+            "season": 1,
+            "episode": 6,
+        }
+        self.spider._playback_sync_tokens["pending"] = token
+        self.spider._playback_activity_active = Mock(return_value=False)
+
+        def capture():
+            started.set()
+            release.wait(1)
+            return [{"key": "history-1"}]
+
+        self.spider._capture_native_history = Mock(side_effect=capture)
+        self.spider._atvp_history_for_item = Mock(return_value={})
+        first = MODULE.threading.Thread(
+            target=self.spider._playback_sync_check, args=("pending", token),
+        )
+        first.start()
+        self.assertTrue(started.wait(1))
+
+        self.spider.destroy()
+        release.set()
+        first.join(1)
+
+        self.assertEqual(self.spider._playback_sync_pending, {})
+        self.assertEqual(self.spider._playback_sync_timers, {})
+        self.assertEqual(self.spider._playback_sync_tokens, {})
+        self.assertEqual(self.spider._playback_sync_inflight, {})
+
+    def test_old_callback_finally_cannot_clear_new_lifecycle_inflight_owner(self):
+        old_started = MODULE.threading.Event()
+        new_started = MODULE.threading.Event()
+        old_release = MODULE.threading.Event()
+        new_release = MODULE.threading.Event()
+        old_owner = object()
+        new_owner = object()
+        old_token = object()
+        new_token = object()
+
+        def owned(_key, marker):
+            if marker.get("owner") is old_owner:
+                old_started.set()
+                old_release.wait(1)
+            else:
+                new_started.set()
+                new_release.wait(1)
+            return True
+
+        self.spider._playback_sync_check_owned = Mock(side_effect=owned)
+        self.spider._playback_sync_pending["pending"] = {
+            "owner": old_owner,
+            "started_at": time.time(),
+        }
+        self.spider._playback_sync_tokens["pending"] = old_token
+        old_thread = MODULE.threading.Thread(
+            target=self.spider._playback_sync_check, args=("pending", old_token),
+        )
+        old_thread.start()
+        self.assertTrue(old_started.wait(1))
+
+        self.spider.init({})
+        self.spider._playback_sync_pending["pending"] = {
+            "owner": new_owner,
+            "started_at": time.time(),
+        }
+        self.spider._playback_sync_tokens["pending"] = new_token
+        new_thread = MODULE.threading.Thread(
+            target=self.spider._playback_sync_check, args=("pending", new_token),
+        )
+        new_thread.start()
+        self.assertTrue(new_started.wait(1))
+
+        old_release.set()
+        old_thread.join(1)
+
+        self.assertIs(self.spider._playback_sync_inflight.get("pending"), new_owner)
+        new_release.set()
+        new_thread.join(1)
+        self.assertEqual(self.spider._playback_sync_inflight, {})
+
+    def test_init_and_destroy_clear_playback_sync_state(self):
+        first_timer = Mock()
+        self.spider._playback_sync_pending["pending"] = {"owner": object()}
+        self.spider._playback_sync_timers["pending"] = first_timer
+        self.spider._playback_sync_tokens["pending"] = object()
+        self.spider._playback_sync_inflight["pending"] = self.spider._playback_sync_pending["pending"]["owner"]
+
+        self.spider.init({})
+
+        first_timer.cancel.assert_called_once_with()
+        self.assertEqual(self.spider._playback_sync_pending, {})
+        self.assertEqual(self.spider._playback_sync_timers, {})
+        self.assertEqual(self.spider._playback_sync_tokens, {})
+        self.assertEqual(self.spider._playback_sync_inflight, {})
+
+        second_timer = Mock()
+        self.spider._playback_sync_pending["pending"] = {"owner": object()}
+        self.spider._playback_sync_timers["pending"] = second_timer
+        self.spider._playback_sync_tokens["pending"] = object()
+        self.spider._playback_sync_inflight["pending"] = self.spider._playback_sync_pending["pending"]["owner"]
+
+        self.spider.destroy()
+
+        second_timer.cancel.assert_called_once_with()
+        self.assertEqual(self.spider._playback_sync_pending, {})
+        self.assertEqual(self.spider._playback_sync_timers, {})
+        self.assertEqual(self.spider._playback_sync_tokens, {})
+        self.assertEqual(self.spider._playback_sync_inflight, {})
+
+    def test_history_sync_failure_keeps_pending_window_for_retry(self):
+        owner = object()
+        self.spider._playback_sync_pending["pending"] = {
+            "owner": owner,
+            "started_at": time.time() - self.spider.PLAYBACK_SYNC_MIN_SECONDS - 1,
+            "tmdb_id": 101,
+            "source_id": "tmdb:tv:101",
+            "resource_id": "resource-101",
+            "season": 1,
+            "episode": 6,
+        }
+        self.spider._playback_activity_active = Mock(return_value=False)
+        self.spider._capture_native_history = Mock(return_value=[{"key": "history-1"}])
+        self.spider._atvp_history_for_item = Mock(return_value={"position": 500000})
+        self.spider._trigger_history_sync_now = Mock(return_value=False)
+        self.spider._schedule_playback_sync_check = Mock(return_value=True)
+
+        self.assertTrue(self.spider._playback_sync_check("pending"))
+
+        self.assertIn("pending", self.spider._playback_sync_pending)
+        self.spider._schedule_playback_sync_check.assert_called_once_with(
+            "pending", self.spider.PLAYBACK_SYNC_RETRY_SECONDS, expected_owner=owner,
+        )
+
+    def test_failed_playback_timer_start_leaves_no_timer_or_token(self):
+        timer = Mock()
+        timer.start.side_effect = RuntimeError("thread start failed")
+
+        with patch.object(MODULE.threading, "Timer", return_value=timer):
+            self.assertFalse(self.spider._schedule_playback_sync_check("pending", 1))
+
+        self.assertNotIn("pending", self.spider._playback_sync_timers)
+        self.assertNotIn("pending", self.spider._playback_sync_tokens)
+
+    def test_replacement_generation_guard_blocks_stale_follow_state_write(self):
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {"tmdb_id": 101, "alist_vod_id": "old-resource"},
+        }}
+        self.spider._cache_generation = 4
+
+        self.assertFalse(self.spider._replace_bound_resource(
+            {"tmdb_id": 101},
+            {"vod_id": "replacement-resource", "_resource_mode": "vod"},
+            expected_generation=3,
+        ))
+
+        self.assertEqual(
+            self.spider._follow_memory["items"]["101"]["alist_vod_id"],
+            "old-resource",
+        )
+
+    def test_replacement_binding_guard_blocks_worker_for_old_binding(self):
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {
+                "tmdb_id": 101,
+                "source_id": "tmdb:tv:101",
+                "alist_vod_id": "new-resource",
+                "last_play_route": {"resourceId": "old-resource", "resourceMode": "vod"},
+            },
+        }}
+
+        self.assertFalse(self.spider._replace_bound_resource(
+            {"tmdb_id": 101, "source_id": "tmdb:tv:101"},
+            {"vod_id": "replacement-resource", "_resource_mode": "vod"},
+            expected_bound_resource_id="old-resource",
+        ))
+
+        self.assertEqual(
+            self.spider._follow_memory["items"]["101"]["alist_vod_id"],
+            "new-resource",
+        )
+
+    def test_replacement_does_not_persist_signed_url_resource_id(self):
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {"tmdb_id": 101, "alist_vod_id": "old-resource"},
+        }}
+
+        self.assertFalse(self.spider._replace_bound_resource(
+            {"tmdb_id": 101},
+            {"vod_id": "https://cdn.example/signed?token=secret", "_resource_mode": "vod"},
+            expected_bound_resource_id="old-resource",
+        ))
+
+        self.assertEqual(
+            self.spider._follow_memory["items"]["101"]["alist_vod_id"],
+            "old-resource",
+        )
+
+    def test_replacement_rejects_embedded_and_protocol_relative_urls(self):
+        for resource_id in (
+                "resource|https://cdn.example/signed?token=secret",
+                "//cdn.example/signed?token=secret",
+        ):
+            self.spider._follow_memory = {"version": 2, "items": {
+                "101": {"tmdb_id": 101, "alist_vod_id": "old-resource"},
+            }}
+
+            self.assertFalse(self.spider._replace_bound_resource(
+                {"tmdb_id": 101},
+                {"vod_id": resource_id, "_resource_mode": "vod"},
+                expected_bound_resource_id="old-resource",
+            ))
+            self.assertEqual(
+                self.spider._follow_memory["items"]["101"]["alist_vod_id"],
+                "old-resource",
+            )
+
+    def test_trigger_history_sync_clears_snapshot_cache_and_schedules_background_refresh(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider._ensure_atvp_connection = Mock(return_value=True)
+        self.spider._schedule_atvp_history_refresh = Mock(return_value=True)
+        self.spider._cache["atvp-history-snapshot"] = (time.time(), [{"key": "stale"}])
+        self.spider._persistent_cache["atvp-history-snapshot"] = (time.time(), [{"key": "stale"}])
+
+        self.assertTrue(self.spider._trigger_history_sync_now())
+
+        self.assertNotIn("atvp-history-snapshot", self.spider._cache)
+        self.assertNotIn("atvp-history-snapshot", self.spider._persistent_cache)
+        self.spider._schedule_atvp_history_refresh.assert_called_once_with("atvp-history-snapshot")
+
+    def test_successful_player_persists_refreshable_binding_without_direct_url(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {"tmdb_id": 101, "title": "测试剧集"},
+        }}
+        item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集"}
+        play_id = self.spider._build_followplay(
+            "1@episode-6", item, "resource-101", 1, 6, "S01E06",
+        )
+        direct_output = {
+            "parse": 0,
+            "jx": 0,
+            "url": "https://cdn.example/signed/video.m3u8?signature=secret",
+            "header": {"User-Agent": "test"},
+        }
+        checked = {
+            "reachable": True,
+            "checked_at": time.time(),
+            "startup_ms": 420,
+            "height": 2160,
+            "codec": "hevc",
+            "subtitle": True,
+            "output": direct_output,
+        }
+        self.spider._atvp_play = Mock(return_value=direct_output)
+        self.spider._probe_media_output = Mock(return_value=checked)
+        self.spider._atvp_history_snapshot = Mock(return_value=[])
+
+        result = self.spider.playerContent("4K线路", play_id, [])
+
+        self.assertEqual(result["url"], direct_output["url"])
+        route = self.spider._follow_memory["items"]["101"]["last_play_route"]
+        self.assertEqual(route["playId"], "1@episode-6")
+        self.assertEqual(route["resourceId"], "resource-101")
+        self.assertEqual(route["season"], 1)
+        self.assertEqual(route["episode"], 6)
+        self.assertNotIn("url", route)
+        self.assertNotIn("output", route)
+        self.assertNotIn("signature", json.dumps(route, ensure_ascii=False))
+        self.assertEqual(self.spider._follow_memory["items"]["101"]["alist_vod_id"], "resource-101")
+        cached = self.spider._route_probe_snapshot("1@episode-6", "resource-101", "vod")
+        self.assertEqual(cached["output"]["url"], direct_output["url"])
+
+    def test_numeric_play_id_is_persisted_and_restored(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {"tmdb_id": 101, "title": "测试剧集"},
+        }}
+        self.spider._persist_follow_state = Mock(return_value=True)
+
+        self.spider._remember_successful_follow_route(
+            {
+                "tmdbId": 101, "resourceId": "resource-101", "resourceMode": "vod",
+                "season": 1, "episode": 1,
+            },
+            {"resourceId": "resource-101", "name": "S01E01"},
+            "123456",
+            {"height": 1080, "codec": "h264", "startup_ms": 100},
+        )
+
+        self.assertEqual(
+            self.spider._follow_memory["items"]["101"]["last_play_route"]["playId"],
+            "123456",
+        )
+
+    def test_encoded_url_play_id_and_resource_id_are_not_persisted(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {"tmdb_id": 101, "title": "测试剧集"},
+        }}
+        self.spider._persist_follow_state = Mock(return_value=True)
+
+        self.spider._remember_successful_follow_route(
+            {"tmdbId": 101, "resourceMode": "vod", "season": 1, "episode": 1},
+            {"resourceId": "https%25253A%25252F%25252Fcdn.example%25252Fresource"},
+            "1@https%25253A%25252F%25252Fcdn.example%25252Fsigned%25253Ftoken%25253Dsecret",
+            {"height": 1080, "codec": "h264", "startup_ms": 100},
+        )
+
+        self.assertNotIn("last_play_route", self.spider._follow_memory["items"]["101"])
+
+    def test_route_name_does_not_persist_url_shaped_episode_label(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {"tmdb_id": 101, "title": "测试剧集"},
+        }}
+        self.spider._persist_follow_state = Mock(return_value=True)
+
+        self.spider._remember_successful_follow_route(
+            {"tmdbId": 101, "resourceMode": "vod", "season": 1, "episode": 1},
+            {
+                "resourceId": "resource-101",
+                "name": "https://cdn.example/signed?token=secret",
+            },
+            "123456",
+            {"height": 1080, "codec": "h264", "startup_ms": 100},
+        )
+
+        route = self.spider._follow_memory["items"]["101"]["last_play_route"]
+        self.assertEqual(route["playId"], "123456")
+        self.assertEqual(route["name"], "")
+
+    def test_route_name_does_not_persist_embedded_url(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {"tmdb_id": 101, "title": "测试剧集"},
+        }}
+        self.spider._persist_follow_state = Mock(return_value=True)
+
+        self.spider._remember_successful_follow_route(
+            {"tmdbId": 101, "resourceMode": "vod", "season": 1, "episode": 1},
+            {"resourceId": "resource-101", "name": "S01E01 https://cdn.example/signed?token=secret"},
+            "123456",
+            {"height": 1080, "codec": "h264", "startup_ms": 100},
+        )
+
+        self.assertEqual(
+            self.spider._follow_memory["items"]["101"]["last_play_route"]["name"],
+            "",
+        )
+
+    def test_route_name_does_not_persist_protocol_relative_url(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {"tmdb_id": 101, "title": "测试剧集"},
+        }}
+
+        self.spider._remember_successful_follow_route(
+            {"tmdbId": 101, "resourceMode": "vod", "season": 1, "episode": 1},
+            {"resourceId": "resource-101", "name": "S01E01 //cdn.example/signed?token=secret"},
+            "123456",
+            {"height": 1080, "codec": "h264", "startup_ms": 100},
+        )
+
+        self.assertEqual(
+            self.spider._follow_memory["items"]["101"]["last_play_route"]["name"],
+            "",
+        )
+
+    def test_activity_probe_without_app_instance_fails_closed(self):
+        class ClassApi(object):
+            @staticmethod
+            def forName(name):
+                return AppType() if name == "com.fongmi.android.tv.App" else object()
+
+        class AppType(object):
+            @staticmethod
+            def getDeclaredFields():
+                return []
+
+        class ModifierApi(object):
+            @staticmethod
+            def isStatic(_value):
+                return False
+
+        java_module = types.ModuleType("java")
+        java_module.jclass = lambda name: {
+            "java.lang.Class": ClassApi,
+            "java.lang.reflect.Modifier": ModifierApi,
+        }[name]
+
+        with patch.dict(sys.modules, {"java": java_module}):
+            activity = self.spider._current_fongmi_activity()
+
+        self.assertIs(activity, self.spider.ACTIVITY_PROBE_FAILED)
+
+    def test_packed_resource_identity_rejects_url_and_unknown_mode(self):
+        item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集"}
+        url_id = self.spider._build_followplay(
+            "1@primary", item, "https://cdn.example/signed?token=secret", 1, 1, "S01E01",
+        )
+        bad_mode_id = self.spider._build_followplay(
+            "1@primary", item, "resource-101", 1, 1, "S01E01", resource_mode="unknown",
+        )
+        encoded_url_id = self.spider._build_followplay(
+            "1@primary", item, "https%3A%2F%2Fcdn.example%2Fsigned%3Ftoken%3Dsecret", 1, 1, "S01E01",
+        )
+        double_encoded_url_id = self.spider._build_followplay(
+            "1@primary", item, "https%253A%252F%252Fcdn.example%252Fsigned%253Ftoken%253Dsecret", 1, 1, "S01E01",
+        )
+
+        self.assertIsNone(self.spider._parse_followplay(url_id))
+        self.assertIsNone(self.spider._parse_followplay(bad_mode_id))
+        self.assertIsNone(self.spider._parse_followplay(encoded_url_id))
+        self.assertIsNone(self.spider._parse_followplay(double_encoded_url_id))
+
+    def test_resource_search_and_detail_reject_unbounded_resource_ids(self):
+        limit = self.spider.RESOURCE_SEARCH_RESULT_LIMIT
+        rows = [
+            {"vod_id": "resource-%d" % index, "vod_name": "测试剧集"}
+            for index in range(limit + 20)
+        ]
+        rows.insert(0, {"vod_id": "x" * (self.spider.RESOURCE_ID_MAX_LENGTH + 1), "vod_name": "测试剧集"})
+        self.spider._resource_capability = Mock(return_value="present")
+        self.spider._resource_api_get = Mock(return_value={"list": rows})
+
+        result = self.spider._resource_search_mode("vod", ["测试剧集", "测试别名"])
+
+        self.assertLessEqual(len(result), limit)
+        self.assertGreaterEqual(len(result), limit - 1)
+        self.assertTrue(all(len(row["vod_id"]) <= self.spider.RESOURCE_ID_MAX_LENGTH for row in result))
+        with self.assertRaisesRegex(RuntimeError, "资源 ID 过长"):
+            self.spider._resource_detail({
+                "vod_id": "x" * (self.spider.RESOURCE_ID_MAX_LENGTH + 1),
+                "_resource_mode": "vod",
+            }, use_validated_cache=False)
+
+    def test_resource_api_response_has_content_length_and_stream_byte_limits(self):
+        class FakeResponse:
+            def __init__(self, headers, chunks):
+                self.status_code = 200
+                self.headers = headers
+                self._chunks = chunks
+                self.closed = False
+
+            def iter_content(self, chunk_size=None):
+                return iter(self._chunks)
+
+            def close(self):
+                self.closed = True
+
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider._ensure_atvp_connection = Mock(return_value=True)
+        self.spider._resource_capability = Mock(return_value="present")
+        self.spider._mark_resource_capability = Mock()
+        self.spider._atvp_session = Mock()
+        oversized = FakeResponse(
+            {"Content-Length": str(self.spider.RESOURCE_API_RESPONSE_MAX_BYTES + 1)},
+            [],
+        )
+        self.spider._atvp_session.get.return_value = oversized
+
+        with self.assertRaisesRegex(RuntimeError, "响应过大"):
+            self.spider._resource_api_get("vod", {}, deadline=time.monotonic() + 5)
+        self.assertTrue(oversized.closed)
+
+        streaming = FakeResponse({}, [b"{" + b"x" * self.spider.RESOURCE_API_RESPONSE_MAX_BYTES])
+        self.spider._atvp_session.get.return_value = streaming
+        with self.assertRaisesRegex(RuntimeError, "响应过大"):
+            self.spider._resource_api_get("vod", {}, deadline=time.monotonic() + 5)
+        self.assertTrue(streaming.closed)
+
+    def test_play_parse_and_check_links_use_bounded_json_reader(self):
+        class FakeResponse:
+            def __init__(self, payload):
+                self.status_code = 200
+                self.headers = {}
+                self._payload = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.closed = False
+
+            def iter_content(self, chunk_size=None):
+                return iter([self._payload])
+
+            def close(self):
+                self.closed = True
+
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider._ensure_atvp_connection = Mock(return_value=True)
+        self.spider._atvp_session = Mock()
+        play_response = FakeResponse({"parse": 0, "url": "https://cdn.example/video.m3u8", "header": {}})
+        self.spider._atvp_session.get.return_value = play_response
+        output = self.spider._atvp_play("1@episode-1", deadline=time.monotonic() + 5)
+        self.assertEqual(output["url"], "https://cdn.example/video.m3u8")
+        self.assertTrue(play_response.closed)
+        self.assertTrue(self.spider._atvp_session.get.call_args.kwargs["stream"])
+
+        parse_response = FakeResponse({"list": [{"vod_play_url": "S01E01$1@episode-1"}]})
+        self.spider._atvp_session.post.return_value = parse_response
+        candidates = self.spider._atvp_parse_candidates("https://pan.quark.cn/s/demo", deadline=time.monotonic() + 5)
+        self.assertEqual(candidates, ["1@episode-1"])
+        self.assertTrue(parse_response.closed)
+
+        check_response = FakeResponse({"results": [{"url": "https://pan.quark.cn/s/demo", "state": "ok"}]})
+        self.spider._atvp_session.post.return_value = check_response
+        checked = self.spider._checked_resource_rows(
+            [{"vod_id": "https://pan.quark.cn/s/demo"}], deadline=time.monotonic() + 5,
+        )
+        self.assertEqual(len(checked), 1)
+        self.assertTrue(check_response.closed)
+
+    def test_route_probe_cache_requires_resource_identity(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        probe = {
+            "checked_at": time.time(),
+            "reachable": True,
+            "output": {"parse": 0, "url": "https://cdn.example/video.m3u8", "header": {}},
+        }
+        self.spider._cache_route_probe("1@same-play", probe, "resource-a", "vod")
+
+        self.assertIsNone(self.spider._route_probe_snapshot("1@same-play"))
+        self.assertIsNone(self.spider._route_probe_snapshot("1@same-play", "resource-b", "vod"))
+        self.assertEqual(
+            self.spider._route_probe_snapshot("1@same-play", "resource-a", "vod")["output"]["url"],
+            probe["output"]["url"],
+        )
+
+    def test_route_probe_cache_prunes_expired_and_overflow_entries(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        now = time.time()
+        old_key = self.spider._route_probe_key("1@old", "resource-old", "vod")
+        self.spider._route_probe_cache[old_key] = {
+            "checked_at": now - self.spider.route_probe_ttl - 1,
+            "reachable": True,
+            "output": {"url": "https://cdn.example/expired.m3u8"},
+        }
+        probe = {
+            "checked_at": now,
+            "reachable": True,
+            "output": {"url": "https://cdn.example/video.m3u8"},
+        }
+        for index in range(self.spider.ROUTE_PROBE_CACHE_LIMIT + 8):
+            self.spider._cache_route_probe("1@route-%d" % index, probe, "resource-%d" % index, "vod")
+
+        self.assertNotIn(old_key, self.spider._route_probe_cache)
+        self.assertLessEqual(len(self.spider._route_probe_cache), self.spider.ROUTE_PROBE_CACHE_LIMIT)
+
+    def test_successful_route_binding_keeps_concurrent_follow_items(self):
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {"tmdb_id": 101, "title": "甲剧"},
+            "202": {"tmdb_id": 202, "title": "乙剧"},
+        }}
+        self.spider._persist_follow_state = Mock(return_value=True)
+        barrier = MODULE.threading.Barrier(2)
+
+        def remember(tmdb_id, resource_id):
+            barrier.wait(1)
+            self.spider._remember_successful_follow_route(
+                {
+                    "tmdbId": tmdb_id, "season": 1, "episode": 1,
+                    "resourceId": resource_id, "resourceMode": "vod",
+                },
+                {"resourceId": resource_id, "name": "S01E01"},
+                "1@%s" % resource_id,
+                {"height": 1080, "codec": "h264", "startup_ms": 100},
+            )
+
+        threads = [
+            MODULE.threading.Thread(target=remember, args=(101, "resource-a")),
+            MODULE.threading.Thread(target=remember, args=(202, "resource-b")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(2)
+
+        self.assertEqual(
+            self.spider._follow_memory["items"]["101"]["last_play_route"]["resourceId"],
+            "resource-a",
+        )
+        self.assertEqual(
+            self.spider._follow_memory["items"]["202"]["last_play_route"]["resourceId"],
+            "resource-b",
+        )
+
+    def test_route_status_is_shown_after_director_without_replacing_summary(self):
+        result = self.spider._resource_error_vod({
+            "vod_name": "测试剧集",
+            "vod_director": "导演甲",
+            "vod_remarks": "9.1分 / 12集",
+            "vod_content": "剧情简介",
+        }, "线路更新中")
+
+        self.assertEqual(result["vod_remarks"], "9.1分 / 12集")
+        self.assertEqual(result["vod_director"], "导演甲 · 线路状态：线路更新中")
+        self.assertIn("播放资源状态：线路更新中", result["vod_content"])
+        self.assertEqual(result["vod_play_from"], "")
+        self.assertEqual(result["vod_play_url"], "")
+
+    def test_quality_scores_stay_in_backend_metadata_not_detail_source_label(self):
+        quality = self.spider._route_quality_score(
+            "1@quality-route",
+            probe={"startup_ms": 1200, "height": 1080, "codec": "h264", "subtitle": True},
+        )
+
+        self.assertEqual(quality["startup"], 22)
+        self.assertEqual(quality["codec"], 20)
+        self.assertEqual(quality["resolution"], 16)
+        self.assertEqual(self.spider._strip_legacy_route_quality_label("网盘候选 · 夸克"), "网盘候选 · 夸克")
+        self.assertNotIn("质量", self.spider._strip_legacy_route_quality_label("网盘候选 · 夸克"))
 
     def test_same_title_different_years_stay_separate_candidates(self):
         self.spider._native_keep_export_java = Mock(return_value=[

@@ -5,7 +5,5 @@
   "verify_tls": true,
   "canonicalize_title": true,
   "auto_select_episode": true,
-  "inject_position": true,
-  "publish_routes": true,
-  "route_cache_ttl": 300
+  "inject_position": true
 }

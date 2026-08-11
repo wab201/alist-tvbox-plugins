@@ -2,7 +2,7 @@
 """
 //@name:豆瓣TMDB追更助手（AList-TVBox专用）
 //@id:douban_tmdb_follow_single
-//@version:51
+//@version:52
 
 AList-TVBox raw Python plugin for Douban/TMDB browsing and follow-up playback.
 
@@ -73,9 +73,9 @@ _MEDIA_PROBE_SLOTS = threading.BoundedSemaphore(4)
 
 FILTER_CONFIG_SCHEMA = {
     "source": "declared",
-    "description": "跨站追更选集过滤器，可配置标题统一、自动选集、播放位置注入和最近线路共享",
+    "description": "跨站追更选集过滤器，可配置标题统一、自动选集和播放位置注入；独立备选线路不共享直链",
     "allowAdditional": True,
-    "example": {"history_cache_ttl": 30, "timeout": 8, "verify_tls": True, "publish_routes": True, "route_cache_ttl": 300},
+    "example": {"history_cache_ttl": 30, "timeout": 8, "verify_tls": True},
     "fields": [
         {"key": "history_cache_ttl", "label": "History缓存秒数", "type": "number", "required": False, "defaultValue": 30},
         {"key": "timeout", "label": "请求超时秒数", "type": "number", "required": False, "defaultValue": 8},
@@ -83,8 +83,6 @@ FILTER_CONFIG_SCHEMA = {
         {"key": "canonicalize_title", "label": "统一续播标题", "type": "boolean", "required": False, "defaultValue": True},
         {"key": "auto_select_episode", "label": "自动选中续播集", "type": "boolean", "required": False, "defaultValue": True},
         {"key": "inject_position", "label": "注入播放位置", "type": "boolean", "required": False, "defaultValue": True},
-        {"key": "publish_routes", "label": "共享最近可播线路", "type": "boolean", "required": False, "defaultValue": True},
-        {"key": "route_cache_ttl", "label": "线路共享秒数", "type": "number", "required": False, "defaultValue": 300},
     ],
 }
 
@@ -101,9 +99,6 @@ class Filter:
     """AList-TVBox detail/player filter sharing this file with the Spider."""
 
     FOLLOW_CACHE_KEY = "douban_tmdb_follow_state_v1"
-    ROUTE_CACHE_PREFIX = "douban_tmdb_route_v2_"
-    ROUTE_CACHE_VERSION = 2
-    ROUTE_CACHE_LIMIT = 2
     SAFE_ROUTE_HEADERS = frozenset(("user-agent", "referer", "origin"))
 
     def __init__(self):
@@ -114,8 +109,6 @@ class Filter:
         self.canonicalize_title = True
         self.auto_select_episode = True
         self.inject_position = True
-        self.publish_routes = True
-        self.route_cache_ttl = 300
         self._session = requests.Session()
         self._session.trust_env = False
         self._history_cache = []
@@ -132,8 +125,6 @@ class Filter:
         self.canonicalize_title = self._bool(config.get("canonicalize_title"), True)
         self.auto_select_episode = self._bool(config.get("auto_select_episode"), True)
         self.inject_position = self._bool(config.get("inject_position"), True)
-        self.publish_routes = self._bool(config.get("publish_routes"), True)
-        self.route_cache_ttl = self._bounded_int(config.get("route_cache_ttl"), 300, 30, 1800)
         self._session.trust_env = self.trust_env
         with self._lock:
             self._history_cache = []
@@ -170,149 +161,11 @@ class Filter:
                 and output.get("position") in (None, "", 0, "0")
                 and self._can_resume(record["history"])):
             output["position"] = self._int(record["history"].get("position"), 0)
-        self._publish_route(output, context, record)
         return output
-
-    def _publish_route(self, result, context, record):
-        if not self.publish_routes or not isinstance(result, dict):
-            return
-        media_url = self._first_http_url(result.get("url"))
-        play_id = str(context.get("id") or "").strip()
-        api = str(context.get("api") or "").rstrip("/")
-        token = str(context.get("token") or "").strip()
-        if (self._int(result.get("parse"), 0) != 0
-                or not api or not token
-                or not self._safe_media_url(media_url, api)):
-            return
-        payload = record.get("payload") if isinstance(record, dict) else {}
-        season = self._int(payload.get("season"), 0)
-        episode = self._int(payload.get("episode"), 0)
-        if season <= 0 or episode <= 0:
-            return
-        aliases = self._payload_title_aliases(payload)
-        for value in (
-                record.get("history", {}).get("vodName"), payload.get("title"),
-                payload.get("originalTitle"), context.get("vod_name")):
-            text = str(value or "").strip()
-            if text and text not in aliases:
-                aliases.append(text)
-        raw_headers = result.get("header")
-        if isinstance(raw_headers, str):
-            try:
-                raw_headers = json.loads(raw_headers)
-            except Exception:
-                raw_headers = {}
-        if not isinstance(raw_headers, dict):
-            raw_headers = {}
-        headers = {
-            str(key): str(value)
-            for key, value in raw_headers.items()
-            if str(key).strip().lower() in self.SAFE_ROUTE_HEADERS and value is not None
-        }
-        now = int(time.time())
-        tmdb_id = str(self._int(payload.get("tmdbId"), 0) or "")
-        source_id = str(payload.get("sourceId") or "").strip()
-        route = {
-            "version": self.ROUTE_CACHE_VERSION,
-            "updatedAt": now,
-            "expiresAt": now + self.route_cache_ttl,
-            "api": api,
-            "tokenHash": self._token_hash(token),
-            "tmdbId": tmdb_id,
-            "sourceId": source_id,
-            "playId": play_id,
-            "source": str(context.get("play_from") or ""),
-            "episodeName": str(context.get("episode_name") or ""),
-            "season": season,
-            "episode": episode,
-            "year": str(payload.get("year") or context.get("vod_year") or "")[:4],
-            "aliases": aliases[:10],
-            "output": {
-                "parse": self._int(result.get("parse"), 0),
-                "jx": self._int(result.get("jx"), 0),
-                "url": media_url,
-                "header": headers,
-                "type": str(result.get("type") or ""),
-            },
-        }
-        key = self._route_cache_key(api, token, payload, aliases, route["year"], season, episode)
-        if key:
-            self._schedule_route_cache_write(key, route)
-
-    def _schedule_route_cache_write(self, key, route):
-        def worker():
-            with self._lock:
-                existing = self._local_cache_get(key)
-                rows = existing if isinstance(existing, list) else []
-                identity = self._route_identity(route)
-                kept = [
-                    row for row in rows
-                    if isinstance(row, dict)
-                    and self._int(row.get("version"), 0) == self.ROUTE_CACHE_VERSION
-                    and self._route_identity(row) != identity
-                ]
-                self._local_cache_set(key, [route] + kept[:self.ROUTE_CACHE_LIMIT - 1])
-
-        thread = threading.Thread(target=worker)
-        thread.daemon = True
-        thread.start()
-
-    def _local_cache_get(self, key):
-        try:
-            from com.github.catvod import Proxy
-            port = int(Proxy.getPort())
-            response = self._session.get(
-                "http://127.0.0.1:%s/cache" % port,
-                params={"do": "get", "key": key},
-                timeout=min(self.timeout, 3),
-            )
-            if response.status_code < 200 or response.status_code >= 300:
-                return None
-            value = response.json()
-            return value.get("value") if isinstance(value, dict) and "value" in value else value
-        except Exception:
-            return None
-
-    def _local_cache_set(self, key, value):
-        try:
-            from com.github.catvod import Proxy
-            port = int(Proxy.getPort())
-            self._session.post(
-                "http://127.0.0.1:%s/cache" % port,
-                params={"do": "set", "key": key},
-                data={"value": json.dumps(value, ensure_ascii=False, separators=(",", ":"))},
-                timeout=min(self.timeout, 3),
-            )
-        except Exception:
-            return
 
     @staticmethod
     def _token_hash(token):
         return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()[:20]
-
-    @classmethod
-    def _route_cache_key(cls, api, token, payload, aliases, year, season, episode):
-        payload = payload if isinstance(payload, dict) else {}
-        tmdb_id = str(cls._int(payload.get("tmdbId"), 0) or "")
-        source_id = str(payload.get("sourceId") or "").strip()
-        title = next((cls._normalize_title(value) for value in aliases or [] if cls._normalize_title(value)), "")
-        identity = ("tmdb:" + tmdb_id) if tmdb_id else (("source:" + source_id) if source_id else ("title:" + title))
-        if not identity or identity == "title:":
-            return ""
-        raw = "%s|%s|%s|%s|%s|%s" % (
-            str(api or "").rstrip("/"), cls._token_hash(token), identity,
-            str(year or "")[:4], season, episode,
-        )
-        return cls.ROUTE_CACHE_PREFIX + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
-
-    @staticmethod
-    def _route_identity(route):
-        if not isinstance(route, dict):
-            return ""
-        return "%s|%s" % (
-            str(route.get("playId") or "").strip(),
-            str((route.get("output") or {}).get("url") or "").strip() if isinstance(route.get("output"), dict) else "",
-        )
 
     @staticmethod
     def _first_http_url(value):
@@ -409,10 +262,6 @@ class Filter:
             vod["vodFlags"] = flags
             vod["vod_play_from"] = "$$$".join(str(flag.get("flag") or "") for flag in flags)
             vod["vod_play_url"] = "$$$".join(str(flag.get("urls") or "") for flag in flags)
-
-    def _target_episode_location(self, vod, groups, season, episode):
-        locations = self._target_episode_locations(vod, groups, season, episode)
-        return locations[0] if locations else None
 
     def _target_episode_locations(self, vod, groups, season, episode):
         candidates = []
@@ -942,6 +791,7 @@ class Spider(BaseSpider):
     category_mode = False
     categoryMode = False
     ATVP_PLUGIN_MODE = "alist-tvbox-raw"
+    ACTIVITY_PROBE_FAILED = object()
 
     API = "https://m.douban.com/rexxar/api/v2"
     MOVIE = "https://movie.douban.com"
@@ -959,14 +809,22 @@ class Spider(BaseSpider):
     SERIES_CARD_PREFIX = "series-card:"
     ATVP_SYNC_ACTION = "atvp-follow:sync"
     ATVP_PROBE_ACTION = "atvp-follow:probe"
+    PLAYBACK_EXIT_PREFIX = "playback-exit:"
+    HISTORY_SHARE_ACTION_PREFIX = "history-share:"
     KEEP_FOLLOW_ACTION = "local-keep-follow:sync"
     SELECT_PROMPT_ID = "follow-status:select"
     FOLLOWPLAY_MAX_ID_LENGTH = 65536
     FOLLOWPLAY_MAX_DECODED_LENGTH = 49152
     FOLLOWPLAY_MAX_URL_LENGTH = 8192
+    FOLLOWPLAY_ROUTE_FIELD_MAX_LENGTH = 1024
     FOLLOWPLAY_MAX_FALLBACKS = 2
+    FOLLOW_ROUTE_LIMIT = 3
     FOLLOWPLAY_PLAY_BUDGET = 60
+    PLAYBACK_SYNC_MIN_SECONDS = 8 * 60
+    PLAYBACK_SYNC_RETRY_SECONDS = 5
+    RESOURCE_PARSE_CANDIDATE_LIMIT = 100
     ROUTE_PROBE_MAX_BYTES = 4096
+    ROUTE_PROBE_CACHE_LIMIT = 128
     ERROR_PREFIX = "douban-error:"
     FILTER_CACHE_KEY = "douban_meta_wish_filters_v12_follow_candidates"
     FOLLOW_CACHE_KEY = "douban_tmdb_follow_state_v1"
@@ -974,11 +832,11 @@ class Spider(BaseSpider):
     FOLLOW_STATE_VERSION = 2
     RESUME_IMPORT_CACHE_KEY = "douban_tmdb_resume_import_v1"
     ATVP_STATUS_CACHE_KEY = "douban_tmdb_atvp_job_status_v1"
+    HISTORY_SHARE_POLICY_CACHE_KEY = "douban_tmdb_history_share_policy_v1"
     FOLLOW_ACTION_STATE_CACHE_KEY = "douban_tmdb_follow_action_state_v1"
     FOLLOW_CONFIRM_TTL = 300
     RESPONSE_CACHE_KEY = "douban_tmdb_response_cache_v1"
     RESPONSE_CACHE_VERSION = 1
-    ROUTE_CACHE_PREFIX = Filter.ROUTE_CACHE_PREFIX
     RESOURCE_SEARCH_MODES = ("vod1", "vod", "pansou", "telegram")
     RESOURCE_MODE_PRIORITY = {
         "vod1": 0,
@@ -998,6 +856,9 @@ class Spider(BaseSpider):
     RESOURCE_DETAIL_BUDGET = 20
     RESOURCE_FOREGROUND_BUDGET = 16
     RESOURCE_DETAIL_ATTEMPT_LIMIT = 6
+    RESOURCE_ROUTE_CANDIDATE_LIMIT = 5
+    RESOURCE_SEARCH_RESULT_LIMIT = 100
+    RESOURCE_API_RESPONSE_MAX_BYTES = 2 * 1024 * 1024
     RESOURCE_SEARCH_CACHE_TTL = 900
     RESOURCE_CAPABILITY_CACHE_KEY = "douban_tmdb_resource_capabilities_v1"
     RESOURCE_CAPABILITY_VERSION = 1
@@ -1146,9 +1007,11 @@ class Spider(BaseSpider):
         self.history_username = ""
         self.history_password = ""
         self._history_auth_token = ""
+        self._history_share_policy = {"follow": True, "watch": True}
+        self._history_share_policy_loaded = False
         self.atvp_history_ttl = 60
         self.atvp_trust_env = False
-        self.resource_limit = 5
+        self.resource_limit = self.FOLLOW_ROUTE_LIMIT
         self.resource_search_modes = ["vod"]
         self.resource_auto_discover = True
         self.resource_capability_ttl = 600
@@ -1182,6 +1045,7 @@ class Spider(BaseSpider):
         self._follow_enrich_lock = threading.RLock()
         self._follow_state_persist_lock = threading.Lock()
         self._follow_enrich_jobs = set()
+        self._follow_candidate_results = {}
         self._follow_action_state_lock = threading.RLock()
         self._follow_action_state_persist_lock = threading.Lock()
         self._follow_action_state = {"version": 1, "last": {}, "pending": {}}
@@ -1195,10 +1059,16 @@ class Spider(BaseSpider):
         self._atvp_status_persist_lock = threading.Lock()
         self._history_context_lock = threading.RLock()
         self._history_sync_lock = threading.Lock()
+        self._playback_sync_lock = threading.RLock()
+        self._playback_sync_pending = {}
+        self._playback_sync_timers = {}
+        self._playback_sync_tokens = {}
+        self._playback_sync_inflight = {}
         self._route_probe_cache = {}
         self._route_probe_jobs = set()
         self._resource_search_admissions = 0
         self._validated_resource_details = {}
+        self._bound_replacement_jobs = {}
         self._resource_capabilities = {}
         self._resource_capabilities_backend = ""
         self._route_quality_history = {}
@@ -1273,7 +1143,9 @@ class Spider(BaseSpider):
             self.history_password = ""
         self.atvp_history_ttl = self._bounded_int(config.get("atvp_history_ttl"), 60, 10, 600)
         self.atvp_trust_env = self._bool_value(config.get("atvp_trust_env"), False)
-        self.resource_limit = self._bounded_int(config.get("resource_limit"), 5, 1, self.RESOURCE_HOT_ROUTE_LIMIT)
+        self.resource_limit = self._bounded_int(
+            config.get("resource_limit"), self.FOLLOW_ROUTE_LIMIT, 1, self.FOLLOW_ROUTE_LIMIT,
+        )
         self.resource_search_modes = self._resource_mode_list(config.get("resource_search_modes"))
         self.resource_auto_discover = self._bool_value(config.get("resource_auto_discover"), True)
         self.resource_capability_ttl = self._bounded_int(
@@ -1296,6 +1168,7 @@ class Spider(BaseSpider):
             self._route_probe_cache.clear()
             self._route_probe_jobs.clear()
             self._validated_resource_details.clear()
+            self._bound_replacement_jobs.clear()
             self._resource_capabilities.clear()
             self._resource_capabilities_backend = ""
             self._route_quality_history.clear()
@@ -1303,6 +1176,16 @@ class Spider(BaseSpider):
             self._route_quality_dirty = False
             self._route_quality_saving = False
             self._cache_generation += 1
+        with self._playback_sync_lock:
+            for timer in self._playback_sync_timers.values():
+                try:
+                    timer.cancel()
+                except Exception:
+                    pass
+            self._playback_sync_pending.clear()
+            self._playback_sync_timers.clear()
+            self._playback_sync_tokens.clear()
+            self._playback_sync_inflight.clear()
         self._failures.clear()
         self._filters = None
         self._filters_at = 0
@@ -1317,6 +1200,7 @@ class Spider(BaseSpider):
         self._follow_state_loaded = False
         self._follow_cache_origin = ""
         self._load_follow_state(force=True)
+        self._load_history_share_policy()
         self._load_series_action_mode()
         self._load_resume_markers()
         self._load_atvp_status()
@@ -1328,6 +1212,16 @@ class Spider(BaseSpider):
         with self._history_context_lock:
             with self._cache_lock:
                 self._cache_generation += 1
+            with self._playback_sync_lock:
+                for timer in self._playback_sync_timers.values():
+                    try:
+                        timer.cancel()
+                    except Exception:
+                        pass
+                self._playback_sync_pending.clear()
+                self._playback_sync_timers.clear()
+                self._playback_sync_tokens.clear()
+                self._playback_sync_inflight.clear()
             for session in (self._session, self._tmdb_session, self._atvp_session):
                 if session is not None:
                     try:
@@ -1453,6 +1347,7 @@ class Spider(BaseSpider):
         ext = self._parse_extend(extend)
         try:
             if tid in ("follow_updates", "follow_candidates", "follow_sync", "follow_manage"):
+                self._flush_playback_sync_on_navigation()
                 self._load_follow_state(force=True)
             if tid == "follow_updates":
                 return self._category_follow_updates(page)
@@ -1585,18 +1480,9 @@ class Spider(BaseSpider):
         candidates = [{
             "url": str(parsed.get("url") or ""),
             "resourceId": str(parsed.get("resourceId") or ""),
+            "resourceMode": str(parsed.get("resourceMode") or "vod"),
             "name": str(parsed.get("name") or ""),
         }]
-        for candidate in (parsed.get("fallbacks") or [])[:self.FOLLOWPLAY_MAX_FALLBACKS]:
-            if isinstance(candidate, dict):
-                target = str(candidate.get("url") or "").strip()
-                if target:
-                    candidates.append({
-                        "url": target,
-                        "resourceId": str(candidate.get("resourceId") or parsed.get("resourceId") or ""),
-                        "name": str(candidate.get("name") or parsed.get("name") or ""),
-                    })
-        candidates.extend(self._shared_filter_route_candidates(parsed))
         unique_candidates = []
         for candidate in candidates:
             target = str(candidate.get("url") or "").strip()
@@ -1680,6 +1566,14 @@ class Spider(BaseSpider):
                     startup_ms=(quality_probe or {}).get("startup_ms"),
                     signals=quality_probe,
                 )
+                self._cache_route_probe(
+                    quality_id,
+                    quality_probe,
+                    resource_id=effective.get("resourceId") or "",
+                    resource_mode=effective.get("resourceMode") or "vod",
+                )
+                self._remember_successful_follow_route(parsed, candidate, quality_id, quality_probe)
+                self._register_playback_sync_window(effective)
                 return output
             except Exception as exc:
                 self._record_route_quality(quality_id, False)
@@ -1717,6 +1611,9 @@ class Spider(BaseSpider):
                     })
                     pending["event"].set()
                     return [200, "application/json; charset=utf-8", "{}"]
+            if str(value.get("playback_exit") or value.get("history_sync") or "").strip():
+                self._flush_playback_sync_on_navigation()
+                return [200, "application/json; charset=utf-8", "{}"]
         return [404, "text/plain; charset=utf-8", "not found"]
 
     def action(self, action):
@@ -1730,8 +1627,12 @@ class Spider(BaseSpider):
             or value.startswith(self.FOLLOW_REMOVE_PREFIX)
             or value.startswith(self.FOLLOW_EXECUTE_PREFIX)
             or value.startswith(self.FOLLOW_CANDIDATE_ADD_PREFIX)
+            or value.startswith(self.PLAYBACK_EXIT_PREFIX)
         ):
             self._load_follow_state(force=True)
+        if value.startswith(self.PLAYBACK_EXIT_PREFIX):
+            self._flush_playback_sync_on_navigation()
+            return json.dumps({"msg": "播放记录同步已排队"}, ensure_ascii=False)
         if value == self.KEEP_FOLLOW_ACTION:
             message = "本地收藏已改为追更待选，请进入追更确认操作"
             self._set_follow_action_status("info", message, "candidate")
@@ -1741,6 +1642,10 @@ class Spider(BaseSpider):
             return self._start_atvp_job("probe")
         if value == self.ATVP_SYNC_ACTION:
             return self._start_atvp_job("sync")
+        if value.startswith(self.HISTORY_SHARE_ACTION_PREFIX):
+            return self._toggle_history_share_policy(
+                value[len(self.HISTORY_SHARE_ACTION_PREFIX):]
+            )
         if value.startswith(self.GLOBAL_SEARCH_PREFIX):
             return self._open_global_search(value[len(self.GLOBAL_SEARCH_PREFIX):])
         if value.startswith(self.SERIES_MODE_PREFIX):
@@ -2068,7 +1973,7 @@ class Spider(BaseSpider):
             if job_key in self._follow_enrich_jobs:
                 return json.dumps({"msg": "正在确认追更：" + title}, ensure_ascii=False)
             self._follow_enrich_jobs.add(job_key)
-        self._set_follow_action_status("running", "正在确认追更：" + title, "candidate", title)
+            self._set_follow_action_status("running", "正在确认追更：" + title, "candidate", title)
         self._refresh_follow_categories()
 
         def worker():
@@ -2108,28 +2013,66 @@ class Spider(BaseSpider):
                         self._save_follow_state(items)
                     message = ("已在追更管理：" if isinstance(previous, dict) else "已加入追更：") + str(output.get("title") or title)
                     result = json.dumps({"msg": message}, ensure_ascii=False)
-                    self._remember_follow_action_result(result, "candidate", title)
             except _HistorySyncCancelled:
                 result = None
             except Exception as exc:
                 result = json.dumps({"msg": "确认追更失败：%s" % self._short_error(exc)}, ensure_ascii=False)
-                with self._history_context_lock:
-                    if self._history_generation_active(generation):
-                        self._remember_follow_action_result(result, "candidate", title)
             finally:
-                with self._follow_enrich_lock:
-                    self._follow_enrich_jobs.discard(job_key)
+                self._finish_follow_candidate_job(job_key, generation, result, title)
 
         thread = threading.Thread(target=worker)
         thread.daemon = True
         try:
             thread.start()
         except Exception as exc:
+            result = json.dumps({"msg": "确认追更启动失败：%s" % self._short_error(exc)}, ensure_ascii=False)
+            self._finish_follow_candidate_job(job_key, generation, result, title)
+            return result
+        return json.dumps({"msg": "已开始确认追更：" + title}, ensure_ascii=False)
+
+    def _finish_follow_candidate_job(self, job_key, generation, result, title):
+        should_refresh = False
+        with self._history_context_lock:
             with self._follow_enrich_lock:
                 self._follow_enrich_jobs.discard(job_key)
-            result = json.dumps({"msg": "确认追更启动失败：%s" % self._short_error(exc)}, ensure_ascii=False)
-            return self._remember_follow_action_result(result, "candidate", title)
-        return json.dumps({"msg": "已开始确认追更：" + title}, ensure_ascii=False)
+                if not self._history_generation_active(generation):
+                    self._follow_candidate_results.pop(generation, None)
+                    return
+                if result is not None:
+                    self._follow_candidate_results.setdefault(generation, []).append((result, title))
+                prefix = "candidate:%s:" % generation
+                remaining = sum(
+                    1 for key in self._follow_enrich_jobs if str(key).startswith(prefix)
+                )
+                if remaining:
+                    self._set_follow_action_status(
+                        "running", "正在确认追更：剩余 %d 项" % remaining, "candidate",
+                    )
+                    should_refresh = True
+                else:
+                    completed = self._follow_candidate_results.pop(generation, [])
+                    if not completed:
+                        return
+                    messages = [self._follow_action_result_message(value) for value, _name in completed]
+                    failed = sum(self._follow_action_message_failed(message) for message in messages)
+                    if len(completed) == 1:
+                        message = messages[0]
+                        final_title = str(completed[0][1] or "")
+                    else:
+                        succeeded = len(completed) - failed
+                        message = "追更确认完成：成功 %d 项，失败 %d 项" % (succeeded, failed)
+                        if failed:
+                            failures = [
+                                value for value in messages if self._follow_action_message_failed(value)
+                            ]
+                            message += "；" + "；".join(failures[:3])
+                        final_title = ""
+                    self._set_follow_action_status(
+                        "failed" if failed else "done", message, "candidate", final_title,
+                    )
+                    should_refresh = True
+        if should_refresh:
+            self._refresh_follow_categories()
 
     def _resolve_follow_candidate(self, candidate):
         probe = {
@@ -2262,6 +2205,94 @@ class Spider(BaseSpider):
         # Keep the retired category ID usable for clients with a cached class list.
         return self._category_follow_manage(page, {"mode": "view"})
 
+    def _load_history_share_policy(self):
+        current = dict(self._history_share_policy or {"follow": True, "watch": True})
+        getter = getattr(self, "getCache", None)
+        if not callable(getter):
+            with self._history_context_lock:
+                self._history_share_policy_loaded = False
+            return current
+        try:
+            value = getter(self.HISTORY_SHARE_POLICY_CACHE_KEY)
+        except Exception:
+            with self._history_context_lock:
+                self._history_share_policy_loaded = False
+            return current
+        if value is not None and not isinstance(value, dict):
+            with self._history_context_lock:
+                self._history_share_policy_loaded = False
+            return current
+        policy = {"follow": True, "watch": True} if value is None else current
+        if isinstance(value, dict):
+            source = value.get("policy") if isinstance(value.get("policy"), dict) else value
+            for kind in policy:
+                if kind in source:
+                    policy[kind] = self._bool_value(source.get(kind), policy[kind])
+        with self._history_context_lock:
+            self._history_share_policy = policy
+            self._history_share_policy_loaded = True
+        return dict(policy)
+
+    def _persist_history_share_policy(self, policy=None):
+        setter = getattr(self, "setCache", None)
+        if not callable(setter):
+            return False
+        candidate = dict(policy or self._history_share_policy or {})
+        payload = {
+            "version": 1,
+            "follow": self._bool_value(candidate.get("follow"), True),
+            "watch": self._bool_value(candidate.get("watch"), True),
+            "updated_at": int(time.time()),
+        }
+        try:
+            result = setter(self.HISTORY_SHARE_POLICY_CACHE_KEY, payload)
+            return result is not False and result != "failed"
+        except Exception:
+            return False
+
+    def _toggle_history_share_policy(self, kind):
+        kind = str(kind or "").strip().lower()
+        if kind not in ("follow", "watch"):
+            return json.dumps({"msg": "History 共享设置无效"}, ensure_ascii=False)
+        with self._history_context_lock:
+            current = dict(self._history_share_policy or {"follow": True, "watch": True})
+            if self._history_share_policy_loaded:
+                candidate = dict(current)
+                candidate[kind] = not bool(current.get(kind, True))
+            else:
+                candidate = {"follow": False, "watch": False}
+                candidate[kind] = True
+            if not self._persist_history_share_policy(candidate):
+                return json.dumps({"msg": "History 共享设置未能保存，本机状态未改变"}, ensure_ascii=False)
+            self._history_share_policy = {
+                "follow": bool(candidate.get("follow", True)),
+                "watch": bool(candidate.get("watch", True)),
+            }
+            self._history_share_policy_loaded = True
+            enabled = self._history_share_policy[kind]
+        label = "追更播放记录" if kind == "follow" else "观看记录"
+        state = "允许" if enabled else "禁止"
+        self._refresh_follow_categories()
+        return json.dumps({
+            "msg": "%s已%s异地同步；仅影响本机未来上传，不影响云端读取、合并和已有记录" % (label, state),
+        }, ensure_ascii=False)
+
+    def _history_share_uploads(self, rows):
+        if not self._history_share_policy_loaded:
+            return []
+        policy = dict(self._history_share_policy or {"follow": True, "watch": True})
+        output = []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            is_follow = self._history_has_followplay_reference(row)
+            if is_follow and not bool(policy.get("follow", True)):
+                continue
+            if not is_follow and not bool(policy.get("watch", True)):
+                continue
+            output.append(row)
+        return output
+
     def _history_management_cards(self):
         ready = bool(self.atvp_api and self.atvp_token and self._atvp_session is not None)
         probe_remark = self._atvp_status_remark("probe")
@@ -2277,7 +2308,27 @@ class Spider(BaseSpider):
             ),
             "action": self.ATVP_SYNC_ACTION,
         }
-        return [sync_card, self._atvp_probe_card(probe_remark)]
+        policy = dict(self._history_share_policy or {"follow": True, "watch": True})
+        policy_loaded = bool(self._history_share_policy_loaded)
+        cards = [sync_card]
+        for kind, label in (("follow", "追更播放记录"), ("watch", "观看记录")):
+            enabled = bool(policy.get(kind, True))
+            cards.append({
+                "vod_id": self.HISTORY_SHARE_ACTION_PREFIX + kind,
+                "vod_name": "%s：%s" % (
+                    label,
+                    ("允许异地同步" if enabled else "禁止异地同步") if policy_loaded else "暂缓异地同步",
+                ),
+                "vod_pic": "",
+                "vod_remarks": (
+                    "本机设置暂未读取，已暂停上传；点击可明确设置"
+                    if not policy_loaded else
+                    "点击切换 · 仅影响本机未来上传，不影响云端读取、合并和已有记录"
+                ),
+                "action": self.HISTORY_SHARE_ACTION_PREFIX + kind,
+            })
+        cards.append(self._atvp_probe_card(probe_remark))
+        return cards
 
     def _history_alert_cards(self):
         status = self._atvp_status.get("sync") if isinstance(self._atvp_status, dict) else None
@@ -2445,19 +2496,27 @@ class Spider(BaseSpider):
         return status
 
     def _remember_follow_action_result(self, result, operation, title=""):
+        message = self._follow_action_result_message(result)
+        failed = self._follow_action_message_failed(message)
+        self._set_follow_action_status("failed" if failed else "done", message, operation, title)
+        self._refresh_follow_categories()
+        return result
+
+    @staticmethod
+    def _follow_action_result_message(result):
         payload = result
         if isinstance(result, str):
             try:
                 payload = json.loads(result)
             except Exception:
                 payload = {"msg": result}
-        message = str(payload.get("msg") or "操作完成") if isinstance(payload, dict) else "操作完成"
-        failed = any(word in message for word in (
+        return str(payload.get("msg") or "操作完成") if isinstance(payload, dict) else "操作完成"
+
+    @staticmethod
+    def _follow_action_message_failed(message):
+        return any(word in str(message or "") for word in (
             "失败", "无效", "无法", "未配置", "不可用", "不存在", "超时", "错误", "尚未追更", "已失效",
         ))
-        self._set_follow_action_status("failed" if failed else "done", message, operation, title)
-        self._refresh_follow_categories()
-        return result
 
     def _follow_state_cards(self, include_pending=False):
         cards = []
@@ -2854,21 +2913,25 @@ class Spider(BaseSpider):
                 if app is not None:
                     break
             if app is None:
-                return None
+                return Spider.ACTIVITY_PROBE_FAILED
             current = app.getClass()
+            activity_field_found = False
             while current is not None:
                 for field in current.getDeclaredFields():
                     if modifier_cls.isStatic(field.getModifiers()):
                         continue
                     if not activity_type.isAssignableFrom(field.getType()):
                         continue
+                    activity_field_found = True
                     field.setAccessible(True)
                     activity = field.get(app)
                     if activity is not None:
                         return activity
                 current = current.getSuperclass()
+            if not activity_field_found:
+                return Spider.ACTIVITY_PROBE_FAILED
         except Exception:
-            pass
+            return Spider.ACTIVITY_PROBE_FAILED
         return None
 
     @staticmethod
@@ -3431,6 +3494,212 @@ class Spider(BaseSpider):
         except Exception:
             return stale if isinstance(stale, list) else []
 
+    def _trigger_history_sync_now(self):
+        if not self._alist_tvbox_plugin or not self._ensure_atvp_connection():
+            return False
+        cache_key = "atvp-history-snapshot"
+        with self._cache_lock:
+            self._cache.pop(cache_key, None)
+            self._persistent_cache.pop(cache_key, None)
+        return self._schedule_atvp_history_refresh(cache_key)
+
+    def _playback_sync_key(self, parsed):
+        if not isinstance(parsed, dict):
+            return ""
+        identity = str(parsed.get("tmdbId") or parsed.get("sourceId") or "").strip()
+        resource_id = str(parsed.get("resourceId") or "").strip()
+        season = self._positive_int(parsed.get("season"), 0)
+        episode = self._positive_int(parsed.get("episode"), 0)
+        if not identity or not resource_id or season <= 0 or episode <= 0:
+            return ""
+        raw = "%s|%s|%s|%s|%s" % (
+            identity, resource_id, str(parsed.get("resourceMode") or "vod"), season, episode,
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _register_playback_sync_window(self, parsed):
+        """Delay History sync until a meaningful playback window has elapsed."""
+        if not self._alist_tvbox_plugin or not isinstance(parsed, dict):
+            return False
+        key = self._playback_sync_key(parsed)
+        if not key:
+            return False
+        marker = {
+            "owner": object(),
+            "started_at": time.time(),
+            "tmdb_id": self._positive_int(parsed.get("tmdbId"), 0),
+            "source_id": str(parsed.get("sourceId") or "").strip(),
+            "title": str(parsed.get("name") or "").strip(),
+            "resource_id": str(parsed.get("resourceId") or "").strip(),
+            "season": self._positive_int(parsed.get("season"), 0),
+            "episode": self._positive_int(parsed.get("episode"), 0),
+        }
+        with self._playback_sync_lock:
+            old = self._playback_sync_pending.get(key)
+            if old and float(old.get("started_at") or 0) >= marker["started_at"] - 5:
+                return False
+            self._playback_sync_pending[key] = marker
+        owner = marker["owner"]
+        if not self._schedule_playback_sync_check(
+                key, self.PLAYBACK_SYNC_MIN_SECONDS, expected_owner=owner):
+            with self._playback_sync_lock:
+                current = self._playback_sync_pending.get(key)
+                if isinstance(current, dict) and current.get("owner") is owner:
+                    self._playback_sync_pending.pop(key, None)
+            return False
+        return True
+
+    def _schedule_playback_sync_check(self, key, delay, expected_owner=None):
+        try:
+            wait = max(1.0, float(delay))
+        except Exception:
+            wait = float(self.PLAYBACK_SYNC_RETRY_SECONDS)
+        token = object()
+        timer = threading.Timer(wait, self._playback_sync_check, args=(key, token))
+        timer.daemon = True
+        with self._playback_sync_lock:
+            if expected_owner is not None:
+                current = self._playback_sync_pending.get(key)
+                if not isinstance(current, dict) or current.get("owner") is not expected_owner:
+                    return False
+            previous = self._playback_sync_timers.get(key)
+            if previous is not None:
+                try:
+                    previous.cancel()
+                except Exception:
+                    pass
+            self._playback_sync_timers[key] = timer
+            self._playback_sync_tokens[key] = token
+        try:
+            timer.start()
+        except Exception:
+            with self._playback_sync_lock:
+                if self._playback_sync_timers.get(key) is timer:
+                    self._playback_sync_timers.pop(key, None)
+                    self._playback_sync_tokens.pop(key, None)
+            return False
+        return True
+
+    def _playback_activity_active(self):
+        try:
+            activity = self._current_fongmi_activity()
+            if activity is self.ACTIVITY_PROBE_FAILED:
+                return True
+            if activity is None:
+                return False
+            name = str(activity.getClass().getName() or "").lower()
+            return any(marker in name for marker in (
+                "player", "videoactivity", "playbackactivity", "videoplay", "vodplay", "playactivity",
+            ))
+        except Exception:
+            # A failed activity probe must not cause a sync while playback may
+            # still be active; retry after the short exit window instead.
+            return True
+
+    def _playback_sync_marker_current(self, key, marker):
+        owner = marker.get("owner") if isinstance(marker, dict) else None
+        with self._playback_sync_lock:
+            current = self._playback_sync_pending.get(key)
+            return bool(owner is not None and isinstance(current, dict) and current.get("owner") is owner)
+
+    def _playback_sync_check(self, key, token=None):
+        with self._playback_sync_lock:
+            if key in self._playback_sync_inflight:
+                return False
+            current_token = self._playback_sync_tokens.get(key)
+            if token is not None and current_token is not token:
+                return False
+            marker = dict(self._playback_sync_pending.get(key) or {})
+            self._playback_sync_timers.pop(key, None)
+            self._playback_sync_tokens.pop(key, None)
+            if marker:
+                self._playback_sync_inflight[key] = marker.get("owner")
+            inflight_owner = marker.get("owner") if marker else None
+        if not marker:
+            return False
+        try:
+            return self._playback_sync_check_owned(key, marker)
+        finally:
+            with self._playback_sync_lock:
+                if self._playback_sync_inflight.get(key) is inflight_owner:
+                    self._playback_sync_inflight.pop(key, None)
+
+    def _playback_sync_check_owned(self, key, marker):
+        if not self._playback_sync_marker_current(key, marker):
+            return False
+        elapsed = time.time() - float(marker.get("started_at") or 0)
+        if elapsed < self.PLAYBACK_SYNC_MIN_SECONDS:
+            return self._schedule_playback_sync_check(
+                key, self.PLAYBACK_SYNC_MIN_SECONDS - elapsed, expected_owner=marker.get("owner"),
+            )
+        if self._playback_activity_active():
+            return self._schedule_playback_sync_check(
+                key, self.PLAYBACK_SYNC_RETRY_SECONDS, expected_owner=marker.get("owner"),
+            )
+        try:
+            rows = self._capture_native_history()
+            item = {
+                "tmdb_id": marker.get("tmdb_id"),
+                "source_id": marker.get("source_id"),
+                "title": marker.get("title"),
+                "trackingSeason": marker.get("season"),
+                "alist_vod_id": marker.get("resource_id"),
+            }
+            history = self._atvp_history_for_item(item, rows)
+            position = self._positive_int((history or {}).get("position"), 0)
+            if not history or position < self.PLAYBACK_SYNC_MIN_SECONDS * 1000:
+                return self._schedule_playback_sync_check(
+                    key, self.PLAYBACK_SYNC_RETRY_SECONDS, expected_owner=marker.get("owner"),
+                )
+        except Exception:
+            return self._schedule_playback_sync_check(
+                key, self.PLAYBACK_SYNC_RETRY_SECONDS, expected_owner=marker.get("owner"),
+            )
+        # Linearize the final ownership check with dispatch. A new playback
+        # window cannot be installed between validation and the History trigger.
+        with self._playback_sync_lock:
+            current = self._playback_sync_pending.get(key)
+            if not isinstance(current, dict) or current.get("owner") is not marker.get("owner"):
+                return False
+            if self._playback_activity_active():
+                return self._schedule_playback_sync_check(
+                    key, self.PLAYBACK_SYNC_RETRY_SECONDS, expected_owner=marker.get("owner"),
+                )
+            triggered = self._trigger_history_sync_now()
+            if triggered:
+                current = self._playback_sync_pending.get(key)
+                if isinstance(current, dict) and current.get("owner") is marker.get("owner"):
+                    self._playback_sync_pending.pop(key, None)
+                return True
+            current = self._playback_sync_pending.get(key)
+            if isinstance(current, dict) and current.get("owner") is marker.get("owner"):
+                return self._schedule_playback_sync_check(
+                    key, self.PLAYBACK_SYNC_RETRY_SECONDS, expected_owner=marker.get("owner"),
+                )
+            return False
+
+    def _flush_playback_sync_on_navigation(self):
+        with self._playback_sync_lock:
+            entries = []
+            for key in list(self._playback_sync_pending):
+                if key in self._playback_sync_inflight:
+                    continue
+                timer = self._playback_sync_timers.get(key)
+                token = self._playback_sync_tokens.get(key)
+                if timer is not None:
+                    try:
+                        timer.cancel()
+                    except Exception:
+                        pass
+                entries.append((key, token))
+        for key, token in entries:
+            thread = threading.Thread(target=self._playback_sync_check, args=(key, token))
+            thread.daemon = True
+            try:
+                thread.start()
+            except Exception:
+                continue
+
     def _schedule_atvp_history_refresh(self, cache_key):
         with self._atvp_job_lock:
             if "sync" in self._atvp_jobs or "sync-background" in self._atvp_jobs:
@@ -3550,17 +3819,23 @@ class Spider(BaseSpider):
             cloud_rows = stale if isinstance(stale, list) else []
             errors.append(("云端History读取", self._short_error(exc)))
         merged, uploads = self._merge_native_history(local_rows, cloud_rows)
+        permitted_uploads = []
+        upload_blocked = 0
         uploaded = 0
-        if cloud_available and uploads and self._history_write_enabled():
-            try:
-                with self._history_context_lock:
-                    self._require_history_generation(expected_generation)
-                    self._atvp_history_push(uploads)
-                    uploaded = len(uploads)
-            except _HistorySyncCancelled:
-                raise
-            except Exception as exc:
-                errors.append(("云端History写入", self._short_error(exc)))
+        try:
+            # Keep policy selection and the outbound POST in one serial section.
+            # Once a toggle returns, no older policy snapshot can upload afterward.
+            with self._history_context_lock:
+                self._require_history_generation(expected_generation)
+                permitted_uploads = self._history_share_uploads(uploads)
+                upload_blocked = max(0, len(uploads) - len(permitted_uploads))
+                if cloud_available and permitted_uploads and self._history_write_enabled():
+                    self._atvp_history_push(permitted_uploads)
+                    uploaded = len(permitted_uploads)
+        except _HistorySyncCancelled:
+            raise
+        except Exception as exc:
+            errors.append(("云端History写入", self._short_error(exc)))
         imported = 0
         try:
             with self._history_context_lock:
@@ -3576,6 +3851,8 @@ class Spider(BaseSpider):
             "cloud": len(cloud_rows),
             "cloud_available": cloud_available,
             "upload_candidates": len(uploads),
+            "upload_allowed": len(permitted_uploads),
+            "upload_blocked": upload_blocked,
             "uploaded": uploaded,
             "imported": imported,
             "merged": merged,
@@ -3595,11 +3872,14 @@ class Spider(BaseSpider):
 
     @staticmethod
     def _history_sync_message(result):
-        skipped = max(0, int(result.get("upload_candidates") or 0) - int(result.get("uploaded") or 0))
+        skipped = max(0, int(result.get("upload_allowed") or 0) - int(result.get("uploaded") or 0))
+        blocked = max(0, int(result.get("upload_blocked") or 0))
         detail = "本机 %s，云端 %s，上传 %s，导入 %s，追更进度 %s" % (
             result.get("local", 0), result.get("cloud", 0), result.get("uploaded", 0),
             result.get("imported", 0), result.get("progress", 0),
         )
+        if blocked:
+            detail += "，本机共享设置跳过上传 %s" % blocked
         if skipped and str(result.get("mode") or "").startswith("只读"):
             detail += "，只读跳过上传 %s" % skipped
         errors = result.get("errors") if isinstance(result.get("errors"), list) else []
@@ -4288,6 +4568,15 @@ class Spider(BaseSpider):
         match = re.search(r"(?:followplay_|followplay://)[A-Za-z0-9_-]+", str(history.get("episodeUrl") or ""))
         return self._parse_followplay(match.group(0)) if match else None
 
+    @staticmethod
+    def _history_has_followplay_reference(history):
+        if not isinstance(history, dict):
+            return False
+        return bool(re.search(
+            r"(?:^|[$#])(?:followplay_|followplay://)",
+            str(history.get("episodeUrl") or ""),
+        ))
+
     def _atvp_history_for_item(self, item, histories):
         if not isinstance(item, dict) or not isinstance(histories, list):
             return None
@@ -4561,11 +4850,64 @@ class Spider(BaseSpider):
             pass
         try:
             resource_deadline = time.monotonic() + self.RESOURCE_FOREGROUND_BUDGET
+            bound_resource = self._bound_resource_row(item)
+            bound_resource_id = str((bound_resource or {}).get("vod_id") or "").strip()
+            if bound_resource:
+                try:
+                    bound_detail = self._resource_detail(bound_resource, deadline=resource_deadline)
+                    route = item.get("last_play_route") if isinstance(item.get("last_play_route"), dict) else {}
+                    remembered_play_id = str(route.get("playId") or "").strip()
+                    remembered_probe = self._route_probe_snapshot(
+                        remembered_play_id,
+                        bound_resource_id,
+                        route.get("resourceMode") or bound_resource.get("_resource_mode") or "vod",
+                    )
+                    if (
+                            remembered_probe
+                            and remembered_probe.get("reachable") is True
+                            and self._bound_detail_contains_route(bound_detail, route)):
+                        validated_bound = bound_detail
+                        bound_validated = True
+                    else:
+                        validated_bound = self._validated_playable_detail(
+                            bound_detail, item, resource_deadline, 1,
+                            resource_id=bound_resource_id,
+                            resource_mode=bound_resource.get("_resource_mode") or "vod",
+                            preferred_route=route,
+                        )
+                        bound_validated = bool(validated_bound)
+                    bound_vod = self._payload_first_vod(validated_bound)
+                    if not bound_vod:
+                        raise RuntimeError("原绑定线路验活失败")
+                    if bound_vod:
+                        if bound_validated:
+                            self._store_validated_resource_detail(bound_resource, validated_bound)
+                        rewritten = self._rewrite_resource_vod(
+                            bound_vod, item, bound_resource_id,
+                            mode=bound_resource.get("_resource_mode") or "vod",
+                            provider_hint=bound_vod.get("vod_remarks") or bound_vod.get("type_name") or bound_vod.get("type"),
+                            validated=True,
+                        )
+                        if rewritten:
+                            merged = self._merge_resource_vods(
+                                [rewritten], item, raw_id, base_vod,
+                            )
+                            if merged:
+                                return {"list": [merged]}
+                except Exception:
+                    # A stale bound source is deliberately a soft failure; only now
+                    # do we prepare independent replacement routes below.
+                    if bound_resource_id:
+                        self._schedule_bound_route_replacement(item, bound_resource_id)
+                        return {"list": [self._resource_error_vod(
+                            base_vod, "原绑定线路失效，后台备选线路验证中",
+                        )]}
             candidates = self._resource_candidates(
                 item, deadline=min(resource_deadline, time.monotonic() + self.RESOURCE_SEARCH_BUDGET),
             )
             groups = []
             group_count = 0
+            candidate_group_limit = self.RESOURCE_ROUTE_CANDIDATE_LIMIT
             resource_error = ""
             detail_deadline = resource_deadline
             for row in candidates[:self.RESOURCE_DETAIL_ATTEMPT_LIMIT]:
@@ -4574,6 +4916,8 @@ class Spider(BaseSpider):
                     break
                 resource_id = str(row.get("vod_id") or row.get("id") or "").strip()
                 if not resource_id:
+                    continue
+                if bound_resource_id and resource_id == bound_resource_id:
                     continue
                 try:
                     detail = self._resource_detail(row, deadline=detail_deadline)
@@ -4590,7 +4934,7 @@ class Spider(BaseSpider):
                         if rewritten:
                             groups.append(rewritten)
                             group_count += len(str(rewritten.get("vod_play_url") or "").split("$$$"))
-                            if group_count >= self.resource_limit:
+                            if group_count >= candidate_group_limit:
                                 break
                 except Exception as exc:
                     resource_error = "AList 资源失败：%s" % self._short_error(exc)
@@ -4633,10 +4977,209 @@ class Spider(BaseSpider):
             return enriched
         return item
 
+    def _bound_resource_row(self, item):
+        binding_keys = [str(item.get("tmdb_id") or ""), str(item.get("source_id") or "")]
+        resource_id = next((
+            str(self.follow_alist_bindings.get(key) or "").strip()
+            for key in binding_keys
+            if key and str(self.follow_alist_bindings.get(key) or "").strip()
+        ), "")
+        resource_mode = str(item.get("alist_resource_mode") or "vod").strip().lower() or "vod"
+        route = item.get("last_play_route") if isinstance(item.get("last_play_route"), dict) else {}
+        route_backend = str(route.get("backend") or "")
+        current_backend = self._resource_capability_identity()
+        route_matches = not route_backend or route_backend == current_backend
+        if not resource_id and route_matches:
+            resource_id = str(route.get("resourceId") or "").strip()
+            resource_mode = str(route.get("resourceMode") or "vod").strip().lower() or "vod"
+        if not resource_id and (not route_backend or route_matches):
+            resource_id = str(item.get("alist_vod_id") or "").strip()
+        decoded_resource_id = self._unquote_limited(resource_id)
+        if (
+                not resource_id
+                or len(resource_id) > self.RESOURCE_ID_MAX_LENGTH
+                or len(decoded_resource_id) > self.RESOURCE_ID_MAX_LENGTH
+                or self._contains_url_reference(decoded_resource_id)
+                or resource_mode not in self.RESOURCE_SEARCH_MODES):
+            return None
+        return {
+            "vod_id": resource_id,
+            "vod_name": str(item.get("title") or ""),
+            "_resource_mode": resource_mode,
+            "_bound_route": True,
+        }
+
+    def _bound_replacement_key(self, item, bound_resource_id):
+        identity = str(item.get("tmdb_id") or item.get("source_id") or "").strip()
+        backend = self._resource_capability_identity()
+        raw = "%s|%s|%s" % (backend, identity, str(bound_resource_id or "").strip())
+        return "bound-replacement:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _replace_bound_resource(
+            self, item, row, expected_generation=None, expected_bound_resource_id=None,
+            expected_item_resource_id=None):
+        resource_id = str((row or {}).get("vod_id") or (row or {}).get("id") or "").strip()
+        resource_mode = str((row or {}).get("_resource_mode") or "vod").strip().lower() or "vod"
+        decoded_resource_id = self._unquote_limited(resource_id)
+        if (
+                not resource_id
+                or resource_mode not in self.RESOURCE_SEARCH_MODES
+                or len(resource_id) > self.RESOURCE_ID_MAX_LENGTH
+                or len(decoded_resource_id) > self.RESOURCE_ID_MAX_LENGTH
+                or self._contains_url_reference(decoded_resource_id)
+        ):
+            return False
+        expected_bound = str(expected_bound_resource_id or "").strip()
+        with self._history_context_lock:
+            with self._cache_lock:
+                if expected_generation is not None and expected_generation != self._cache_generation:
+                    return False
+            with self._follow_enrich_lock:
+                items = self._follow_memory.get("items") if isinstance(self._follow_memory, dict) else {}
+                if not isinstance(items, dict):
+                    return False
+                tmdb_id = str(self._positive_int(item.get("tmdb_id"), 0))
+                source_id = str(item.get("source_id") or "").strip()
+                item_key = tmdb_id if tmdb_id and tmdb_id in items else ""
+                if not item_key and source_id:
+                    item_key = next((
+                        key for key, value in items.items()
+                        if isinstance(value, dict) and str(value.get("source_id") or "") == source_id
+                    ), "")
+                if not item_key:
+                    return False
+                updated = dict(items.get(item_key) or {})
+                if expected_item_resource_id is not None:
+                    stored_resource_id = str(updated.get("alist_vod_id") or "").strip()
+                    if stored_resource_id != str(expected_item_resource_id or "").strip():
+                        return False
+                if expected_bound:
+                    stored_bound = str(updated.get("alist_vod_id") or "").strip()
+                    route = updated.get("last_play_route") if isinstance(updated.get("last_play_route"), dict) else {}
+                    route_bound = str(route.get("resourceId") or "").strip()
+                    if stored_bound and stored_bound != expected_bound:
+                        return False
+                    if route_bound and route_bound != expected_bound:
+                        return False
+                    current_binding = self._bound_resource_row({
+                        "tmdb_id": self._positive_int(updated.get("tmdb_id"), 0),
+                        "source_id": str(updated.get("source_id") or source_id).strip(),
+                        **updated,
+                    })
+                    current_bound = str((current_binding or {}).get("vod_id") or "").strip()
+                    if current_bound != expected_bound:
+                        return False
+                if str(updated.get("alist_vod_id") or "").strip() == resource_id:
+                    return False
+                updated["alist_vod_id"] = resource_id
+                updated["alist_resource_mode"] = resource_mode
+                updated["binding_updated_at"] = int(time.time())
+                route = updated.get("last_play_route") if isinstance(updated.get("last_play_route"), dict) else {}
+                if expected_bound and str(route.get("resourceId") or "").strip() == expected_bound:
+                    updated.pop("last_play_route", None)
+                items = dict(items)
+                items[item_key] = updated
+                self._save_follow_state(items)
+        return True
+
+    def _schedule_bound_route_replacement(self, item, bound_resource_id):
+        if not self._alist_tvbox_plugin or not isinstance(item, dict) or not bound_resource_id:
+            return False
+        job_key = self._bound_replacement_key(item, bound_resource_id)
+        with self._cache_lock:
+            if job_key in self._bound_replacement_jobs:
+                return False
+            job_owner = object()
+            self._bound_replacement_jobs[job_key] = job_owner
+            generation = self._cache_generation
+        expected_item_resource_id = str(item.get("alist_vod_id") or "").strip()
+
+        def worker():
+            try:
+                deadline = time.monotonic() + self.RESOURCE_HOT_VALIDATION_BUDGET
+                candidates = self._resource_candidates(dict(item), deadline=deadline)
+                candidates = [
+                    dict(row) for row in candidates or []
+                    if isinstance(row, dict)
+                    and str(row.get("vod_id") or row.get("id") or "").strip()
+                    and str(row.get("vod_id") or row.get("id") or "").strip() != str(bound_resource_id)
+                ][:self.RESOURCE_HOT_VALIDATION_ATTEMPT_LIMIT]
+                for row in candidates:
+                    if deadline - time.monotonic() < 1:
+                        break
+                    with self._cache_lock:
+                        if generation != self._cache_generation:
+                            return
+                    try:
+                        detail = self._resource_detail(row, deadline=deadline, use_validated_cache=False)
+                        validated = self._validated_playable_detail(
+                            detail, item, deadline, 1,
+                            resource_id=row.get("vod_id") or row.get("id"),
+                            resource_mode=row.get("_resource_mode") or "vod",
+                            preferred_route=item.get("last_play_route"),
+                        )
+                        if validated is None:
+                            continue
+                        checked_row = dict(row)
+                        checked_row["_validated_groups"] = max(
+                            1, len(str(self._payload_first_vod(validated).get("vod_play_url") or "").split("$$$"))
+                        )
+                        if not self._store_validated_resource_detail(
+                                checked_row, validated, expected_generation=generation):
+                            continue
+                        if self._replace_bound_resource(
+                                item, checked_row,
+                                expected_generation=generation,
+                                expected_bound_resource_id=bound_resource_id,
+                                expected_item_resource_id=expected_item_resource_id):
+                            self._schedule_active_detail_refresh(item)
+                        return
+                    except Exception:
+                        continue
+            finally:
+                with self._cache_lock:
+                    if self._bound_replacement_jobs.get(job_key) is job_owner:
+                        self._bound_replacement_jobs.pop(job_key, None)
+
+        thread = threading.Thread(target=worker)
+        thread.daemon = True
+        try:
+            thread.start()
+        except Exception:
+            with self._cache_lock:
+                if self._bound_replacement_jobs.get(job_key) is job_owner:
+                    self._bound_replacement_jobs.pop(job_key, None)
+            return False
+        return True
+
+    def _bound_detail_contains_route(self, detail, route):
+        if not isinstance(route, dict):
+            return False
+        play_id = str(route.get("playId") or "").strip()
+        season = self._positive_int(route.get("season"), 0)
+        episode = self._positive_int(route.get("episode"), 0)
+        if not play_id or season <= 0 or episode <= 0:
+            return False
+        vod = self._payload_first_vod(detail)
+        if not isinstance(vod, dict):
+            return False
+        for group in str(vod.get("vod_play_url") or "").split("$$$"):
+            for index, part in enumerate(group.split("#"), 1):
+                name, separator, target = part.rpartition("$")
+                if not separator or str(target).strip() != play_id:
+                    continue
+                found_season, found_episode, explicit = self._episode_from_text_info(
+                    name, index, season,
+                )
+                if explicit and (found_season, found_episode) == (season, episode):
+                    return True
+        return False
+
     def _resource_error_vod(self, vod, message):
         output = dict(vod)
-        old_remark = str(output.get("vod_remarks") or "").strip()
-        output["vod_remarks"] = " · ".join(value for value in (old_remark, message) if value)
+        director = str(output.get("vod_director") or "").strip()
+        status = "线路状态：" + str(message or "暂无可播放资源")
+        output["vod_director"] = " · ".join(value for value in (director, status) if value)
         content = str(output.get("vod_content") or "").strip()
         output["vod_content"] = "\n\n".join(value for value in (content, "播放资源状态：" + str(message or "暂无可播放资源")) if value)
         output["vod_play_from"] = ""
@@ -5001,10 +5544,17 @@ class Spider(BaseSpider):
                 deadline, max(5, min(12, self.timeout)), requests_left=1,
             ),
             verify=self.verify_tls,
+            stream=True,
         )
         if response.status_code < 200 or response.status_code >= 300:
+            closer = getattr(response, "close", None)
+            if callable(closer):
+                closer()
             return []
-        payload = response.json()
+        try:
+            payload = self._read_bounded_json_response(response, "AList check-links", deadline=deadline)
+        except Exception:
+            return []
         states = {
             str(entry.get("url") or "").strip(): str(entry.get("state") or "").lower()
             for entry in payload.get("results") or []
@@ -5023,7 +5573,11 @@ class Spider(BaseSpider):
                 break
             try:
                 detail = self._resource_detail(row, deadline=deadline, use_validated_cache=False)
-                validated_detail = self._validated_playable_detail(detail, item, deadline, remaining)
+                validated_detail = self._validated_playable_detail(
+                    detail, item, deadline, remaining,
+                    resource_id=row.get("vod_id") or row.get("id"),
+                    resource_mode=row.get("_resource_mode") or "vod",
+                )
                 if validated_detail is None:
                     continue
                 checked_row = dict(row)
@@ -5045,7 +5599,9 @@ class Spider(BaseSpider):
     def _validated_resource_group_count(rows):
         return sum(max(0, Spider._positive_int(row.get("_validated_groups"), 0)) for row in rows or [])
 
-    def _validated_playable_detail(self, detail, item, deadline, max_groups):
+    def _validated_playable_detail(
+            self, detail, item, deadline, max_groups, resource_id="", resource_mode="vod",
+            preferred_route=None):
         vod = self._payload_first_vod(detail)
         if not isinstance(vod, dict) or max_groups <= 0:
             return None
@@ -5054,9 +5610,36 @@ class Spider(BaseSpider):
         kept_sources = []
         kept_urls = []
         kept_quality = []
+        route = preferred_route if isinstance(preferred_route, dict) else {}
+        preferred_play_id = str(route.get("playId") or "").strip()
+        preferred_season = self._positive_int(route.get("season"), 0)
+        preferred_episode = self._positive_int(route.get("episode"), 0)
+        preferred_mode = str(route.get("resourceMode") or "vod").strip().lower() or "vod"
+
+        def preferred_route_matches_group(group):
+            if (
+                    not preferred_play_id
+                    or str(route.get("resourceId") or "").strip() != str(resource_id or "").strip()
+                    or preferred_mode != str(resource_mode or "vod").strip().lower()
+                    or preferred_season <= 0 or preferred_episode <= 0):
+                return False
+            for part_index, part in enumerate(str(group or "").split("#"), 1):
+                name, separator, target = part.rpartition("$")
+                if not separator or str(target).strip() != preferred_play_id:
+                    continue
+                found_season, found_episode, explicit = self._episode_from_text_info(
+                    name, part_index, preferred_season or self._tracking_season(item),
+                )
+                if explicit and (found_season, found_episode) == (preferred_season, preferred_episode):
+                    return True
+            return False
+
         ranked_groups = sorted(
             enumerate(urls),
-            key=lambda value: self._resource_group_match_score(value[1], item),
+            key=lambda value: (
+                1 if preferred_route_matches_group(value[1]) else 0,
+                self._resource_group_match_score(value[1], item),
+            ),
             reverse=True,
         )
         group_limit = min(max_groups, self.RESOURCE_HOT_GROUPS_PER_RESULT)
@@ -5066,6 +5649,8 @@ class Spider(BaseSpider):
             if deadline is not None and deadline - time.monotonic() < 1:
                 break
             play_ids = self._resource_preferred_play_ids(group, item)
+            if preferred_route_matches_group(group):
+                play_ids = [preferred_play_id] + [value for value in play_ids if value != preferred_play_id]
             if not play_ids:
                 continue
             verified = False
@@ -5098,6 +5683,9 @@ class Spider(BaseSpider):
                     verified_probe = checked
                     verified_output = output
                     verified_play_id = play_id
+                    self._cache_route_probe(
+                        verified_play_id, checked, resource_id=resource_id, resource_mode=resource_mode,
+                    )
                     self._record_route_quality(
                         play_id, True, startup_ms=checked.get("startup_ms"), signals=checked,
                     )
@@ -5213,6 +5801,8 @@ class Spider(BaseSpider):
         rows = []
         seen = set()
         for query in list(queries or [])[:2]:
+            if len(rows) >= self.RESOURCE_SEARCH_RESULT_LIMIT:
+                break
             if deadline is not None and deadline - time.monotonic() < 1:
                 break
             params = {"wd": query, "pg": 1}
@@ -5224,12 +5814,16 @@ class Spider(BaseSpider):
                 data = self._resource_api_get(mode, params, deadline=deadline)
             except Exception:
                 continue
-            for value in self._payload_list(data):
+            remaining_limit = self.RESOURCE_SEARCH_RESULT_LIMIT - len(rows)
+            for value in self._payload_list(data, limit=remaining_limit):
                 row = dict(value)
                 resource_id = str(row.get("vod_id") or row.get("id") or "").strip()
+                if (
+                        not resource_id
+                        or len(resource_id) > self.RESOURCE_ID_MAX_LENGTH
+                        or len(self._unquote_limited(resource_id)) > self.RESOURCE_ID_MAX_LENGTH):
+                    continue
                 identity = unquote(resource_id) if mode in ("pansou", "telegram") else resource_id
-                if not identity:
-                    identity = json.dumps(row, ensure_ascii=False, sort_keys=True)
                 if identity in seen:
                     continue
                 seen.add(identity)
@@ -5252,6 +5846,10 @@ class Spider(BaseSpider):
         resource_id = str((row or {}).get("vod_id") or (row or {}).get("id") or "").strip()
         if not resource_id:
             return {"list": []}
+        if (
+                len(resource_id) > self.RESOURCE_ID_MAX_LENGTH
+                or len(self._unquote_limited(resource_id)) > self.RESOURCE_ID_MAX_LENGTH):
+            raise RuntimeError("资源 ID 过长，已拒绝异常线路")
         if mode in ("vod1", "vod"):
             params = {"ids": resource_id, "ac": "detail"}
         elif mode == "pansou":
@@ -5523,6 +6121,7 @@ class Spider(BaseSpider):
         rewritten_providers = []
         rewritten_quality = []
         resource_limited = False
+        route_candidates_limited = False
         resource_id = str(resource_id or "").strip()
         if len(resource_id) > self.RESOURCE_ID_MAX_LENGTH:
             resource_id = resource_id[:self.RESOURCE_ID_MAX_LENGTH]
@@ -5557,9 +6156,9 @@ class Spider(BaseSpider):
         if not raw_play_url:
             return None
         raw_groups = raw_play_url.split("$$$")
-        if len(raw_groups) > self.resource_limit:
-            raw_groups = raw_groups[:self.resource_limit]
-            resource_limited = True
+        if len(raw_groups) > self.RESOURCE_ROUTE_CANDIDATE_LIMIT:
+            raw_groups = raw_groups[:self.RESOURCE_ROUTE_CANDIDATE_LIMIT]
+            route_candidates_limited = True
         accepted_entries = 0
         invalid_entries = 0
         rewritten_play_length = 0
@@ -5621,6 +6220,7 @@ class Spider(BaseSpider):
                     break
                 play_id = self._build_followplay(
                     row["target"], item, resource_id, row["season"], row["episode"], row["name"],
+                    resource_mode=mode,
                     episode_explicit=row["explicit"],
                 )
                 if play_id:
@@ -5652,7 +6252,7 @@ class Spider(BaseSpider):
                     if group_index < len(declared_quality) and isinstance(declared_quality[group_index], dict)
                     else self._route_quality_score(representative, text="%s %s" % (source_name, group))
                 )
-                source_name = self._route_quality_label(source_name, quality)
+                source_name = self._strip_legacy_route_quality_label(source_name)
                 rewritten_sources.append(source_name)
                 rewritten_urls.append("#".join(entries))
                 rewritten_seasons.append(group_season or default_season)
@@ -5695,6 +6295,7 @@ class Spider(BaseSpider):
             "group_providers": rewritten_providers,
             "group_quality": rewritten_quality,
             "_resource_limited": resource_limited,
+            "_route_candidates_limited": route_candidates_limited,
         }
 
     def _resume_episode_match(self, urls, resource_ids, item):
@@ -5739,12 +6340,16 @@ class Spider(BaseSpider):
     def _merge_resource_vods(self, vods, item, raw_id, base_vod):
         valid = []
         resource_limited = False
+        route_candidates_limited = False
         total_play_url_length = 0
         for vod in vods or []:
             if not isinstance(vod, dict):
                 continue
             play_url = vod.get("vod_play_url")
             resource_limited = resource_limited or bool(vod.get("_resource_limited"))
+            route_candidates_limited = (
+                route_candidates_limited or bool(vod.get("_route_candidates_limited"))
+            )
             if not isinstance(play_url, str) or not play_url:
                 resource_limited = True
                 continue
@@ -5767,9 +6372,17 @@ class Spider(BaseSpider):
         accepted_episode_count = 0
         merged_play_length = 0
         play_budget_exhausted = False
+        route_limit = min(self.resource_limit, self.FOLLOW_ROUTE_LIMIT)
+        candidate_limit = self.RESOURCE_ROUTE_CANDIDATE_LIMIT
+        available_groups = sum(
+            len(str(vod.get("vod_play_url") or "").split("$$$"))
+            for vod in valid
+        )
+        if available_groups > route_limit:
+            route_candidates_limited = True
         for vod in valid:
             if (
-                    len(urls) >= self.resource_limit
+                len(urls) >= candidate_limit
                     or accepted_episode_count >= self.RESOURCE_RECORD_LIMIT
                     or play_budget_exhausted):
                 break
@@ -5780,7 +6393,10 @@ class Spider(BaseSpider):
             declared_providers = vod.get("group_providers") if isinstance(vod.get("group_providers"), list) else []
             declared_quality = vod.get("group_quality") if isinstance(vod.get("group_quality"), list) else []
             for group_index, group_url in enumerate(group_urls):
-                if len(urls) >= self.resource_limit or accepted_episode_count >= self.RESOURCE_RECORD_LIMIT:
+                if len(urls) >= candidate_limit:
+                    route_candidates_limited = True
+                    break
+                if accepted_episode_count >= self.RESOURCE_RECORD_LIMIT:
                     resource_limited = True
                     break
                 parts = str(group_url or "").split("#")
@@ -5829,7 +6445,12 @@ class Spider(BaseSpider):
                     break
         quality_order = sorted(
             range(len(urls)),
-            key=lambda index: self._positive_int(quality_scores[index].get("total"), 0),
+            key=lambda index: (
+                self._positive_int(quality_scores[index].get("resolution"), 0),
+                self._positive_int(quality_scores[index].get("total"), 0),
+                self._positive_int(quality_scores[index].get("startup"), 0),
+                self._positive_int(quality_scores[index].get("stability"), 0),
+            ),
             reverse=True,
         )
         for values in (sources, urls, resource_ids, group_seasons, group_providers, quality_scores):
@@ -5840,6 +6461,13 @@ class Spider(BaseSpider):
             group_index, resume_part_index = resume_match
             for values in (sources, urls, resource_ids, group_seasons, group_providers, quality_scores):
                 values.insert(0, values.pop(group_index))
+        for values in (sources, urls, resource_ids, group_seasons, group_providers, quality_scores):
+            del values[route_limit:]
+        accepted_episode_count = sum(len(str(group or "").split("#")) for group in urls)
+        merged_play_length = sum(
+            len(str(group or "")) + (3 if index else 0)
+            for index, group in enumerate(urls)
+        )
         source_names = set()
         for group_index, base_source in enumerate(list(sources)):
             base_source = self._resource_source_with_season(
@@ -5888,62 +6516,6 @@ class Spider(BaseSpider):
             records,
             self.RESOURCE_MERGED_PLAY_URL_BUDGET - merged_play_length,
         )
-        fallback_options = {}
-        fallback_targets = {}
-        for record in records:
-            payload = record.get("payload")
-            target = str(payload.get("url") or "") if payload else ""
-            episode_key = record["episode_key"]
-            provider = str(record.get("provider") or "")
-            fallback_key = (
-                ("provider", provider, episode_key)
-                if provider
-                else ("group", self._int_value(record.get("group"), -1), episode_key)
-            )
-            seen = fallback_targets.setdefault(fallback_key, set())
-            probe = self._route_probe_snapshot(target)
-            fingerprint = str((probe or {}).get("fingerprint") or "")
-            identity = ("fingerprint", fingerprint) if fingerprint else ("target", target)
-            if not target or identity in seen:
-                continue
-            seen.add(identity)
-            fallback_options.setdefault(fallback_key, []).append({
-                "url": target,
-                "resourceId": str(payload.get("resourceId") or record.get("resource_id") or ""),
-                "name": str(record.get("name") or ""),
-                "_fingerprint": fingerprint,
-            })
-        fallback_total = 0
-        for record in records:
-            if record.get("completed"):
-                continue
-            payload = record.get("payload")
-            if not payload:
-                continue
-            unique_fallbacks = []
-            current_target = str(payload.get("url") or "")
-            current_probe = self._route_probe_snapshot(current_target)
-            current_fingerprint = str((current_probe or {}).get("fingerprint") or "")
-            provider = str(record.get("provider") or "")
-            fallback_key = (
-                ("provider", provider, record["episode_key"])
-                if provider
-                else ("group", self._int_value(record.get("group"), -1), record["episode_key"])
-            )
-            for candidate in fallback_options.get(fallback_key, []):
-                target = str(candidate.get("url") or "")
-                if target == current_target or (
-                        current_fingerprint
-                        and str(candidate.get("_fingerprint") or "") == current_fingerprint):
-                    continue
-                unique_fallbacks.append(candidate)
-                if len(unique_fallbacks) >= self.FOLLOWPLAY_MAX_FALLBACKS:
-                    break
-            updated = self._followplay_with_fallbacks(record["play_id"], unique_fallbacks)
-            if updated != record["play_id"]:
-                fallback_total = max(fallback_total, len(unique_fallbacks))
-                record["play_id"] = updated
-
         final_records = []
         final_length = 0
         final_group = None
@@ -5973,13 +6545,6 @@ class Spider(BaseSpider):
             values[:] = [values[index] for index in kept_group_order]
 
         completion_total = sum(1 for record in records if record.get("completed"))
-        fallback_total = 0
-        for record in records:
-            payload = self._parse_followplay(record.get("play_id"))
-            fallback_total = max(
-                fallback_total,
-                len(payload.get("fallbacks") or []) if isinstance(payload, dict) else 0,
-            )
         self._schedule_route_preheat(records, item)
         rebuilt_groups = {}
         for record in records:
@@ -6065,9 +6630,9 @@ class Spider(BaseSpider):
             })
         old_remark = str(output.get("vod_remarks") or "").strip()
         resume_remark = ("续播定位 " + str(item.get("history_episode") or "")) if resume_ready else ""
-        fallback_remark = ("同集备用线路 %d 条" % fallback_total) if fallback_total else ""
         completion_remark = ("同盘补全 %d 集" % completion_total) if completion_total else ""
         limit_remark = "资源分集过多 已截断" if resource_limited or completion_limited else ""
+        route_remark = "线路候选已按清晰度筛选" if route_candidates_limited else ""
         _hot_ready, hot_pending = self._supplement_resource_state(item)
         shown_verified = sum("已验证 ·" in str(source) for source in sources)
         shown_candidates = max(0, len(sources) - shown_verified)
@@ -6087,7 +6652,8 @@ class Spider(BaseSpider):
             "vod_name": history_name or str(output.get("vod_name") or item.get("title") or "影视资源"),
             "vod_remarks": " · ".join(value for value in (
                 old_remark, "%s 条播放线路" % len(urls), hot_remark, resume_remark,
-                fallback_remark, completion_remark, limit_remark,
+                completion_remark, limit_remark,
+                route_remark,
             ) if value),
             "vod_play_from": "$$$".join(output_sources),
             "vod_play_url": "$$$".join(prompted_urls),
@@ -6095,20 +6661,29 @@ class Spider(BaseSpider):
         })
         return output
 
-    @staticmethod
-    def _payload_list(value):
+    @classmethod
+    def _payload_list(cls, value, limit=None):
+        max_items = None if limit is None else max(0, cls._int_value(limit, 0))
+        if max_items == 0:
+            return []
         if isinstance(value, dict):
             for key in ("list", "data", "items", "results"):
                 candidate = value.get(key)
                 if isinstance(candidate, list):
-                    return [row for row in candidate if isinstance(row, dict)]
+                    rows = []
+                    for row in candidate:
+                        if isinstance(row, dict):
+                            rows.append(row)
+                            if max_items is not None and len(rows) >= max_items:
+                                break
+                    return rows
             if isinstance(value.get("data"), dict):
-                return Spider._payload_list(value.get("data"))
+                return cls._payload_list(value.get("data"), limit=max_items)
         return []
 
     @classmethod
     def _payload_first_vod(cls, value):
-        rows = cls._payload_list(value)
+        rows = cls._payload_list(value, limit=1)
         return rows[0] if rows else None
 
     def _supplement_resource_state(self, item):
@@ -6133,6 +6708,40 @@ class Spider(BaseSpider):
         value = str(source or "AList资源").strip() or "AList资源"
         return value if value.startswith(prefix + " · ") else "%s · %s" % (prefix, value)
 
+    def _read_bounded_json_response(self, response, label, deadline=None):
+        max_bytes = self.RESOURCE_API_RESPONSE_MAX_BYTES
+        try:
+            try:
+                content_length = int((response.headers or {}).get("Content-Length") or 0)
+            except Exception:
+                content_length = 0
+            if content_length > max_bytes:
+                raise RuntimeError("%s 响应过大" % label)
+            chunks = []
+            received = 0
+            iterator = getattr(response, "iter_content", None)
+            if callable(iterator):
+                parts = iterator(chunk_size=65536)
+            else:
+                parts = [getattr(response, "content", b"")]
+            for chunk in parts:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise RuntimeError("%s 响应超过总时限" % label)
+                if not chunk:
+                    continue
+                received += len(chunk)
+                if received > max_bytes:
+                    raise RuntimeError("%s 响应过大" % label)
+                chunks.append(chunk)
+            try:
+                return json.loads(b"".join(chunks))
+            except Exception:
+                raise RuntimeError("%s 返回无效 JSON" % label)
+        finally:
+            closer = getattr(response, "close", None)
+            if callable(closer):
+                closer()
+
     def _resource_api_get(self, mode, params, deadline=None):
         if mode not in self.RESOURCE_SEARCH_MODES:
             raise RuntimeError("不支持的资源搜索模式：%s" % mode)
@@ -6149,6 +6758,7 @@ class Spider(BaseSpider):
                 deadline, max(5, min(12, self.timeout)), requests_left=1,
             ),
             verify=self.verify_tls,
+            stream=True,
         )
         status = int(response.status_code)
         self._mark_resource_capability(
@@ -6156,9 +6766,12 @@ class Spider(BaseSpider):
             "missing" if status in self.RESOURCE_CAPABILITY_MISSING_STATUSES else "present",
             status,
         )
-        if response.status_code < 200 or response.status_code >= 300:
-            raise RuntimeError("AList %s HTTP %s" % (mode, response.status_code))
-        value = response.json()
+        if status < 200 or status >= 300:
+            closer = getattr(response, "close", None)
+            if callable(closer):
+                closer()
+            raise RuntimeError("AList %s HTTP %s" % (mode, status))
+        value = self._read_bounded_json_response(response, "AList %s" % mode, deadline=deadline)
         return value if isinstance(value, dict) else {"list": value if isinstance(value, list) else []}
 
     def _atvp_vod(self, params):
@@ -6217,10 +6830,14 @@ class Spider(BaseSpider):
             headers={"Accept": "application/json", "X-CLIENT": "com.fongmi.android.tv"},
             timeout=request_timeout,
             verify=self.verify_tls,
+            stream=True,
         )
         if response.status_code < 200 or response.status_code >= 300:
+            closer = getattr(response, "close", None)
+            if callable(closer):
+                closer()
             raise RuntimeError("AList 播放 HTTP %s" % response.status_code)
-        data = response.json()
+        data = self._read_bounded_json_response(response, "AList 播放", deadline=deadline)
         if not isinstance(data, dict) or not data.get("url"):
             raise RuntimeError("AList 播放地址为空")
         output = dict(data)
@@ -6242,31 +6859,65 @@ class Spider(BaseSpider):
             headers={"Content-Type": "application/json", "X-CLIENT": "com.fongmi.android.tv"},
             timeout=request_timeout,
             verify=self.verify_tls,
+            stream=True,
         )
         if response.status_code < 200 or response.status_code >= 300:
+            closer = getattr(response, "close", None)
+            if callable(closer):
+                closer()
             raise RuntimeError("AList 解析 HTTP %s" % response.status_code)
+        payload = self._read_bounded_json_response(response, "AList 解析", deadline=deadline)
         candidates = []
-        for vod in self._payload_list(response.json()):
+        for vod in self._payload_list(payload, limit=self.RESOURCE_PARSE_CANDIDATE_LIMIT):
             for group in str(vod.get("vod_play_url") or "").split("$$$"):
                 for part in group.split("#"):
                     _name, separator, target = part.rpartition("$")
                     candidate = str(target if separator else part).strip()
                     if candidate.startswith("1@") and candidate not in candidates:
                         candidates.append(candidate)
+                        if len(candidates) >= self.RESOURCE_PARSE_CANDIDATE_LIMIT:
+                            return candidates
         return candidates
 
-    def _route_probe_snapshot(self, target):
-        key = str(target or "").strip()
+    def _route_probe_key(self, target, resource_id="", resource_mode="vod"):
+        target = str(target or "").strip()
+        resource_id = str(resource_id or "").strip()
+        mode = str(resource_mode or "vod").strip().lower() or "vod"
+        backend = self._resource_capability_identity()
+        if not target or not resource_id or not backend:
+            return ""
+        raw = "%s|%s|%s|%s" % (backend, mode, resource_id, target)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _route_probe_snapshot(self, target, resource_id="", resource_mode="vod"):
+        key = self._route_probe_key(target, resource_id, resource_mode)
         if not key:
             return None
         with self._cache_lock:
+            self._prune_route_probe_cache_locked()
             cached = self._route_probe_cache.get(key)
             if not isinstance(cached, dict):
                 return None
-            if time.time() - float(cached.get("checked_at") or 0) > self.route_probe_ttl:
-                self._route_probe_cache.pop(key, None)
-                return None
             return dict(cached)
+
+    def _prune_route_probe_cache_locked(self):
+        now = time.time()
+        expired = [
+            key for key, value in self._route_probe_cache.items()
+            if not isinstance(value, dict)
+            or now - float(value.get("checked_at") or 0) > self.route_probe_ttl
+        ]
+        for key in expired:
+            self._route_probe_cache.pop(key, None)
+        overflow = len(self._route_probe_cache) - self.ROUTE_PROBE_CACHE_LIMIT
+        if overflow <= 0:
+            return
+        oldest = sorted(
+            self._route_probe_cache,
+            key=lambda key: float(self._route_probe_cache[key].get("checked_at") or 0),
+        )
+        for key in oldest[:overflow]:
+            self._route_probe_cache.pop(key, None)
 
     def _route_quality_key(self, play_id):
         target = str(play_id or "").strip()
@@ -6511,17 +7162,13 @@ class Spider(BaseSpider):
         return scores
 
     @staticmethod
-    def _route_quality_label(source, quality):
+    def _strip_legacy_route_quality_label(source):
+        """Remove score prefixes emitted by older versions from visible labels."""
         value = str(source or "AList资源").strip() or "AList资源"
-        if not isinstance(quality, dict) or not quality.get("observed"):
-            return value
         value = re.sub(
             r"^质量\d+ 首开\d+ 稳定\d+ 编码\d+ 清晰\d+ 字幕\d+ · ", "", value,
         )
-        return "质量%d 首开%d 稳定%d 编码%d 清晰%d 字幕%d · %s" % (
-            quality.get("total", 0), quality.get("startup", 0), quality.get("stability", 0),
-            quality.get("codec", 0), quality.get("resolution", 0), quality.get("subtitle", 0), value,
-        )
+        return value
 
     @staticmethod
     def _resolve_addresses(host, port, deadline=None):
@@ -6755,6 +7402,90 @@ class Spider(BaseSpider):
             }
         return None
 
+    def _cache_route_probe(self, play_id, probe, resource_id="", resource_mode="vod"):
+        key = self._route_probe_key(play_id, resource_id, resource_mode)
+        if not key or not isinstance(probe, dict):
+            return
+        with self._cache_lock:
+            self._route_probe_cache[key] = dict(probe)
+            self._prune_route_probe_cache_locked()
+
+    def _remember_successful_follow_route(self, parsed, candidate, quality_id, probe):
+        if not isinstance(parsed, dict) or not isinstance(candidate, dict):
+            return
+        season = self._positive_int(parsed.get("season"), 0)
+        episode = self._positive_int(parsed.get("episode"), 0)
+        if season <= 0 or episode <= 0:
+            return
+        play_id = str(candidate.get("_route_refresh_target") or quality_id or "").strip()
+        decoded_play_id = self._unquote_limited(play_id)
+        if (
+                len(play_id) > self.FOLLOWPLAY_ROUTE_FIELD_MAX_LENGTH
+                or not re.match(r"^(?:\d+@[^\s?#]+|\d+-\d+|\d+)$", play_id)
+                or self._contains_url_reference(decoded_play_id.split("@", 1)[-1])
+        ):
+            play_id = ""
+        resource_id = str(candidate.get("resourceId") or parsed.get("resourceId") or "").strip()
+        decoded_resource_id = self._unquote_limited(resource_id)
+        if (
+                resource_id.startswith("filter:")
+                or len(resource_id) > self.RESOURCE_ID_MAX_LENGTH
+                or len(decoded_resource_id) > self.RESOURCE_ID_MAX_LENGTH
+                or self._contains_url_reference(decoded_resource_id)
+        ):
+            resource_id = ""
+        resource_mode = str(parsed.get("resourceMode") or "vod").strip().lower() or "vod"
+        if resource_mode not in self.RESOURCE_SEARCH_MODES:
+            resource_mode = ""
+        if not play_id and not resource_id:
+            return
+        tmdb_id = self._positive_int(parsed.get("tmdbId"), 0)
+        source_id = str(parsed.get("sourceId") or "").strip()
+        route_name = str(candidate.get("name") or parsed.get("name") or "").strip()[:256]
+        decoded_route_name = self._unquote_limited(route_name)
+        if self._contains_url_reference(decoded_route_name):
+            route_name = ""
+        route_probe = probe if isinstance(probe, dict) else {}
+        route = {
+            "version": 1,
+            "backend": self._resource_capability_identity(),
+            "resourceId": resource_id,
+            "resourceMode": resource_mode,
+            "playId": play_id,
+            "season": season,
+            "episode": episode,
+            "name": route_name,
+            "quality": {
+                "height": self._positive_int(route_probe.get("height"), 0),
+                "codec": str(route_probe.get("codec") or "")[:16],
+                "subtitle": route_probe.get("subtitle") if isinstance(route_probe.get("subtitle"), bool) else None,
+                "startupMs": self._positive_int(route_probe.get("startup_ms"), 0),
+            },
+            "updatedAt": int(time.time()),
+        }
+        with self._follow_enrich_lock:
+            items = self._follow_memory.get("items") if isinstance(self._follow_memory, dict) else {}
+            if not isinstance(items, dict):
+                return
+            item_key = str(tmdb_id) if tmdb_id and str(tmdb_id) in items else ""
+            if not item_key and source_id:
+                item_key = next((
+                    key for key, value in items.items()
+                    if isinstance(value, dict) and str(value.get("source_id") or "") == source_id
+                ), "")
+            if not item_key:
+                return
+            state_items = dict(items)
+            item = dict(state_items.get(item_key) or {})
+            item["last_play_route"] = route
+            if resource_id:
+                item["alist_vod_id"] = resource_id
+            state_items[item_key] = item
+            try:
+                self._save_follow_state(state_items)
+            except Exception:
+                pass
+
     def _probe_route_candidate(self, target):
         output = dict(self._atvp_play(
             target,
@@ -6791,20 +7522,25 @@ class Spider(BaseSpider):
                 continue
             payload = record.get("payload") or {}
             target = str(payload.get("url") or "").strip()
-            if target and target not in targets:
-                targets.append(target)
-            if len(targets) >= self.FOLLOWPLAY_MAX_FALLBACKS + 1:
+            resource_id = str(record.get("resource_id") or payload.get("resourceId") or "").strip()
+            resource_mode = str(payload.get("resourceMode") or "vod").strip().lower() or "vod"
+            identity = (target, resource_id, resource_mode)
+            if target and identity not in targets:
+                targets.append(identity)
+            if len(targets) >= self.FOLLOW_ROUTE_LIMIT:
                 break
         generation = self._cache_generation
-        for target in targets:
-            if self._route_probe_snapshot(target) is not None:
+        for target, resource_id, resource_mode in targets:
+            probe_key = self._route_probe_key(target, resource_id, resource_mode)
+            if not probe_key or self._route_probe_snapshot(target, resource_id, resource_mode) is not None:
                 continue
             with self._cache_lock:
-                if target in self._route_probe_jobs:
+                if probe_key in self._route_probe_jobs:
                     continue
-                self._route_probe_jobs.add(target)
+                self._route_probe_jobs.add(probe_key)
 
-            def worker(route=target, expected_generation=generation):
+            def worker(route=target, route_resource_id=resource_id, route_mode=resource_mode,
+                       route_key=probe_key, expected_generation=generation):
                 try:
                     result = self._probe_route_candidate(route)
                 except Exception as exc:
@@ -6816,9 +7552,9 @@ class Spider(BaseSpider):
                         "error": self._short_error(exc),
                     }
                 with self._cache_lock:
-                    self._route_probe_jobs.discard(route)
+                    self._route_probe_jobs.discard(route_key)
                     if expected_generation == self._cache_generation:
-                        self._route_probe_cache[route] = result
+                        self._cache_route_probe(route, result, route_resource_id, route_mode)
 
             thread = threading.Thread(target=worker)
             thread.daemon = True
@@ -6826,14 +7562,16 @@ class Spider(BaseSpider):
                 thread.start()
             except Exception:
                 with self._cache_lock:
-                    self._route_probe_jobs.discard(target)
+                    self._route_probe_jobs.discard(probe_key)
 
     def _prepare_player_candidates(self, candidates):
         prepared = []
         fingerprints = set()
         for order, candidate in enumerate(candidates):
             row = dict(candidate)
-            probe = self._route_probe_snapshot(row.get("url"))
+            probe = self._route_probe_snapshot(
+                row.get("url"), row.get("resourceId"), row.get("resourceMode") or "vod",
+            )
             fingerprint = str((probe or {}).get("fingerprint") or "")
             if fingerprint and fingerprint in fingerprints:
                 continue
@@ -6852,105 +7590,17 @@ class Spider(BaseSpider):
                 text=row.get("name"),
             )
             row["_route_quality"] = quality
-            prepared.append((rank, -self._positive_int(quality.get("total"), 0), order, row))
-        prepared.sort(key=lambda value: (value[0], value[1], value[2]))
-        return [value[3] for value in prepared]
-
-    def _shared_filter_route_candidates(self, parsed):
-        if not isinstance(parsed, dict) or not self.atvp_api or not self.atvp_token:
-            return []
-        season = self._positive_int(parsed.get("season"), 0)
-        episode = self._positive_int(parsed.get("episode"), 0)
-        if season <= 0 or episode <= 0:
-            return []
-        aliases = Filter._payload_title_aliases(parsed)
-        for value in (parsed.get("title"), parsed.get("originalTitle")):
-            text = str(value or "").strip()
-            if text and text not in aliases:
-                aliases.append(text)
-        getter = getattr(self, "getCache", None)
-        if not aliases or not callable(getter):
-            return []
-        expected_api = str(self.atvp_api or "").rstrip("/")
-        expected_year = str(parsed.get("year") or "")[:4]
-        expected_token_hash = Filter._token_hash(self.atvp_token)
-        expected_tmdb_id = str(self._positive_int(parsed.get("tmdbId"), 0) or "")
-        expected_source_id = str(parsed.get("sourceId") or "").strip()
-        now = int(time.time())
-        candidates = []
-        seen = set()
-        key = Filter._route_cache_key(
-            expected_api, self.atvp_token, parsed, aliases, expected_year, season, episode,
-        )
-        if not key:
-            return []
-        try:
-            cached = getter(key)
-        except Exception:
-            return []
-        if isinstance(cached, str):
-            try:
-                cached = json.loads(cached)
-            except Exception:
-                return []
-        if isinstance(cached, dict) and "value" in cached:
-            cached = cached.get("value")
-        routes = cached if isinstance(cached, list) else []
-        for route in routes[:Filter.ROUTE_CACHE_LIMIT]:
-            if not isinstance(route, dict) or self._positive_int(route.get("version"), 0) != Filter.ROUTE_CACHE_VERSION:
-                continue
-            updated_at = self._positive_int(route.get("updatedAt"), 0)
-            expires_at = self._positive_int(route.get("expiresAt"), 0)
-            if (updated_at <= 0 or updated_at > now + 60 or expires_at <= now
-                    or expires_at < updated_at or expires_at > now + 1860):
-                continue
-            if str(route.get("api") or "").rstrip("/") != expected_api:
-                continue
-            if str(route.get("tokenHash") or "") != expected_token_hash:
-                continue
-            route_tmdb_id = str(self._positive_int(route.get("tmdbId"), 0) or "")
-            route_source_id = str(route.get("sourceId") or "").strip()
-            if expected_tmdb_id and route_tmdb_id != expected_tmdb_id:
-                continue
-            if not expected_tmdb_id and expected_source_id and route_source_id != expected_source_id:
-                continue
-            if self._positive_int(route.get("season"), 0) != season or self._positive_int(route.get("episode"), 0) != episode:
-                continue
-            route_year = str(route.get("year") or "")[:4]
-            if expected_year and route_year and expected_year != route_year:
-                continue
-            route_aliases = [str(value or "").strip() for value in route.get("aliases") or [] if str(value or "").strip()]
-            if not any(
-                    Filter._title_score(Filter._normalize_title(left), Filter._normalize_title(right)) > 0
-                    for left in aliases for right in route_aliases):
-                continue
-            output = self._sanitize_route_output(
-                route.get("output") if isinstance(route.get("output"), dict) else {}
-            )
-            if self._int_value(output.get("parse"), 0) != 0:
-                continue
-            media_url = str(output.get("url") or "").strip()
-            if len(media_url) > self.FOLLOWPLAY_MAX_URL_LENGTH or not Filter._safe_media_url(media_url, expected_api):
-                continue
-            play_id = str(route.get("playId") or "").strip()
-            refresh_target = play_id if re.match(r"^(?:\d+@[^\s?#]+|\d+-\d+)$", play_id) else ""
-            target = media_url
-            candidate = {
-                "url": target,
-                "resourceId": "filter:%s" % play_id if refresh_target else "filter:direct",
-                "name": str(route.get("episodeName") or route.get("source") or "历史线路"),
-                "_route_output": dict(output),
-                "_route_requires_validation": True,
-                "_route_refresh_target": refresh_target,
-                "_route_quality_id": play_id or target,
-            }
-            if target in seen:
-                continue
-            seen.add(target)
-            candidates.append(candidate)
-            if len(candidates) >= self.FOLLOWPLAY_MAX_FALLBACKS:
-                break
-        return candidates
+            prepared.append((
+                rank,
+                -self._positive_int(quality.get("resolution"), 0),
+                -self._positive_int(quality.get("total"), 0),
+                -self._positive_int(quality.get("startup"), 0),
+                -self._positive_int(quality.get("stability"), 0),
+                order,
+                row,
+            ))
+        prepared.sort(key=lambda value: value[:-1])
+        return [value[-1] for value in prepared]
 
     @staticmethod
     def _episode_from_text_info(text, index, default_season=1):
@@ -7048,7 +7698,7 @@ class Spider(BaseSpider):
         return int(match.group(1)) if match else 1
 
     @staticmethod
-    def _build_followplay(url, item, resource_id, season, episode, name, fallback_urls=None, episode_explicit=True):
+    def _build_followplay(url, item, resource_id, season, episode, name, episode_explicit=True, resource_mode="vod"):
         def clipped(value, limit):
             return str(value or "").strip()[:limit]
 
@@ -7060,19 +7710,6 @@ class Spider(BaseSpider):
             for value in Spider._follow_title_alias_values(item, include_primary=False)[:8]
             if clipped(value, 128)
         ]
-        fallbacks = []
-        for candidate in list(fallback_urls or [])[:Spider.FOLLOWPLAY_MAX_FALLBACKS]:
-            if isinstance(candidate, dict):
-                target = str(candidate.get("url") or "").strip()
-                if not target or len(target) > Spider.FOLLOWPLAY_MAX_URL_LENGTH:
-                    continue
-                fallbacks.append({
-                    "url": target,
-                    "resourceId": clipped(candidate.get("resourceId"), 512),
-                    "name": clipped(candidate.get("name"), 256),
-                })
-            elif str(candidate or "").strip() and len(str(candidate).strip()) <= Spider.FOLLOWPLAY_MAX_URL_LENGTH:
-                fallbacks.append({"url": str(candidate).strip()})
         resume = re.match(r"^S0*(\d{1,2})E0*(\d{1,3})$", str(item.get("history_episode") or ""), re.I)
         values = {
             "url": primary_url,
@@ -7080,6 +7717,7 @@ class Spider(BaseSpider):
             "tmdbId": clipped(item.get("tmdb_id"), 32),
             "sourceId": clipped(item.get("source_id"), 512),
             "resourceId": clipped(resource_id, 512),
+            "resourceMode": clipped(resource_mode or "vod", 16),
             "season": season,
             "episode": episode,
             "episodeExplicit": 1 if episode_explicit else 0,
@@ -7092,7 +7730,9 @@ class Spider(BaseSpider):
             "resumeDuration": Spider._int_value(item.get("history_duration"), 0),
             "resumeSeason": int(resume.group(1)) if resume else 0,
             "resumeEpisode": int(resume.group(2)) if resume else 0,
-            "fallbacks": json.dumps(fallbacks, ensure_ascii=False, separators=(",", ":")),
+            # Independent route groups are selected on the detail page; new IDs
+            # never embed another route or a signed media response.
+            "fallbacks": "[]",
         }
 
         def encode(payload_values):
@@ -7101,10 +7741,6 @@ class Spider(BaseSpider):
                 return ""
             return FOLLOWPLAY_PREFIX + base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
-        result = encode(values)
-        if result and len(result) <= Spider.FOLLOWPLAY_MAX_ID_LENGTH:
-            return result
-        values["fallbacks"] = "[]"
         result = encode(values)
         if result and len(result) <= Spider.FOLLOWPLAY_MAX_ID_LENGTH:
             return result
@@ -7130,6 +7766,22 @@ class Spider(BaseSpider):
             return None
         if not parsed.get("url") or len(str(parsed.get("url") or "")) > self.FOLLOWPLAY_MAX_URL_LENGTH:
             return None
+        resource_id = str(parsed.get("resourceId") or "").strip()
+        decoded_resource_id = self._unquote_limited(resource_id)
+        if (
+                resource_id
+                and (
+                    len(resource_id) > self.RESOURCE_ID_MAX_LENGTH
+                    or len(decoded_resource_id) > self.RESOURCE_ID_MAX_LENGTH
+                    or self._contains_url_reference(decoded_resource_id)
+                )
+        ):
+            return None
+        resource_mode = str(parsed.get("resourceMode") or "vod").strip().lower() or "vod"
+        if resource_mode not in self.RESOURCE_SEARCH_MODES:
+            return None
+        parsed["resourceId"] = resource_id
+        parsed["resourceMode"] = resource_mode
         for key in ("season", "episode", "tmdbId", "resumeSeason", "resumeEpisode"):
             parsed[key] = self._int_value(parsed.get(key))
         for key in ("resumePosition", "resumeDuration"):
@@ -7157,60 +7809,6 @@ class Spider(BaseSpider):
                 break
         parsed["fallbacks"] = normalized
         return parsed
-
-    def _followplay_with_fallbacks(self, play_id, fallbacks):
-        parsed = self._parse_followplay(play_id)
-        if not parsed:
-            return play_id
-        valid = []
-        current = str(parsed.get("url") or "")
-        for candidate in fallbacks or []:
-            if not isinstance(candidate, dict):
-                continue
-            target = str(candidate.get("url") or "").strip()
-            if not target or target == current or any(str(row.get("url") or "") == target for row in valid):
-                continue
-            valid.append({
-                "url": target,
-                "resourceId": str(candidate.get("resourceId") or ""),
-                "name": str(candidate.get("name") or ""),
-            })
-        if not valid:
-            return play_id
-        aliases = parsed.get("titleAliases") or []
-        if isinstance(aliases, str):
-            try:
-                aliases = json.loads(aliases)
-            except Exception:
-                aliases = []
-        if not isinstance(aliases, list):
-            aliases = []
-        item = {
-            "media_type": parsed.get("mediaType") or "movie",
-            "tmdb_id": parsed.get("tmdbId") or 0,
-            "source_id": parsed.get("sourceId") or "",
-            "title": parsed.get("title") or "",
-            "original_title": parsed.get("originalTitle") or "",
-            "title_aliases": aliases,
-            "year": parsed.get("year") or "",
-            "history_position": parsed.get("resumePosition") or 0,
-            "history_duration": parsed.get("resumeDuration") or 0,
-            "history_episode": (
-                "S%02dE%02d" % (parsed.get("resumeSeason"), parsed.get("resumeEpisode"))
-                if parsed.get("resumeSeason") and parsed.get("resumeEpisode") else ""
-            ),
-        }
-        rebuilt = self._build_followplay(
-            current,
-            item,
-            parsed.get("resourceId") or "",
-            self._positive_int(parsed.get("season"), 0),
-            self._positive_int(parsed.get("episode"), 0),
-            parsed.get("name") or "",
-            fallback_urls=valid,
-            episode_explicit=parsed.get("episodeExplicit") is not False,
-        )
-        return rebuilt or play_id
 
     def _inject_resume(self, output, parsed):
         if parsed.get("mediaType") != "movie" and parsed.get("episodeExplicit") is False:
@@ -7316,6 +7914,20 @@ class Spider(BaseSpider):
                 return int(float(value))
             except Exception:
                 return fallback
+
+    @staticmethod
+    def _unquote_limited(value, rounds=16):
+        current = str(value or "")
+        for _index in range(max(0, int(rounds))):
+            decoded = unquote(current)
+            if decoded == current:
+                break
+            current = decoded
+        return current
+
+    @staticmethod
+    def _contains_url_reference(value):
+        return bool(re.search(r"(?i)(?:[a-z][a-z0-9+.-]*:)?//", str(value or "")))
 
     def _tmdb_detail(self, raw_id):
         match = re.match(r"^tmdb:(movie|tv):(\d+)$", str(raw_id or ""))
