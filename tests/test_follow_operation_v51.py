@@ -46,12 +46,17 @@ class FollowOperationV51Test(unittest.TestCase):
         expected = {
             "name": "豆瓣TMDB追更助手（AList-TVBox专用）",
             "id": "douban_tmdb_follow_single",
-            "version": "52",
+            "version": "53",
         }
         for field, value in expected.items():
             match = re.search(r"(?m)^\s*//@%s:(.+?)\s*$" % field, source)
             self.assertIsNotNone(match, field)
             self.assertEqual(match.group(1), value)
+        repository = json.loads((ROOT / "spiders_v2.json").read_text(encoding="utf-8"))
+        entry = next(row for row in repository if row.get("id") == expected["id"])
+        self.assertEqual(str(entry.get("version")), expected["version"])
+        self.assertEqual(entry.get("file"), "py/豆瓣TMDB追更单入口.py")
+        self.assertIs(entry.get("valid"), True)
 
     def _wait_follow_jobs(self, timeout=2):
         deadline = time.time() + timeout

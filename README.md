@@ -24,7 +24,7 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/plugins/seed
 
 | 插件 | 版本 | 索引状态 | 说明 |
 | --- | ---: | --- | --- |
-| 豆瓣 TMDB 追更助手 | 52 | 可导入 | [能力与配置](plugins/douban_tmdb_follow_single/README.md) |
+| 豆瓣 TMDB 追更助手 | 53 | 可导入 | [能力与配置](plugins/douban_tmdb_follow_single/README.md) |
 | SeedHub 磁力与多网盘 | 1 | 可导入 | [能力与配置](plugins/seedhub/README.md) |
 
 ## 精简结构

@@ -1,7 +1,7 @@
 # 豆瓣 TMDB 追更助手
 
 - 插件 ID：`douban_tmdb_follow_single`
-- 当前版本：`52`
+- 当前版本：`53`
 - 运行环境：AList-TVBox raw Python 插件；兼容空 EXT 直接 FongMi 元数据模式
 - 最低兼容基线：AList-TVBox `1.42.0`
 - 当前验证环境：AList-TVBox `1.43.0`

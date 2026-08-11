@@ -2,7 +2,7 @@
 """
 //@name:豆瓣TMDB追更助手（AList-TVBox专用）
 //@id:douban_tmdb_follow_single
-//@version:52
+//@version:53
 
 AList-TVBox raw Python plugin for Douban/TMDB browsing and follow-up playback.
 

@@ -12,7 +12,7 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/spiders_v2.j
 https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMDB追更单入口.py
 ```
 
-本插件用于豆瓣/TMDB 浏览、剧集追更、AList-TVBox 资源搜索、线路评分和 History 续播。当前发布版本为 v52，最低兼容基线为 AList-TVBox 1.42.0，当前已在 1.43.0 验证。插件由 AList-TVBox 生成订阅后交给 FongMi/TvBox 使用。同一源码空 EXT 直载时保留 FongMi 元数据分类、搜索、详情和直链播放合同，但追更、History 与网盘资源功能必须使用 AList-TVBox 生成的订阅。
+本插件用于豆瓣/TMDB 浏览、剧集追更、AList-TVBox 资源搜索、线路评分和 History 续播。当前发布版本为 v53，最低兼容基线为 AList-TVBox 1.42.0，当前已在 1.43.0 验证。插件由 AList-TVBox 生成订阅后交给 FongMi/TvBox 使用。同一源码空 EXT 直载时保留 FongMi 元数据分类、搜索、详情和直链播放合同，但追更、History 与网盘资源功能必须使用 AList-TVBox 生成的订阅。
 
 完整功能不要把 `.py` 文件直接添加为普通 FongMi 站点，也不要手工填写外层 `api`、`token`、`secret`、`loader`、`source` 或 `raw`。
 
