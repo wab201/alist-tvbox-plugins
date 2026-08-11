@@ -4,7 +4,7 @@
 - 当前版本：`55`
 - 运行环境：AList-TVBox raw Python 插件；兼容空 EXT 直接 FongMi 元数据模式
 - 最低兼容基线：AList-TVBox `1.42.0`
-- 当前验证环境：AList-TVBox `1.43.0`
+- 当前验证环境：AList-TVBox `1.44.0`
 - 发布状态：索引已启用，可通过仓库导入
 
 ## 主要能力

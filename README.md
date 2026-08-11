@@ -67,7 +67,7 @@ plugins/
 - `file` 必须指向仓库中存在的公开插件文件。
 - 明文 raw Python 插件的 `file` 必须以 `.py` 结尾。
 - 只有通过兼容与安全检查的版本才设置 `valid: true`。
-- 每次更新同步维护对应插件的 `CHANGELOG.md` 和 `STATUS.md`。
+- 每次发布同步更新仓库根 `README.md` 的插件版本与当前版本摘要，以及对应插件的 `README.md`、`DEPLOYMENT.md`、`CHANGELOG.md` 和 `STATUS.md`。
 - 每个插件的每个版本都必须在自己的 `CHANGELOG.md` 中书写更新说明。
 - 更新说明只描述用户可感知的功能新增、功能调整、体验优化和问题修复，不写测试过程、测试数量、审计过程、发布命令、日志、源码大小、哈希或其他验证数据。
 - 对应单插件索引存在时优先使用 `plugins/<id>/spiders_v2.json`，避免整仓导入影响其他已配置插件。

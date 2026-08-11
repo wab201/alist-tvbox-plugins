@@ -12,7 +12,7 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/spiders_v2.j
 https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMDB追更单入口.py
 ```
 
-本插件用于豆瓣/TMDB 浏览、剧集追更、AList-TVBox 资源搜索、线路评分和 History 续播。当前发布版本为 v55，最低兼容基线为 AList-TVBox 1.42.0，当前已在 1.43.0 验证。插件由 AList-TVBox 生成订阅后交给 FongMi/TvBox 使用。同一源码空 EXT 直载时保留 FongMi 元数据分类、搜索、详情和直链播放合同，但追更、History 与网盘资源功能必须使用 AList-TVBox 生成的订阅。
+本插件用于豆瓣/TMDB 浏览、剧集追更、AList-TVBox 资源搜索、线路评分和 History 续播。当前发布版本为 v55，最低兼容基线为 AList-TVBox 1.42.0，当前已在 1.44.0 验证。插件由 AList-TVBox 生成订阅后交给 FongMi/TvBox 使用。同一源码空 EXT 直载时保留 FongMi 元数据分类、搜索、详情和直链播放合同，但追更、History 与网盘资源功能必须使用 AList-TVBox 生成的订阅。
 
 完整功能不要把 `.py` 文件直接添加为普通 FongMi 站点，也不要手工填写外层 `api`、`token`、`secret`、`loader`、`source` 或 `raw`。
 
@@ -160,13 +160,13 @@ py/
 7. 点击 **保存配置**，再点击该行 **刷新**。
 8. 让 FongMi/TvBox 刷新订阅配置。
 
-完整说明见 `FILTER.md`。插件和过滤器是两条独立记录，源码更新后需要分别点击 **刷新**。
+完整说明见 `FILTER.md`。插件和过滤器是两条独立记录：主插件更新时重新导入仓库，过滤器还需在过滤器管理中确认使用同一发布源码并单独点击 **刷新**；两者不会互相刷新。
 
 ## 常见问题
 
 ### 插件状态异常或看不到插件
 
-确认仓库可由 AList-TVBox 访问，索引文件名为 `spiders_v2.json`，且其中的源码路径以 `.py` 结尾。重新导入仓库或点击插件行的 **刷新**。
+确认仓库可由 AList-TVBox 访问，索引文件名为 `spiders_v2.json`，且其中的源码路径以 `.py` 结尾。正式更新时重新导入仓库，不要删除旧插件或改用源码直链。
 
 ### 提示不是 AList-TVBox raw 订阅
 
@@ -188,7 +188,7 @@ py/
 
 ### 过滤器没有生效
 
-确认拦截点为“详情、播放”，作用范围覆盖目标插件，过滤器已启用且状态正常。更新源码后同时刷新插件和过滤器。
+确认拦截点为“详情、播放”，作用范围覆盖目标插件，过滤器已启用且状态正常。更新源码后先重新导入主插件仓库，再单独刷新过滤器。
 
 ### 详情没有资源
 
