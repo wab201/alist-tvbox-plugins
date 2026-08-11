@@ -46,7 +46,7 @@ class FollowOperationV51Test(unittest.TestCase):
         expected = {
             "name": "豆瓣TMDB追更助手（AList-TVBox专用）",
             "id": "douban_tmdb_follow_single",
-            "version": "53",
+            "version": "55",
         }
         for field, value in expected.items():
             match = re.search(r"(?m)^\s*//@%s:(.+?)\s*$" % field, source)
@@ -231,6 +231,308 @@ class FollowOperationV51Test(unittest.TestCase):
         self.spider._import_native_history.assert_called_once_with(merged)
         self.assertEqual(result["uploaded"], 1)
         self.assertEqual(result["upload_blocked"], 1)
+
+    def test_history_private_https_origin_falls_back_to_http(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "https://192.168.1.10:4568"
+        self.spider.atvp_token = "token"
+        response = Mock(status_code=200)
+        self.spider._atvp_session = Mock()
+        self.spider._atvp_session.get.side_effect = [
+            MODULE.requests.exceptions.SSLError("wrong version number"), response,
+        ]
+
+        result = self.spider._atvp_history_request("GET", stream=True)
+
+        self.assertIs(result, response)
+        calls = self.spider._atvp_session.get.call_args_list
+        self.assertEqual(
+            [call.args[0] for call in calls],
+            [
+                "https://192.168.1.10:4568/history/token",
+                "http://192.168.1.10:4568/history/token",
+            ],
+        )
+        self.assertEqual(self.spider._history_selected_origin, "http://192.168.1.10:4568")
+
+    def test_history_public_https_never_downgrades_to_http(self):
+        self.spider.atvp_api = "https://history.example:443"
+
+        self.assertEqual(
+            self.spider._history_origin_candidates(),
+            ["https://history.example:443"],
+        )
+
+    def test_history_private_counterpart_requires_literal_private_host(self):
+        self.assertEqual(
+            self.spider._history_private_origin_counterpart("https://127.evil.example:443"),
+            "",
+        )
+        self.assertEqual(
+            self.spider._history_private_origin_counterpart("https://127.0.0.1:443"),
+            "http://127.0.0.1:443",
+        )
+        self.assertEqual(
+            self.spider._history_private_origin_counterpart("http://192.168.1.8:8080"),
+            "https://192.168.1.8:8080",
+        )
+        self.assertEqual(
+            self.spider._history_private_origin_counterpart("https://192.168.1.8"),
+            "http://192.168.1.8",
+        )
+        for origin in (
+                "https://0.0.0.0:4568",
+                "https://169.254.169.254:4568",
+                "https://192.0.2.1:4568",
+                "https://224.0.0.1:4568",
+                "https://[fe80::1]:4568",
+                "https://[2001:db8::1]:4568"):
+            with self.subTest(origin=origin):
+                self.assertEqual(self.spider._history_private_origin_counterpart(origin), "")
+        self.assertEqual(
+            self.spider._history_private_origin_counterpart("https://[fd00::8]:4568"),
+            "http://[fd00::8]:4568",
+        )
+        self.assertEqual(
+            self.spider._history_private_origin_counterpart("https://[::1]:4568"),
+            "http://[::1]:4568",
+        )
+
+    def test_history_current_https_origin_precedes_stale_http_primary(self):
+        self.spider.atvp_api = "https://192.168.1.8:4568"
+        self.spider._history_primary_origin = "http://192.168.1.8:4568"
+        self.spider._history_api_origins = ["http://192.168.1.8:4568"]
+        self.spider._history_selected_origin = ""
+
+        candidates = self.spider._history_origin_candidates()
+
+        self.assertEqual(candidates[0], "https://192.168.1.8:4568")
+        self.assertEqual(candidates[1], "http://192.168.1.8:4568")
+
+    def test_history_request_retries_current_https_after_fallback_login(self):
+        class LoginResponse(object):
+            def __init__(self):
+                self.status_code = 200
+                self.headers = {}
+                self.closed = False
+                self.payload = json.dumps({
+                    "authorities": [{"authority": "USER"}],
+                    "token": "history-token",
+                }).encode("utf-8")
+
+            def iter_content(self, chunk_size=None):
+                return iter((self.payload,))
+
+            def close(self):
+                self.closed = True
+
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "https://192.168.1.10:4568"
+        self.spider.atvp_token = "token"
+        self.spider.history_username = "user"
+        self.spider.history_password = "pass"
+        login = LoginResponse()
+        history = Mock(status_code=200)
+        self.spider._atvp_session = Mock()
+        self.spider._atvp_session.headers = {}
+        self.spider._atvp_session.post.side_effect = [
+            MODULE.requests.exceptions.ConnectionError(
+                "Failed to establish a new connection: connection refused"
+            ),
+            login,
+            history,
+        ]
+
+        result = self.spider._atvp_history_request("POST", json=[])
+
+        self.assertIs(result, history)
+        urls = [call.args[0] for call in self.spider._atvp_session.post.call_args_list]
+        self.assertEqual(
+            urls,
+            [
+                "https://192.168.1.10:4568/api/accounts/login",
+                "http://192.168.1.10:4568/api/accounts/login",
+                "https://192.168.1.10:4568/history/token",
+            ],
+        )
+        self.assertEqual(self.spider._history_selected_origin, "https://192.168.1.10:4568")
+        self.assertTrue(login.closed)
+        self.assertTrue(self.spider._atvp_session.post.call_args_list[1].kwargs["stream"])
+        self.assertTrue(self.spider._atvp_session.post.call_args_list[2].kwargs["stream"])
+
+    def test_history_error_body_is_streamed_with_a_byte_limit(self):
+        class OversizedErrorResponse(object):
+            status_code = 500
+            headers = {}
+
+            def __init__(self, chunk_count):
+                self.chunk_count = chunk_count
+                self.read_count = 0
+                self.closed = False
+
+            def iter_content(self, chunk_size=None):
+                for _index in range(self.chunk_count):
+                    self.read_count += 1
+                    yield b"x" * 16384
+
+            @property
+            def text(self):
+                raise AssertionError("streamed error response must not use response.text")
+
+            def close(self):
+                self.closed = True
+
+        response = OversizedErrorResponse(1000)
+
+        self.assertFalse(self.spider._atvp_history_needs_auth(response))
+        self.assertTrue(response.closed)
+        self.assertLessEqual(response.read_count, 9)
+
+    def test_history_ambiguous_post_failure_is_not_retried_on_counterpart(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "https://192.168.1.10:4568"
+        self.spider.atvp_token = "token"
+        self.spider.history_username = "user"
+        self.spider.history_password = "pass"
+        self.spider._history_auth_token = "history-token"
+        self.spider._atvp_session = Mock()
+        self.spider._atvp_session.post.side_effect = MODULE.requests.exceptions.Timeout("read timed out")
+
+        with self.assertRaises(MODULE.requests.exceptions.Timeout):
+            self.spider._atvp_history_request("POST", json=[])
+
+        self.assertEqual(self.spider._atvp_session.post.call_count, 1)
+        self.assertEqual(
+            self.spider._atvp_session.post.call_args.args[0],
+            "https://192.168.1.10:4568/history/token",
+        )
+
+    def test_history_post_retries_only_tls_protocol_mismatch(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "https://192.168.1.10:4568"
+        self.spider.atvp_token = "token"
+        self.spider.history_username = "user"
+        self.spider.history_password = "pass"
+        self.spider._history_auth_token = "history-token"
+        response = Mock(status_code=200)
+        self.spider._atvp_session = Mock()
+        self.spider._atvp_session.post.side_effect = [
+            MODULE.requests.exceptions.SSLError("wrong version number"),
+            response,
+        ]
+
+        result = self.spider._atvp_history_request("POST", json=[])
+
+        self.assertIs(result, response)
+        self.assertEqual(
+            [call.args[0] for call in self.spider._atvp_session.post.call_args_list],
+            [
+                "https://192.168.1.10:4568/history/token",
+                "http://192.168.1.10:4568/history/token",
+            ],
+        )
+
+    def test_history_post_rejects_ssl_and_ambiguous_connection_retries(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "https://192.168.1.10:4568"
+        self.spider.atvp_token = "token"
+        self.spider.history_username = "user"
+        self.spider.history_password = "pass"
+        self.spider._history_auth_token = "history-token"
+        failures = (
+            MODULE.requests.exceptions.SSLError("EOF occurred in violation of protocol"),
+            MODULE.requests.exceptions.ConnectionError(
+                "Max retries exceeded: ProtocolError RemoteDisconnected"
+            ),
+            MODULE.requests.exceptions.Timeout("read timed out"),
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                self.spider._atvp_session = Mock()
+                self.spider._atvp_session.post.side_effect = failure
+                with self.assertRaises(type(failure)):
+                    self.spider._atvp_history_request("POST", json=[])
+                self.assertEqual(self.spider._atvp_session.post.call_count, 1)
+
+    def test_history_login_rejects_oversized_response(self):
+        class OversizedLoginResponse(object):
+            status_code = 200
+
+            def __init__(self):
+                self.headers = {
+                    "Content-Length": str(self.spider_limit + 1),
+                }
+                self.closed = False
+
+            def iter_content(self, chunk_size=None):
+                return iter(())
+
+            def close(self):
+                self.closed = True
+
+        OversizedLoginResponse.spider_limit = self.spider.HISTORY_CONFIG_MAX_BYTES
+        response = OversizedLoginResponse()
+        self.spider.atvp_api = "https://192.168.1.10:4568"
+        self.spider.history_username = "user"
+        self.spider.history_password = "pass"
+        self.spider._atvp_session = Mock()
+        self.spider._atvp_session.headers = {}
+        self.spider._atvp_session.post.return_value = response
+
+        with self.assertRaisesRegex(RuntimeError, "响应过大"):
+            self.spider._atvp_history_login(force=True)
+
+        self.assertTrue(response.closed)
+
+    def test_history_import_protects_local_recent_playback_from_future_cloud_row(self):
+        now = int(time.time() * 1000)
+        local = [{
+            "key": "local@@@vod@@@1",
+            "vodName": "测试剧集",
+            "vodRemarks": "S01E06",
+            "createTime": now,
+            "position": 900000,
+            "duration": 1200000,
+        }]
+        cloud = [{
+            "key": "cloud@@@vod@@@1",
+            "vodName": "测试剧集",
+            "vodRemarks": "S01E06",
+            "createTime": now + 86400000,
+            "position": 1000,
+            "duration": 1200000,
+        }]
+
+        rows = self.spider._history_import_rows(cloud, local)
+
+        self.assertEqual(rows, [])
+
+    def test_history_sync_refreshes_local_snapshot_before_import(self):
+        now = int(time.time() * 1000)
+        initial = [{
+            "key": "local@@@vod@@@1", "vodName": "测试剧集", "vodRemarks": "S01E06",
+            "createTime": now - 60000, "position": 1000, "duration": 1200000,
+        }]
+        fresh = [{
+            "key": "local@@@vod@@@1", "vodName": "测试剧集", "vodRemarks": "S01E06",
+            "createTime": now, "position": 900000, "duration": 1200000,
+        }]
+        cloud = [{
+            "key": "cloud@@@vod@@@1", "vodName": "测试剧集", "vodRemarks": "S01E06",
+            "createTime": now + 86400000, "position": 1000, "duration": 1200000,
+        }]
+        self.spider._history_share_policy = {"follow": False, "watch": False}
+        self.spider._history_share_policy_loaded = True
+        self.spider._capture_native_history = Mock(side_effect=[initial, fresh])
+        self.spider._atvp_fetch_history = Mock(return_value=cloud)
+        self.spider._import_native_history = Mock(return_value=0)
+        self.spider._atvp_history_push = Mock()
+
+        result = self.spider._sync_history_once()
+
+        imported_rows = self.spider._import_native_history.call_args.args[0]
+        self.assertEqual(imported_rows, [])
+        self.assertEqual(result["merged"], [])
 
     def test_history_share_toggle_prevents_pending_sync_from_using_old_policy(self):
         watch = {"key": "watch", "episodeUrl": "normal-play-id"}
@@ -849,6 +1151,39 @@ class FollowOperationV51Test(unittest.TestCase):
         self.assertNotIn("补全", str(merged["vod_play_url"]).split("$$$")[0])
         self.assertNotIn("同盘补全", merged["vod_remarks"])
 
+    def test_pansou_provider_aliases_domains_and_offline_types_are_recognized(self):
+        cases = {
+            "https://115cdn.com/s/share-a": "pan115",
+            "https://anxia.com/s/share-b": "pan115",
+            "https://caiyun.feixin.10086.cn/share-c": "mobile",
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567": "magnet",
+            "ed2k://|file|sample.mkv|123|0123456789ABCDEF0123456789ABCDEF|/": "ed2k",
+            "aliyun": "ali",
+            "123": "pan123",
+            "115": "pan115",
+            "0": "ali",
+            "6": "mobile",
+        }
+        for value, expected in cases.items():
+            with self.subTest(value=value):
+                self.assertEqual(self.spider._resource_provider_key(value), expected)
+
+    def test_resource_score_accepts_pansou_work_title_and_note_fields(self):
+        item = {
+            "media_type": "tv", "tmdb_id": 270603,
+            "title": "遭到流放的转生重骑士凭借游戏知识大开无双",
+            "year": "2026", "season_count": 1, "trackingSeason": 1,
+        }
+        work_title = {
+            "vod_id": "work-title", "work_title": item["title"] + " S01E06 1080P",
+        }
+        note = {
+            "vod_id": "note", "note": item["title"] + " 2026 更新至第6集",
+        }
+
+        self.assertGreater(self.spider._resource_score(work_title, item, ""), 0)
+        self.assertGreater(self.spider._resource_score(note, item, ""), 0)
+
     def test_target_provider_mismatch_and_lookalike_domain_fail_closed(self):
         self.assertEqual(self.spider._resource_provider_key("https://pan.quark.cn.evil.example/s/a"), "")
         item = {
@@ -921,6 +1256,37 @@ class FollowOperationV51Test(unittest.TestCase):
         )
         self.assertIn("资源分集过多 已截断", merged["vod_remarks"])
 
+    def test_playback_delimiter_scans_remain_bounded_on_huge_inputs(self):
+        huge_groups = "$$$".join("S01E01$play-%d" % index for index in range(50000))
+        huge_episodes = "#".join("S01E%03d$play-%d" % (index % 999, index) for index in range(50000))
+
+        started = time.monotonic()
+        groups, groups_limited = MODULE._split_bounded_shared(
+            huge_groups, "$$$", self.spider.RESOURCE_PLAY_GROUP_SCAN_LIMIT,
+        )
+        parts, parts_limited = MODULE._split_bounded_shared(
+            huge_episodes, "#", self.spider.RESOURCE_GROUP_EPISODE_LIMIT,
+        )
+        split_groups = self.spider._split_resource_vod_groups({
+            "vod_play_from": huge_groups,
+            "vod_play_url": huge_groups,
+        })
+        score = self.spider._resource_group_match_score(
+            huge_episodes, {"history_episode": "S01E01", "trackingSeason": 1},
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertTrue(groups_limited)
+        self.assertTrue(parts_limited)
+        self.assertEqual(len(groups), self.spider.RESOURCE_PLAY_GROUP_SCAN_LIMIT)
+        self.assertEqual(len(parts), self.spider.RESOURCE_GROUP_EPISODE_LIMIT)
+        self.assertEqual(len(split_groups), self.spider.RESOURCE_PLAY_GROUP_SCAN_LIMIT)
+        self.assertGreaterEqual(score, 1)
+        self.assertLess(elapsed, 1.0)
+        source = SOURCE.read_text(encoding="utf-8")
+        self.assertNotIn('.split("$$$")', source)
+        self.assertNotIn('.split("#")', source)
+
     def test_invalid_parts_do_not_consume_valid_record_budget(self):
         item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集", "trackingSeason": 1}
         invalid_group = "#".join("bad-%d" % index for index in range(256))
@@ -980,6 +1346,30 @@ class FollowOperationV51Test(unittest.TestCase):
                 {"vod_name": "测试剧集", "vod_play_from": "夸克分享", "vod_play_url": oversized},
                 item, "quark-oversized", provider_hint="夸克",
             )
+
+    def test_oversized_play_id_is_rejected_before_validation_or_network(self):
+        item = {
+            "media_type": "tv", "tmdb_id": 101, "title": "测试剧集",
+            "trackingSeason": 1, "latest_episode": "S01E01",
+        }
+        oversized = "x" * (1536 * 1024)
+        detail = {"list": [{
+            "vod_name": "测试剧集",
+            "vod_play_from": "异常线路",
+            "vod_play_url": "S01E01$" + oversized,
+        }]}
+
+        with patch.object(self.spider, "_atvp_play") as atvp_play:
+            validated = self.spider._validated_playable_detail(
+                detail, item, time.monotonic() + 2, 1,
+            )
+            self.assertIsNone(validated)
+            atvp_play.assert_not_called()
+
+        self.spider._ensure_atvp_connection = Mock(return_value=True)
+        with self.assertRaisesRegex(RuntimeError, "播放线路过长"):
+            self.spider._atvp_play(oversized)
+        self.spider._ensure_atvp_connection.assert_not_called()
 
     def test_no_completion_keeps_original_episode_order(self):
         records = [
@@ -1387,6 +1777,56 @@ class FollowOperationV51Test(unittest.TestCase):
         self.assertEqual(replacement_item["tmdb_id"], 101)
         self.assertEqual(replacement_item.get("history_episode", ""), "")
 
+    def test_safe_atvp_direct_url_survives_unknown_desktop_probe(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        direct_output = {
+            "parse": 0,
+            "jx": 0,
+            "url": "https://cdn.example/episode-1.m3u8?sig=ok",
+            "header": {"User-Agent": "test"},
+        }
+        self.spider._atvp_play = Mock(return_value=direct_output)
+        self.spider._probe_media_output = Mock(return_value=None)
+
+        result = self.spider._validated_playable_detail(
+            {"list": [{
+                "vod_play_from": "安全线路",
+                "vod_play_url": "S01E01$1@episode-1",
+            }]},
+            {"latest_episode": "S01E01", "trackingSeason": 1},
+            time.monotonic() + 10,
+            1,
+            resource_id="resource-101",
+            resource_mode="vod",
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["list"][0]["vod_play_from"], "安全线路")
+        self.assertEqual(self.spider._route_probe_cache, {})
+
+    def test_player_returns_parse_verified_url_when_desktop_probe_is_unknown(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集"}
+        play_id = self.spider._build_followplay(
+            "1@episode-1", item, "resource-101", 1, 1, "S01E01",
+        )
+        direct_output = {
+            "parse": 0,
+            "jx": 0,
+            "url": "https://cdn.example/episode-1.m3u8?sig=ok",
+            "header": {"User-Agent": "test", "Cookie": "should-drop"},
+        }
+        self.spider._atvp_play = Mock(return_value=direct_output)
+        self.spider._probe_media_output = Mock(return_value=None)
+
+        result = self.spider.playerContent("安全线路", play_id, [])
+
+        self.assertEqual(result["url"], direct_output["url"])
+        self.assertEqual(result["header"], {"User-Agent": "test"})
+        self.assertEqual(self.spider._route_probe_cache, {})
+
     def test_persisted_binding_remains_valid_without_route_ttl(self):
         self.spider.atvp_api = "https://atvp.example"
         self.spider.atvp_token = "token"
@@ -1538,7 +1978,7 @@ class FollowOperationV51Test(unittest.TestCase):
 
         self.assertIsNone(self.spider._bound_resource_row({"tmdb_id": 101, "source_id": "tmdb:tv:101"}))
 
-    def test_detail_keeps_primary_plus_two_independent_routes_resolution_first(self):
+    def test_detail_keeps_all_independent_routes_within_limit_resolution_first(self):
         self.spider.route_preheat = False
         self.spider.resource_limit = 5
         item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集", "trackingSeason": 1}
@@ -1569,10 +2009,11 @@ class FollowOperationV51Test(unittest.TestCase):
         )
 
         sources = merged["vod_play_from"].split("$$$")
-        self.assertEqual(len(sources), 3)
+        self.assertEqual(len(sources), 4)
         self.assertIn("4K较慢", sources[0])
         self.assertIn("1440P", sources[1])
         self.assertIn("1080P快速", sources[2])
+        self.assertIn("720P", sources[3])
         self.assertNotIn("同集备用线路", merged["vod_remarks"])
         for group in merged["vod_play_url"].split("$$$"):
             payload = self.spider._parse_followplay(group.split("#")[-1].rpartition("$")[2])
@@ -1600,12 +2041,13 @@ class FollowOperationV51Test(unittest.TestCase):
         )
 
         sources = merged["vod_play_from"].split("$$$")
-        self.assertEqual(len(sources), 3)
+        self.assertEqual(len(sources), 4)
         self.assertIn("4K", sources[0])
         self.assertIn("1440P", sources[1])
         self.assertIn("1080P", sources[2])
+        self.assertIn("720P", sources[3])
 
-    def test_candidate_pool_trim_is_not_reported_as_episode_truncation(self):
+    def test_sixth_highest_quality_group_survives_global_route_selection(self):
         item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集", "trackingSeason": 1}
         sources = ["720P", "1080P", "1440P", "4K", "4K高码", "备用低清"]
         vod = {
@@ -1625,10 +2067,51 @@ class FollowOperationV51Test(unittest.TestCase):
             [rewritten], item, "tmdb:tv:101", {"vod_name": "测试剧集"},
         )
 
-        self.assertTrue(rewritten["_route_candidates_limited"])
+        selected_sources = merged["vod_play_from"].split("$$$")
+        self.assertFalse(rewritten["_route_candidates_limited"])
         self.assertFalse(rewritten["_resource_limited"])
+        self.assertTrue(any("备用低清" in source for source in selected_sources), selected_sources)
+        self.assertFalse(any("720P" in source for source in selected_sources), selected_sources)
         self.assertIn("线路候选已按清晰度筛选", merged["vod_remarks"])
         self.assertNotIn("资源分集过多 已截断", merged["vod_remarks"])
+
+    def test_large_low_quality_groups_do_not_hide_later_high_quality_group(self):
+        item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集", "trackingSeason": 1}
+        low_groups = [
+            "#".join(
+                "S01E%03d$1@low-%d-%03d" % (episode, group_index, episode)
+                for episode in range(1, self.spider.RESOURCE_GROUP_EPISODE_LIMIT + 1)
+            )
+            for group_index in range(2)
+        ]
+        vod = {
+            "vod_name": "测试剧集",
+            "vod_play_from": "低质A$$$低质B$$$4K高质",
+            "vod_play_url": "$$$".join(low_groups + ["S01E01$1@best-late"]),
+            "_route_quality": [
+                {"resolution": 8, "total": 10},
+                {"resolution": 8, "total": 11},
+                {"resolution": 20, "total": 99},
+            ],
+        }
+
+        rewritten = self.spider._rewrite_resource_vod(
+            vod, item, "resource-101", mode="vod", validated=True,
+        )
+        merged = self.spider._merge_resource_vods(
+            [rewritten], item, "tmdb:tv:101", {"vod_name": "测试剧集"},
+        )
+
+        self.assertIsNotNone(merged)
+        sources = merged["vod_play_from"].split("$$$")
+        high_index = next(index for index, source in enumerate(sources) if "4K高质" in source)
+        high_group = merged["vod_play_url"].split("$$$")[high_index]
+        high_play_id = next(
+            part.rpartition("$")[2]
+            for part in high_group.split("#")
+            if not part.rpartition("$")[2].startswith(self.spider.SELECT_PROMPT_ID)
+        )
+        self.assertEqual(self.spider._parse_followplay(high_play_id)["url"], "1@best-late")
 
     def test_detail_collects_candidate_pool_before_selecting_three_routes(self):
         self.spider._alist_tvbox_plugin = True
@@ -1678,6 +2161,1076 @@ class FollowOperationV51Test(unittest.TestCase):
         self.assertIn("1080P", sources[2])
         self.assertNotIn("资源分集过多 已截断", result["list"][0]["vod_remarks"])
         self.assertIn("线路候选已按清晰度筛选", result["list"][0]["vod_remarks"])
+
+    def test_detail_keeps_one_group_from_each_api_before_filling_extra_routes(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.route_preheat = False
+        self.spider.resource_limit = 5
+        self.spider._atvp_history_snapshot = Mock(return_value=[])
+        candidates = [
+            {"vod_id": "vod1-resource", "_resource_mode": "vod1"},
+            {"vod_id": "vod-resource", "_resource_mode": "vod"},
+            {"vod_id": "pansou-resource", "_resource_mode": "pansou"},
+            {"vod_id": "telegram-resource", "_resource_mode": "telegram"},
+        ]
+        self.spider._resource_candidates = Mock(return_value=candidates)
+        self.spider._resource_detail = Mock(return_value={
+            "list": [{"vod_name": "测试剧集", "vod_play_url": "S01E01$1@raw"}],
+        })
+
+        def rewrite(_vod, _item, resource_id, mode="vod", **_kwargs):
+            group_count = 5 if mode == "vod1" else 1
+            return {
+                "vod_play_from": "$$$".join(
+                    "%s-%d" % (mode, index + 1) for index in range(group_count)
+                ),
+                "vod_play_url": "$$$".join(
+                    "S01E01$route-%s-%d" % (mode, index + 1) for index in range(group_count)
+                ),
+                "resource_id": resource_id,
+                "group_seasons": [1] * group_count,
+                "group_providers": [mode] * group_count,
+                "group_quality": [{"resolution": 10, "total": 50}] * group_count,
+            }
+
+        self.spider._rewrite_resource_vod = Mock(side_effect=rewrite)
+
+        result = self.spider._alist_detail_from_metadata(
+            "tmdb:tv:101",
+            {"list": [{"vod_id": "tmdb:tv:101", "vod_name": "测试剧集"}]},
+        )
+
+        sources = result["list"][0]["vod_play_from"].split("$$$")
+        self.assertEqual(self.spider._resource_detail.call_count, 4)
+        self.assertEqual(len(sources), 5)
+        for mode in ("vod1", "vod", "pansou", "telegram"):
+            self.assertTrue(any(mode in source for source in sources), (mode, sources))
+
+    def test_detail_tries_second_candidate_from_each_api_after_first_failure(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.route_preheat = False
+        self.spider.resource_limit = 5
+        self.spider._atvp_history_snapshot = Mock(return_value=[])
+        modes = ("vod1", "vod", "pansou", "telegram")
+        candidates = [
+            {"vod_id": "%s-%s" % (mode, round_name), "_resource_mode": mode}
+            for round_name in ("first", "second")
+            for mode in modes
+        ]
+        self.spider._resource_candidates = Mock(return_value=candidates)
+
+        def detail(row, deadline=None):
+            if str(row["vod_id"]).endswith("-first"):
+                raise RuntimeError("first route unavailable")
+            return {
+                "list": [{
+                    "vod_name": "测试剧集",
+                    "vod_play_from": row["_resource_mode"],
+                    "vod_play_url": "S01E01$1@%s" % row["vod_id"],
+                }],
+            }
+
+        self.spider._resource_detail = Mock(side_effect=detail)
+
+        result = self.spider._alist_detail_from_metadata(
+            "tmdb:tv:101",
+            {"list": [{"vod_id": "tmdb:tv:101", "vod_name": "测试剧集"}]},
+        )
+
+        sources = result["list"][0]["vod_play_from"].split("$$$")
+        self.assertEqual(self.spider._resource_detail.call_count, 8)
+        self.assertEqual(len(sources), 4)
+        for mode in modes:
+            self.assertTrue(any(mode in source for source in sources), (mode, sources))
+
+    def test_merge_ranks_all_extra_routes_before_applying_route_limit(self):
+        self.spider.resource_limit = 5
+        item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集", "trackingSeason": 1}
+        vods = []
+        for mode in ("vod1", "vod", "pansou", "telegram"):
+            vods.append({
+                "vod_play_from": "%s-base" % mode,
+                "vod_play_url": "S01E01$%s-base" % mode,
+                "resource_id": "%s-base" % mode,
+                "group_quality": [{"resolution": 10, "total": 50}],
+                "_resource_mode": mode,
+            })
+        vods.extend((
+            {
+                "vod_play_from": "vod-low-extra",
+                "vod_play_url": "S01E01$vod-low-extra",
+                "resource_id": "vod-low-extra",
+                "group_quality": [{"resolution": 8, "total": 1}],
+                "_resource_mode": "vod",
+            },
+            {
+                "vod_play_from": "vod-best-extra",
+                "vod_play_url": "S01E01$vod-best-extra",
+                "resource_id": "vod-best-extra",
+                "group_quality": [{"resolution": 40, "total": 900}],
+                "_resource_mode": "vod",
+            },
+        ))
+
+        merged = self.spider._merge_resource_vods(
+            vods, item, "tmdb:tv:101", {"vod_name": "测试剧集"},
+        )
+
+        sources = merged["vod_play_from"].split("$$$")
+        self.assertEqual(len(sources), 5)
+        self.assertTrue(any("vod-best-extra" in source for source in sources), sources)
+        self.assertFalse(any("vod-low-extra" in source for source in sources), sources)
+
+    def test_four_resource_api_shapes_keep_decorated_title_matches(self):
+        item = {
+            "media_type": "tv",
+            "tmdb_id": 270603,
+            "title": "遭到流放的转生重骑士凭借游戏知识大开无双",
+            "year": "2026",
+            "season_count": 1,
+            "trackingSeason": 1,
+        }
+        rows = [
+            {
+                "id": "vod1-270603",
+                "title": "遭到流放的转生重骑士凭借游戏知识大开无双 2026 1080P",
+                "_resource_mode": "vod1",
+            },
+            {
+                "vod_id": "vod-270603",
+                "vod_name": "遭到流放的转生重骑士凭借游戏知识大开无双(2026) S01E01",
+                "_resource_mode": "vod",
+            },
+            {
+                "id": "pansou-270603",
+                "name": "遭到流放的转生重骑士凭借游戏知识大开无双 [夸克] 更新至E06",
+                "_resource_mode": "pansou",
+            },
+            {
+                "id": "telegram-270603",
+                "vod_name": "遭到流放的转生重骑士凭借游戏知识大开无双(2026)1080p S01E01-E06 内封简繁 HiveWeb",
+                "_resource_mode": "telegram",
+            },
+        ]
+
+        scores = [self.spider._resource_score(row, item, "") for row in rows]
+
+        self.assertTrue(all(score > 0 for score in scores), scores)
+
+    def test_explicit_work_title_rejects_conflicting_parent_titles(self):
+        item = {
+            "media_type": "tv", "tmdb_id": 270603,
+            "title": "遭到流放的转生重骑士凭借游戏知识大开无双",
+            "year": "2026", "season_count": 1, "trackingSeason": 1,
+        }
+        row = {
+            "vod_id": "conflict",
+            "work_title": "完全无关的另一部作品",
+            "vod_name": item["title"] + " 2026 1080P",
+            "title": item["title"],
+            "note": item["title"] + " 更新至第6集",
+        }
+
+        self.assertEqual(self.spider._resource_score(row, item, ""), 0)
+
+    def test_nested_work_title_rejects_conflicting_parent_title(self):
+        item = {
+            "media_type": "tv", "tmdb_id": 270603,
+            "title": "遭到流放的转生重骑士凭借游戏知识大开无双",
+            "year": "2026", "season_count": 1, "trackingSeason": 1,
+        }
+        row = {
+            "vod_id": "nested-conflict",
+            "vod_name": item["title"] + " 2026 1080P",
+            "title": item["title"],
+            "links": [{"work_title": "完全无关的另一部作品"}],
+        }
+
+        self.assertEqual(self.spider._resource_score(row, item, ""), 0)
+
+    def test_raw_pansou_results_keep_link_matches_and_dedupe_the_same_share(self):
+        title = "遭到流放的转生重骑士凭借游戏知识大开无双"
+        item = {
+            "media_type": "tv", "tmdb_id": 270603, "title": title,
+            "year": "2026", "season_count": 1, "trackingSeason": 1,
+        }
+        payload = {"data": {
+            "merged_by_type": {
+                "115": [{
+                    "url": "https://115cdn.com/s/share-a", "password": "a1b2",
+                    "note": title + " S01E01-E06 1080P",
+                    "datetime": "2026-08-10T10:00:00Z", "source": "merged-source",
+                }],
+                "mobile": [{
+                    "url": "https://caiyun.feixin.10086.cn/share-b",
+                    "note": title + " 更新至第6集",
+                    "datetime": "2026-08-11T08:00:00Z", "source": "mobile-source",
+                }],
+            },
+            "results": [{
+                "title": title + " 合集",
+                "channel": "result-channel",
+                "datetime": "2026-08-11T09:00:00Z",
+                "links": [
+                    {
+                        "type": "8", "url": "https://115cdn.com/s/share-a",
+                        "work_title": title + " S01E06",
+                    },
+                    {
+                        "type": "aliyun", "url": "https://www.alipan.com/s/share-c",
+                        "work_title": title + " 2026 4K",
+                    },
+                    {
+                        "type": "quark", "url": "https://pan.quark.cn/s/unrelated",
+                        "work_title": "完全无关的另一部作品",
+                        "note": title + " 合集消息",
+                    },
+                ],
+            }],
+        }}
+        self.spider._resource_capability = Mock(return_value="present")
+        self.spider._resource_api_get = Mock(return_value=payload)
+
+        rows = self.spider._resource_search_mode("pansou", [title])
+
+        self.assertEqual(len(rows), 4)
+        self.assertTrue(all(row["_resource_mode"] == "pansou" for row in rows))
+        decoded_ids = [MODULE.unquote(row["vod_id"]) for row in rows]
+        self.assertEqual(sum("115cdn.com/s/share-a" in value for value in decoded_ids), 1)
+        self.assertTrue(any("password=a1b2" in value for value in decoded_ids))
+        providers = {
+            self.spider._resource_provider_key(row.get("type"), MODULE.unquote(row["vod_id"]))
+            for row in rows
+        }
+        self.assertEqual(providers, {"pan115", "mobile", "ali", "quark"})
+        matched = [row for row in rows if self.spider._resource_score(row, item, "") > 0]
+        self.assertEqual(len(matched), 3)
+        unrelated = next(row for row in rows if "unrelated" in MODULE.unquote(row["vod_id"]))
+        self.assertEqual(self.spider._resource_score(unrelated, item, ""), 0)
+
+    def test_pansou_scan_budget_is_shared_fairly_across_results_and_providers(self):
+        payload = {"data": {
+            "merged_by_type": {
+                "quark": [
+                    {
+                        "url": "https://pan.quark.cn/s/noise-%d" % index,
+                        "work_title": "完全无关的作品 %d" % index,
+                    }
+                    for index in range(64)
+                ],
+                "ali": [{
+                    "url": "https://www.alipan.com/s/ali-match",
+                    "work_title": "测试剧集",
+                }],
+            },
+            "results": [{
+                "title": "测试剧集资源",
+                "links": [{
+                    "type": "baidu",
+                    "url": "https://pan.baidu.com/s/result-match",
+                    "work_title": "测试剧集",
+                }],
+            }],
+        }}
+
+        rows = self.spider._resource_payload_rows(payload, "pansou", limit=3)
+        decoded = [MODULE.unquote(row["vod_id"]) for row in rows]
+
+        self.assertTrue(any("result-match" in value for value in decoded), decoded)
+        self.assertTrue(any("ali-match" in value for value in decoded), decoded)
+
+    def test_pansou_link_precedes_generic_parent_when_result_limit_is_one(self):
+        payload = {"data": {"results": [{
+            "id": "opaque-parent-noise",
+            "vod_name": "测试剧集父记录",
+            "links": [{
+                "type": "quark",
+                "url": "https://pan.quark.cn/s/valid-child",
+                "work_title": "测试剧集",
+            }],
+        }]}}
+
+        rows = self.spider._resource_payload_rows(payload, "pansou", limit=1)
+
+        self.assertEqual(len(rows), 1)
+        self.assertIn("valid-child", MODULE.unquote(rows[0]["vod_id"]))
+        self.assertNotEqual(rows[0]["vod_id"], "opaque-parent-noise")
+
+    def test_duplicate_share_keeps_link_work_title_over_parent_match(self):
+        title = "遭到流放的转生重骑士凭借游戏知识大开无双"
+        payload = {"data": {
+            "merged_by_type": {"quark": [{
+                "url": "https://pan.quark.cn/s/same",
+                "note": title + " 2026 1080P",
+                "datetime": "2026-08-11T10:00:00Z",
+            }]},
+            "results": [{
+                "title": title + " 合集",
+                "datetime": "2026-08-10T10:00:00Z",
+                "links": [{
+                    "type": "quark",
+                    "url": "https://pan.quark.cn/s/same",
+                    "work_title": "完全无关的另一部作品",
+                }],
+            }],
+        }}
+        rows = self.spider._resource_payload_rows(payload, "pansou")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["work_title"], "完全无关的另一部作品")
+        self.assertEqual(rows[0]["vod_name"], "完全无关的另一部作品")
+        self.assertEqual(rows[0]["note"], "")
+        self.assertEqual(rows[0]["title"], "")
+        self.assertEqual(self.spider._resource_score(rows[0], {
+            "title": title, "year": "2026", "season_count": 1, "trackingSeason": 1,
+        }, ""), 0)
+
+    def test_duplicate_share_password_tie_prefers_newer_timestamp(self):
+        payload = {"data": {
+            "merged_by_type": {"quark": [{
+                "url": "https://pan.quark.cn/s/same",
+                "password": "NEW1",
+                "note": "测试剧集",
+                "datetime": "2026-08-11T10:00:00Z",
+            }]},
+            "results": [{
+                "title": "测试剧集",
+                "datetime": "2026-08-10T10:00:00Z",
+                "links": [{
+                    "type": "quark",
+                    "url": "https://pan.quark.cn/s/same",
+                    "password": "OLD9",
+                }],
+            }],
+        }}
+
+        rows = self.spider._resource_payload_rows(payload, "pansou")
+
+        self.assertEqual(len(rows), 1)
+        decoded = MODULE.unquote(rows[0]["vod_id"])
+        self.assertIn("password=NEW1", decoded)
+        self.assertNotIn("OLD9", decoded)
+
+    def test_duplicate_share_timestamp_compares_rfc3339_offsets(self):
+        payload = {"data": {
+            "merged_by_type": {"quark": [{
+                "url": "https://pan.quark.cn/s/same-offset",
+                "password": "OLD1",
+                "note": "测试剧集",
+                "datetime": "2026-08-11T10:00:00+08:00",
+            }]},
+            "results": [{
+                "title": "测试剧集",
+                "datetime": "2026-08-11T03:00:00Z",
+                "links": [{
+                    "type": "quark",
+                    "url": "https://pan.quark.cn/s/same-offset",
+                    "password": "NEW1",
+                }],
+            }],
+        }}
+
+        rows = self.spider._resource_payload_rows(payload, "pansou")
+
+        self.assertEqual(len(rows), 1)
+        decoded = MODULE.unquote(rows[0]["vod_id"])
+        self.assertIn("password=NEW1", decoded)
+        self.assertNotIn("OLD1", decoded)
+
+    def test_existing_password_formats_are_not_duplicated(self):
+        urls = (
+            "https://pan.quark.cn/s/demo?passcode=A1",
+            "https://pan.quark.cn/s/demo?pass_code=A1",
+            "https://pan.quark.cn/s/demo?share_pwd=A1",
+            "https://pan.quark.cn/s/demo#pwd=A1",
+            "https://pan.quark.cn/s/demo#password=A1",
+            "https://pan.quark.cn/s/demo#A1",
+            "https://pan.quark.cn/s/demo 提取码：A1",
+        )
+        for url in urls:
+            with self.subTest(url=url):
+                self.assertEqual(self.spider._resource_url_with_password(url, "B2"), url)
+                self.assertEqual(self.spider._resource_url_password_score(url), 1)
+
+    def test_independent_password_fields_are_appended_to_share_urls(self):
+        password_fields = (
+            ("passcode", "A1"),
+            ("pass_code", "B2"),
+            ("share_pwd", "C3"),
+            ("提取码", "D4"),
+            ("访问码", "E5"),
+            ("密码", "F6"),
+        )
+        for key, password in password_fields:
+            with self.subTest(key=key):
+                payload = {"data": {"results": [{
+                    "title": "测试剧集",
+                    "links": [{
+                        "type": "quark",
+                        "url": "https://pan.quark.cn/s/%s" % key,
+                        key: password,
+                    }],
+                }]}}
+
+                rows = self.spider._resource_payload_rows(payload, "pansou")
+
+                self.assertEqual(len(rows), 1)
+                self.assertIn(
+                    "password=%s" % password,
+                    MODULE.unquote(rows[0]["vod_id"]),
+                )
+
+    def test_generic_supplement_rows_append_independent_passwords(self):
+        for mode in ("pansou", "telegram"):
+            with self.subTest(mode=mode):
+                payload = {"list": [{
+                    "vod_id": "https://pan.quark.cn/s/generic-%s" % mode,
+                    "vod_name": "测试剧集",
+                    "pass_code": "A1B2",
+                }]}
+
+                rows = self.spider._resource_payload_rows(payload, mode)
+
+                self.assertEqual(len(rows), 1)
+                self.assertIn("password=A1B2", MODULE.unquote(rows[0]["vod_id"]))
+
+    def test_empty_or_oversized_url_password_does_not_block_independent_password(self):
+        urls = (
+            "https://pan.quark.cn/s/empty-query?password=",
+            "https://pan.quark.cn/s/empty-fragment#pwd=",
+            "https://pan.quark.cn/s/oversized?password=" + ("X" * 65),
+            "https://pan.quark.cn/s/oversized-fragment#pwd=" + ("Y" * 65),
+        )
+        for url in urls:
+            with self.subTest(url=url):
+                protected = self.spider._resource_url_with_password(url, "GOOD")
+                self.assertEqual(self.spider._resource_url_password_value(protected), "GOOD")
+                self.assertEqual(protected.count("password=GOOD"), 1)
+
+    def test_bare_fragment_password_shares_plain_url_identity(self):
+        plain = "https://pan.quark.cn/s/demo"
+        identities = {
+            self.spider._resource_row_identity(plain),
+            self.spider._resource_row_identity(plain + "#A1"),
+            self.spider._resource_row_identity(plain + "?password=B2"),
+        }
+
+        self.assertEqual(len(identities), 1)
+
+    def test_magnet_and_ed2k_identities_use_content_hashes(self):
+        btih = "0123456789ABCDEF0123456789ABCDEF01234567"
+        magnets = (
+            "magnet:?xt=urn:btih:%s&dn=first&tr=udp://tracker-a" % btih,
+            "magnet:?tr=udp://tracker-b&dn=second&xt=urn:btih:%s" % btih.lower(),
+        )
+        ed2k_hash = "0123456789ABCDEF0123456789ABCDEF"
+        ed2ks = (
+            "ed2k://|file|first.mkv|123|%s|/" % ed2k_hash,
+            "ED2K://|file|second.mp4|999|%s|/" % ed2k_hash.lower(),
+        )
+
+        self.assertEqual(len({self.spider._resource_row_identity(value) for value in magnets}), 1)
+        self.assertEqual(len({self.spider._resource_row_identity(value) for value in ed2ks}), 1)
+
+    def test_base32_and_hex_btih_representations_share_one_identity(self):
+        hex_btih = "0123456789ABCDEF0123456789ABCDEF01234567"
+        base32_btih = MODULE.base64.b32encode(bytes.fromhex(hex_btih)).decode("ascii")
+        identities = {
+            self.spider._resource_row_identity("magnet:?xt=urn:btih:" + hex_btih),
+            self.spider._resource_row_identity("magnet:?xt=urn:btih:" + base32_btih),
+        }
+
+        self.assertEqual(len(identities), 1)
+
+    def test_long_pansou_magnet_survives_search_and_detail(self):
+        magnet = "magnet:?xt=urn:btih:" + ("A" * 40) + "".join(
+            "&tr=udp://tracker%d.example:80/announce" % index for index in range(40)
+        )
+        self.assertGreater(len(magnet), self.spider.RESOURCE_ID_MAX_LENGTH)
+        payload = {"data": {"merged_by_type": {"magnet": [{
+            "url": magnet,
+            "work_title": "测试剧集",
+            "datetime": "2026-08-11T10:00:00Z",
+        }]}}}
+        self.spider._resource_capability = Mock(return_value="present")
+        self.spider._resource_api_get = Mock(return_value=payload)
+
+        rows = self.spider._resource_search_mode("pansou", ["测试剧集"])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(MODULE.unquote(rows[0]["vod_id"]), magnet)
+        self.spider._resource_api_get = Mock(return_value={"list": []})
+        self.spider._resource_detail(rows[0])
+        self.assertEqual(self.spider._resource_api_get.call_args.args[0], "pansou")
+        self.assertEqual(self.spider._resource_api_get.call_args.args[1]["id"], magnet)
+
+    def test_check_links_prefers_password_bearing_duplicate(self):
+        class CheckResponse(object):
+            status_code = 200
+            headers = {}
+
+            def __init__(self, payload):
+                self.payload = json.dumps(payload).encode("utf-8")
+                self.closed = False
+
+            def iter_content(self, chunk_size=None):
+                return iter((self.payload,))
+
+            def close(self):
+                self.closed = True
+
+        plain = "https://pan.quark.cn/s/demo"
+        protected = plain + "?password=A1"
+        rows = [
+            {"vod_id": MODULE.quote(plain, safe=""), "_resource_mode": "pansou"},
+            {"vod_id": MODULE.quote(protected, safe=""), "_resource_mode": "pansou"},
+        ]
+        response = CheckResponse({"results": [{"url": protected, "state": "ok"}]})
+        self.spider._ensure_atvp_connection = Mock(return_value=True)
+        self.spider._atvp_session = Mock()
+        self.spider._atvp_session.post.return_value = response
+
+        checked = self.spider._checked_resource_rows(rows)
+
+        self.assertEqual(checked, [rows[1]])
+        self.assertEqual(
+            self.spider._atvp_session.post.call_args.kwargs["json"]["items"],
+            [{"url": protected}],
+        )
+
+    def test_pansou_metadata_fields_are_bounded_before_storage(self):
+        title = "测试剧集" + ("标题" * 3000)
+        note = "测试剧集" + ("说明" * 5000)
+        source = "来源" * 1000
+        oversized_url = "https://pan.quark.cn/s/" + ("x" * 20000)
+        payload = {"data": {"merged_by_type": {"quark": [
+            {
+                "url": "https://pan.quark.cn/s/title",
+                "work_title": title,
+                "source": source,
+            },
+            {
+                "url": "https://pan.quark.cn/s/note",
+                "note": note,
+                "source": source,
+            },
+            {
+                "url": oversized_url,
+                "work_title": "测试剧集",
+                "source": source,
+            },
+        ]}}}
+
+        rows = self.spider._resource_payload_rows(payload, "pansou")
+
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(
+            len(row.get("vod_name") or "") <= self.spider.RESOURCE_METADATA_TITLE_MAX_LENGTH
+            for row in rows
+        ))
+        self.assertTrue(all(
+            len(row.get("work_title") or "") <= self.spider.RESOURCE_METADATA_TITLE_MAX_LENGTH
+            for row in rows
+        ))
+        self.assertTrue(all(
+            len(row.get("note") or "") <= self.spider.RESOURCE_METADATA_NOTE_MAX_LENGTH
+            for row in rows
+        ))
+        self.assertTrue(all(
+            len(row.get("source") or "") <= self.spider.RESOURCE_METADATA_SOURCE_MAX_LENGTH
+            for row in rows
+        ))
+        self.assertFalse(any("x" * 1000 in MODULE.unquote(row["vod_id"]) for row in rows))
+
+    def test_vod_and_vod1_metadata_fields_are_bounded_before_storage(self):
+        payload = {"list": [{
+            "vod_id": "resource-1",
+            "vod_name": "标题" * 4000,
+            "title": "标题" * 4000,
+            "note": "说明" * 6000,
+            "source": "来源" * 1000,
+            "vod_remarks": "备注" * 6000,
+        }]}
+
+        for mode in ("vod", "vod1"):
+            with self.subTest(mode=mode):
+                rows = self.spider._resource_payload_rows(payload, mode)
+                self.assertEqual(len(rows), 1)
+                self.assertLessEqual(len(rows[0]["vod_name"]), self.spider.RESOURCE_METADATA_TITLE_MAX_LENGTH)
+                self.assertLessEqual(len(rows[0]["title"]), self.spider.RESOURCE_METADATA_TITLE_MAX_LENGTH)
+                self.assertLessEqual(len(rows[0]["note"]), self.spider.RESOURCE_METADATA_NOTE_MAX_LENGTH)
+                self.assertLessEqual(len(rows[0]["source"]), self.spider.RESOURCE_METADATA_SOURCE_MAX_LENGTH)
+                self.assertLessEqual(len(rows[0]["vod_remarks"]), self.spider.RESOURCE_METADATA_NOTE_MAX_LENGTH)
+
+    def test_generic_api_rows_discard_unknown_nested_and_oversized_fields(self):
+        payload = {"list": [{
+            "vod_id": "resource-1",
+            "vod_name": "测试剧集",
+            "blob": "X" * (1024 * 1024),
+            "nested": {"blob": "Y" * (512 * 1024)},
+            "_upstream_control": "secret",
+            "links": [
+                {
+                    "work_title": "测试剧集 %d" % index,
+                    "title": "标题 %d" % index,
+                    "note": "说明 %d" % index,
+                    "url": "https://pan.quark.cn/s/%d" % index,
+                    "password": "PASS",
+                    "nested": {"blob": "Z" * 1000},
+                }
+                for index in range(100)
+            ],
+        }]}
+
+        rows = self.spider._resource_payload_rows(payload, "vod")
+
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertNotIn("blob", row)
+        self.assertNotIn("nested", row)
+        self.assertNotIn("_upstream_control", row)
+        self.assertLessEqual(len(row.get("links") or []), self.spider.RESOURCE_PAYLOAD_SCAN_MIN)
+        self.assertTrue(all(
+            set(link).issubset({"work_title", "title", "note"})
+            for link in row.get("links") or []
+        ))
+
+    def test_pansou_limit_bounds_link_scanning(self):
+        payload = {"data": {"merged_by_type": {"quark": [
+            {
+                "url": "https://pan.quark.cn/s/%d" % index,
+                "work_title": "测试剧集",
+            }
+            for index in range(5000)
+        ]}}}
+        with patch.object(
+                Spider, "_resource_provider_key", wraps=Spider._resource_provider_key,
+        ) as provider_key:
+            rows = self.spider._resource_payload_rows(payload, "pansou", limit=1)
+
+        self.assertEqual(len(rows), 1)
+        self.assertLessEqual(provider_key.call_count, self.spider.RESOURCE_PAYLOAD_SCAN_MIN)
+
+    def test_uncached_supplement_apis_join_the_foreground_candidate_pool(self):
+        item = {
+            "title": "遭到流放的转生重骑士凭借游戏知识大开无双",
+            "year": "2026", "season_count": 1, "trackingSeason": 1,
+        }
+        self.spider.resource_search_modes = ["vod1", "vod", "pansou", "telegram"]
+        self.spider._cache_get = Mock(return_value=None)
+        self.spider._schedule_supplement_resource_search = Mock(return_value=True)
+        rows = {
+            "vod1": [],
+            "vod": [],
+            "pansou": [{
+                "id": "pansou-1", "name": item["title"] + " 2026 1080P", "_resource_mode": "pansou",
+            }],
+            "telegram": [{
+                "id": "telegram-1", "vod_name": item["title"] + " S01E01-E06 HiveWeb",
+                "_resource_mode": "telegram",
+            }],
+        }
+        self.spider._resource_search_mode = Mock(
+            side_effect=lambda mode, _queries, _deadline=None: rows[mode]
+        )
+
+        candidates = self.spider._resource_candidates(item, deadline=time.monotonic() + 2)
+
+        self.assertEqual(
+            {row["_resource_mode"] for row in candidates},
+            {"pansou", "telegram"},
+        )
+        self.spider._schedule_supplement_resource_search.assert_not_called()
+
+    def test_resource_mode_search_executor_queues_without_exceeding_four_active_searches(self):
+        release = MODULE.threading.Event()
+        saturated = MODULE.threading.Event()
+        guard = MODULE.threading.Lock()
+        state = {"active": 0, "maximum": 0, "completed": 0}
+
+        def search(mode, queries, deadline=None):
+            with guard:
+                state["active"] += 1
+                state["maximum"] = max(state["maximum"], state["active"])
+                if state["active"] == 4:
+                    saturated.set()
+            try:
+                release.wait(2)
+                return []
+            finally:
+                with guard:
+                    state["active"] -= 1
+                    state["completed"] += 1
+
+        self.spider._resource_search_mode = Mock(side_effect=search)
+        futures = [
+            self.spider._submit_resource_mode_search("vod", ["测试剧集"], time.monotonic() + 3)
+            for _index in range(8)
+        ]
+        try:
+            self.assertTrue(saturated.wait(1))
+            self.assertTrue(all(future is not None for future in futures))
+            self.assertEqual(state["maximum"], 4)
+        finally:
+            release.set()
+            for future in futures:
+                if future is not None:
+                    future.result(timeout=2)
+        self.assertEqual(state["completed"], 8)
+        self.assertEqual(state["maximum"], 4)
+
+    def test_background_resource_search_saturation_does_not_block_foreground(self):
+        release = MODULE.threading.Event()
+        background_started = MODULE.threading.Event()
+        guard = MODULE.threading.Lock()
+        state = {"background_active": 0}
+
+        def search(mode, queries, deadline=None):
+            if str(mode).startswith("background-"):
+                with guard:
+                    state["background_active"] += 1
+                    if state["background_active"] == self.spider.RESOURCE_BACKGROUND_MODE_WORKERS:
+                        background_started.set()
+                try:
+                    release.wait(2)
+                    return []
+                finally:
+                    with guard:
+                        state["background_active"] -= 1
+            return [{"vod_id": "foreground-result", "vod_name": "测试剧集"}]
+
+        self.spider._resource_search_mode = Mock(side_effect=search)
+        background_futures = [
+            self.spider._submit_resource_mode_search(
+                "background-%d" % index, ["测试剧集"], time.monotonic() + 3,
+                background=True,
+            )
+            for index in range(
+                self.spider.RESOURCE_BACKGROUND_MODE_WORKERS
+                + self.spider.RESOURCE_BACKGROUND_MODE_QUEUE_LIMIT
+            )
+        ]
+        try:
+            self.assertTrue(background_started.wait(1))
+            foreground = self.spider._submit_resource_mode_search(
+                "vod", ["测试剧集"], time.monotonic() + 1,
+            )
+            self.assertIsNotNone(foreground)
+            self.assertEqual(foreground.result(timeout=1)[0]["vod_id"], "foreground-result")
+        finally:
+            release.set()
+            for future in background_futures:
+                if future is not None:
+                    future.result(timeout=2)
+
+    def test_cancelled_queued_resource_search_releases_admission(self):
+        release = MODULE.threading.Event()
+        saturated = MODULE.threading.Event()
+        guard = MODULE.threading.Lock()
+        state = {"active": 0}
+
+        def search(mode, queries, deadline=None):
+            with guard:
+                state["active"] += 1
+                if state["active"] == self.spider.RESOURCE_FOREGROUND_MODE_WORKERS:
+                    saturated.set()
+            try:
+                release.wait(2)
+                return [mode]
+            finally:
+                with guard:
+                    state["active"] -= 1
+
+        self.spider._resource_search_mode = Mock(side_effect=search)
+        running = [
+            self.spider._submit_resource_mode_search(
+                "running-%d" % index, ["测试剧集"], time.monotonic() + 3,
+            )
+            for index in range(self.spider.RESOURCE_FOREGROUND_MODE_WORKERS)
+        ]
+        self.assertTrue(saturated.wait(1))
+        queued = self.spider._submit_resource_mode_search(
+            "queued", ["测试剧集"], time.monotonic() + 3,
+        )
+        self.assertIsNotNone(queued)
+        self.assertTrue(queued.cancel())
+        release.set()
+        for future in running:
+            future.result(timeout=2)
+
+        replacement = self.spider._submit_resource_mode_search(
+            "replacement", ["测试剧集"], time.monotonic() + 1,
+        )
+        self.assertIsNotNone(replacement)
+        self.assertEqual(replacement.result(timeout=1), ["replacement"])
+
+    def test_validated_resource_detail_cache_is_sanitized_and_lru_bounded(self):
+        detail = {"list": [{
+            "vod_name": "测试剧集",
+            "vod_remarks": "已验证",
+            "vod_play_from": "夸克线路",
+            "vod_play_url": "S01E01$1@playable",
+            "_route_quality": [{"resolution": 20, "total": 99, "blob": "drop"}],
+            "blob": "X" * (512 * 1024),
+            "nested": {"blob": "Y" * (512 * 1024)},
+        }]}
+        rows = [
+            {"vod_id": "resource-%d" % index, "_resource_mode": "vod"}
+            for index in range(self.spider.VALIDATED_RESOURCE_DETAIL_CACHE_LIMIT + 5)
+        ]
+
+        for row in rows:
+            self.assertTrue(self.spider._store_validated_resource_detail(row, detail))
+
+        self.assertEqual(
+            len(self.spider._validated_resource_details),
+            self.spider.VALIDATED_RESOURCE_DETAIL_CACHE_LIMIT,
+        )
+        self.assertIsNone(self.spider._validated_resource_detail(rows[0]))
+        cached = self.spider._validated_resource_detail(rows[-1])
+        self.assertIsNotNone(cached)
+        cached_vod = cached["list"][0]
+        self.assertNotIn("blob", cached_vod)
+        self.assertNotIn("nested", cached_vod)
+        self.assertNotIn("blob", cached_vod["_route_quality"][0])
+        self.assertEqual(
+            set(cached_vod).difference({
+                "vod_name", "vod_remarks", "type_name", "type",
+                "vod_play_from", "vod_play_url", "_route_quality",
+            }),
+            set(),
+        )
+
+    def test_real_candidate_order_keeps_one_row_per_api_before_cached_extras(self):
+        item = {
+            "title": "测试剧集", "year": "2026", "season_count": 1,
+            "trackingSeason": 1,
+        }
+        self.spider.resource_search_modes = ["vod1", "vod", "pansou", "telegram"]
+        cached = [
+            {
+                "vod_id": "%s-%d" % (mode, index),
+                "vod_name": "测试剧集 2026 1080P",
+                "_resource_mode": mode,
+                "_validated_groups": 1,
+            }
+            for mode, count in (("pansou", 3), ("telegram", 2))
+            for index in range(count)
+        ]
+        self.spider._cache_get = Mock(return_value=cached)
+        self.spider._resource_capability = Mock(return_value="present")
+        self.spider._resource_search_mode = Mock(side_effect=lambda mode, _queries, _deadline=None: [
+            {
+                "vod_id": "%s-live" % mode,
+                "vod_name": "测试剧集 2026 1080P",
+                "_resource_mode": mode,
+            }
+        ])
+
+        candidates = self.spider._resource_candidates(item, deadline=time.monotonic() + 2)
+
+        self.assertEqual(
+            [row["_resource_mode"] for row in candidates[:4]],
+            ["vod1", "vod", "pansou", "telegram"],
+        )
+        self.assertEqual(
+            {row["_resource_mode"] for row in candidates[:self.spider.RESOURCE_DETAIL_ATTEMPT_LIMIT]},
+            {"vod1", "vod", "pansou", "telegram"},
+        )
+
+    def test_cross_api_duplicate_keeps_matching_password_bearing_row(self):
+        item = {
+            "title": "测试剧集", "year": "2026", "season_count": 1,
+            "trackingSeason": 1,
+        }
+        plain = "https://pan.quark.cn/s/shared"
+        protected = plain + "?password=A1"
+        self.spider.resource_search_modes = ["pansou", "telegram"]
+        self.spider._cache_get = Mock(return_value=None)
+        rows = {
+            "pansou": [{
+                "vod_id": MODULE.quote(plain, safe=""),
+                "vod_name": "测试剧集 2026 1080P",
+                "work_title": "完全无关的另一部作品",
+                "_resource_timestamp": "2026-08-11T02:00:00Z",
+                "_resource_mode": "pansou",
+            }],
+            "telegram": [{
+                "vod_id": MODULE.quote(protected, safe=""),
+                "vod_name": "测试剧集 2026 4K",
+                "work_title": "测试剧集",
+                "_resource_timestamp": "2026-08-11T03:00:00Z",
+                "_resource_mode": "telegram",
+            }],
+        }
+        self.spider._resource_search_mode = Mock(
+            side_effect=lambda mode, _queries, _deadline=None: rows[mode]
+        )
+
+        candidates = self.spider._resource_candidates(item, deadline=time.monotonic() + 2)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["_resource_mode"], "telegram")
+        self.assertEqual(candidates[0]["work_title"], "测试剧集")
+        self.assertIn("password=A1", MODULE.unquote(candidates[0]["vod_id"]))
+
+    def test_same_opaque_resource_id_from_two_api_indexes_remains_two_playlists(self):
+        item = {
+            "title": "测试剧集", "year": "2026", "season_count": 1,
+            "trackingSeason": 1,
+        }
+        self.spider.resource_search_modes = ["pansou", "telegram"]
+        self.spider._cache_get = Mock(return_value=None)
+        self.spider._resource_search_mode = Mock(side_effect=lambda mode, _queries, _deadline=None: [{
+            "id": "same-resource", "vod_name": "测试剧集 2026 1080P", "_resource_mode": mode,
+        }])
+
+        candidates = self.spider._resource_candidates(item, deadline=time.monotonic() + 2)
+
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual(
+            {row["_resource_mode"] for row in candidates},
+            {"pansou", "telegram"},
+        )
+
+    def test_background_validation_interleaves_supplement_apis(self):
+        captured = []
+        item = {"title": "测试剧集", "year": "2026", "trackingSeason": 1}
+        self.spider._resource_search_mode = Mock(side_effect=lambda mode, _queries, _deadline=None: [
+            {
+                "vod_id": MODULE.quote("https://pan.quark.cn/s/%s-%d" % (mode, index), safe=""),
+                "vod_name": "测试剧集 2026 1080P",
+                "_resource_mode": mode,
+            }
+            for index in range(6 if mode == "pansou" else 1)
+        ])
+        self.spider._checked_resource_rows = Mock(side_effect=lambda rows, _deadline=None: list(rows))
+        self.spider._playable_resource_rows = Mock(
+            side_effect=lambda rows, *_args, **_kwargs: captured.extend(rows) or []
+        )
+        cache_key = "fair-background-test"
+
+        self.assertTrue(self.spider._schedule_supplement_resource_search(
+            ["pansou", "telegram"], ["测试剧集"], item, cache_key,
+        ))
+        deadline = time.time() + 2
+        while cache_key in self.spider._resource_search_jobs and time.time() < deadline:
+            time.sleep(0.01)
+
+        self.assertNotIn(cache_key, self.spider._resource_search_jobs)
+        self.assertEqual(
+            [row["_resource_mode"] for row in captured[:2]],
+            ["pansou", "telegram"],
+        )
+
+    def test_background_and_check_links_share_normalized_resource_identity(self):
+        variants = (
+            "http://pan.quark.cn/s/demo/",
+            "https://pan.quark.cn/s/demo?password=1234",
+            "https://pan.quark.cn/s/demo#pwd=5678",
+        )
+        identities = {self.spider._resource_row_identity(value) for value in variants}
+        self.assertEqual(len(identities), 1)
+
+        captured = []
+        self.spider._resource_search_mode = Mock(side_effect=lambda mode, _queries, _deadline=None: [{
+            "vod_id": variants[0 if mode == "pansou" else 1],
+            "vod_name": "测试剧集 2026 1080P",
+            "_resource_mode": mode,
+        }])
+        self.spider._checked_resource_rows = Mock(
+            side_effect=lambda rows, _deadline=None: captured.extend(rows) or []
+        )
+        self.spider._playable_resource_rows = Mock(return_value=[])
+        cache_key = "identity-background-test"
+
+        self.assertTrue(self.spider._schedule_supplement_resource_search(
+            ["pansou", "telegram"], ["测试剧集"],
+            {"title": "测试剧集", "year": "2026", "trackingSeason": 1},
+            cache_key,
+        ))
+        deadline = time.time() + 2
+        while cache_key in self.spider._resource_search_jobs and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertNotIn(cache_key, self.spider._resource_search_jobs)
+        self.assertEqual(len(captured), 1)
+
+        class FakeResponse(object):
+            def __init__(self):
+                self.status_code = 200
+                self.headers = {}
+                self.closed = False
+                self.payload = json.dumps({
+                    "results": [
+                        {"url": value, "state": "ok"} for value in variants
+                    ],
+                }).encode("utf-8")
+
+            def iter_content(self, chunk_size=None):
+                return iter((self.payload,))
+
+            def close(self):
+                self.closed = True
+
+        response = FakeResponse()
+        self.spider._ensure_atvp_connection = Mock(return_value=True)
+        self.spider._atvp_session = Mock()
+        self.spider._atvp_session.post.return_value = response
+
+        checked = Spider._checked_resource_rows(
+            self.spider,
+            [{"vod_id": value} for value in variants], deadline=time.monotonic() + 5,
+        )
+
+        self.assertEqual(len(checked), 1)
+        self.assertEqual(
+            len(self.spider._atvp_session.post.call_args.kwargs["json"]["items"]),
+            1,
+        )
+        self.assertTrue(response.closed)
+
+    def test_multiple_resource_api_results_render_distinct_playlists(self):
+        item = {
+            "media_type": "tv", "tmdb_id": 270603,
+            "title": "遭到流放的转生重骑士凭借游戏知识大开无双", "trackingSeason": 1,
+        }
+        vods = [
+            {
+                "vod_play_from": "我的云盘",
+                "vod_play_url": "S01E01$1@vod1",
+                "resource_id": "vod1-270603",
+                "group_seasons": [1], "group_providers": ["quark"],
+            },
+            {
+                "vod_play_from": "我的云盘",
+                "vod_play_url": "S01E01$1@vod-270603",
+                "resource_id": "vod-270603",
+                "group_seasons": [1], "group_providers": ["baidu"],
+            },
+            {
+                "vod_play_from": "我的云盘",
+                "vod_play_url": "S01E01$1@pansou-270603",
+                "resource_id": "pansou-270603",
+                "group_seasons": [1], "group_providers": ["ali"],
+            },
+            {
+                "vod_play_from": "我的云盘",
+                "vod_play_url": "S01E01$1@telegram-270603",
+                "resource_id": "telegram-270603",
+                "group_seasons": [1], "group_providers": ["uc"],
+            },
+        ]
+
+        merged = self.spider._merge_resource_vods(
+            vods, item, "tmdb:tv:270603", {"vod_name": item["title"]},
+        )
+
+        sources = merged["vod_play_from"].split("$$$")
+        urls = merged["vod_play_url"].split("$$$")
+        self.assertEqual(len(sources), 4)
+        self.assertEqual(len(urls), 4)
+        self.assertEqual(len(set(sources)), 4)
+        self.assertTrue(all("S01E01$" in value for value in urls))
 
     def test_removed_shared_route_cache_symbols_stay_out_of_plugin(self):
         source = SOURCE.read_text(encoding="utf-8")
@@ -2345,6 +3898,58 @@ class FollowOperationV51Test(unittest.TestCase):
                 "_resource_mode": "vod",
             }, use_validated_cache=False)
 
+    def test_long_magnet_survives_search_followplay_parse_and_player_routing(self):
+        magnet = (
+            "magnet:?xt=urn:btih:" + ("A" * 40)
+            + "&dn=测试剧集&tr=https://tracker.example/announce?token="
+            + ("x" * 900)
+        )
+        self.assertGreater(len(magnet), self.spider.RESOURCE_ID_MAX_LENGTH)
+        self.spider._resource_capability = Mock(return_value="present")
+        self.spider._resource_api_get = Mock(return_value={"results": [{
+            "url": magnet,
+            "work_title": "测试剧集",
+            "type": "magnet",
+        }]})
+
+        rows = self.spider._resource_search_mode("pansou", ["测试剧集"])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(MODULE.unquote(rows[0]["vod_id"]), magnet)
+
+        self.spider._resource_api_get = Mock(return_value={"list": []})
+        self.spider._resource_detail(rows[0], use_validated_cache=False)
+        self.assertEqual(self.spider._resource_api_get.call_args.args[0], "pansou")
+        self.assertEqual(self.spider._resource_api_get.call_args.args[1]["id"], magnet)
+
+        play_id = self.spider._build_followplay(
+            magnet,
+            {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集"},
+            rows[0]["vod_id"], 1, 1, "S01E01", resource_mode="pansou",
+        )
+        parsed = self.spider._parse_followplay(play_id)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["url"], magnet)
+        self.assertEqual(MODULE.unquote(parsed["resourceId"]), magnet)
+
+        self.spider._prepare_player_candidates = Mock(side_effect=lambda values: values)
+        self.spider._atvp_play = Mock(return_value={
+            "parse": 0, "url": "https://cdn.example/video.m3u8", "header": {},
+        })
+        self.spider._probe_media_output = Mock(return_value=None)
+        self.spider._safe_atvp_play_output = Mock(return_value=True)
+        self.spider._inject_resume = Mock()
+        self.spider._record_route_quality = Mock()
+        self.spider._cache_route_probe = Mock()
+        self.spider._remember_successful_follow_route = Mock()
+        self.spider._register_playback_sync_window = Mock()
+
+        output = self.spider.playerContent("磁力", play_id, [])
+
+        self.assertEqual(output["url"], "https://cdn.example/video.m3u8")
+        self.spider._atvp_play.assert_called_once()
+        self.assertEqual(self.spider._atvp_play.call_args.args[0], magnet)
+
     def test_resource_api_response_has_content_length_and_stream_byte_limits(self):
         class FakeResponse:
             def __init__(self, headers, chunks):
@@ -2380,6 +3985,88 @@ class FollowOperationV51Test(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "响应过大"):
             self.spider._resource_api_get("vod", {}, deadline=time.monotonic() + 5)
         self.assertTrue(streaming.closed)
+
+    def test_stale_resource_response_cannot_mark_new_backend_capability(self):
+        class NotFoundResponse(object):
+            status_code = 404
+            headers = {}
+
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        response = NotFoundResponse()
+        self.spider.resource_auto_discover = True
+        self.spider.atvp_api = "https://old-atvp.example"
+        self.spider.atvp_token = "old-token"
+        self.spider._ensure_atvp_connection = Mock(return_value=True)
+        self.spider.getCache = Mock(return_value=None)
+        self.spider.setCache = Mock()
+        self.spider._atvp_session = Mock()
+
+        def switch_backend(*_args, **_kwargs):
+            with self.spider._cache_lock:
+                self.spider.atvp_api = "https://new-atvp.example"
+                self.spider.atvp_token = "new-token"
+                self.spider._resource_capabilities = {}
+                self.spider._resource_capabilities_backend = ""
+                self.spider._cache_generation += 1
+            return response
+
+        self.spider._atvp_session.get.side_effect = switch_backend
+
+        with self.assertRaisesRegex(RuntimeError, "HTTP 404"):
+            self.spider._resource_api_get("vod", {}, deadline=time.monotonic() + 5)
+
+        self.assertTrue(response.closed)
+        self.assertEqual(self.spider._resource_capability("vod"), "unknown")
+        persisted_modes = [
+            (call.args[1].get("modes") or {})
+            for call in self.spider.setCache.call_args_list
+            if len(call.args) > 1 and isinstance(call.args[1], dict)
+        ]
+        self.assertFalse(any("vod" in modes for modes in persisted_modes))
+
+    def test_capability_cold_load_cannot_overwrite_newer_live_probe(self):
+        self.spider.resource_auto_discover = True
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        identity = self.spider._resource_capability_identity()
+        started = MODULE.threading.Event()
+        release = MODULE.threading.Event()
+
+        def cached_value(_key):
+            started.set()
+            release.wait(2)
+            return {
+                "version": self.spider.RESOURCE_CAPABILITY_VERSION,
+                "backend": identity,
+                "modes": {
+                    "vod": {
+                        "state": "missing",
+                        "status": 404,
+                        "checkedAt": int(time.time()),
+                    },
+                },
+            }
+
+        self.spider.getCache = Mock(side_effect=cached_value)
+        self.spider.setCache = Mock()
+        loader = MODULE.threading.Thread(
+            target=lambda: self.spider._resource_capability("vod"),
+        )
+        loader.start()
+        try:
+            self.assertTrue(started.wait(1))
+            self.assertTrue(self.spider._mark_resource_capability("vod", "present", 200))
+        finally:
+            release.set()
+            loader.join(2)
+
+        self.assertFalse(loader.is_alive())
+        self.assertEqual(self.spider._resource_capability("vod"), "present")
 
     def test_play_parse_and_check_links_use_bounded_json_reader(self):
         class FakeResponse:
@@ -2693,6 +4380,44 @@ class FollowOperationV51Test(unittest.TestCase):
 
         self.assertTrue(response.closed)
         self.spider._atvp_history_request.assert_called_once_with("GET", stream=True)
+
+    def test_history_login_json_is_bounded_streamed_and_closed(self):
+        class FakeResponse(object):
+            def __init__(self, content, content_length=None):
+                self.status_code = 200
+                self.headers = {
+                    "Content-Length": str(len(content) if content_length is None else content_length),
+                }
+                self.content = content
+                self.closed = False
+
+            def iter_content(self, chunk_size=None):
+                return iter((self.content,))
+
+            def close(self):
+                self.closed = True
+
+        oversized = FakeResponse(b"", self.spider.HISTORY_CONFIG_MAX_BYTES + 1)
+        invalid = FakeResponse(b"not-json")
+        self.spider.atvp_api = "https://history.example:443"
+        self.spider.history_username = "user"
+        self.spider.history_password = "pass"
+        self.spider._atvp_session = Mock()
+        self.spider._atvp_session.headers = {}
+        self.spider._atvp_session.post.side_effect = [oversized, invalid]
+
+        with self.assertRaisesRegex(RuntimeError, "响应过大"):
+            self.spider._atvp_history_login(force=True)
+        with self.assertRaisesRegex(RuntimeError, "无效 JSON"):
+            self.spider._atvp_history_login(force=True)
+
+        self.assertTrue(oversized.closed)
+        self.assertTrue(invalid.closed)
+        self.assertEqual(self.spider._atvp_session.post.call_count, 2)
+        self.assertTrue(all(
+            call.kwargs.get("stream") is True
+            for call in self.spider._atvp_session.post.call_args_list
+        ))
 
     def test_filter_history_uses_the_same_bounded_normalization(self):
         class FakeResponse(object):
