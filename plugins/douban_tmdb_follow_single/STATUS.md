@@ -6,11 +6,11 @@
 | --- | --- |
 | 仓库索引 | `spiders_v2.json` 已登记并启用 |
 | 插件 ID | `douban_tmdb_follow_single` |
-| 发布版本 | `61`（公开测试版） |
+| 发布版本 | `62`（公开测试版） |
 | 源码格式 | 明文 `.py` |
 | AList-TVBox 最低兼容基线 | `1.42.0` |
 | AList-TVBox 当前验证环境 | `1.44.0` |
-| 源码文件 | `py/豆瓣TMDB追更单入口_v61.py` |
+| 源码文件 | `py/豆瓣TMDB追更单入口_v62.py` |
 | 源码大小 | `589500` 字节 |
 | 源码 SHA256 | `7AFF8689CA62E1F3CBC45FF1279C70BBF8EAB72E1262B60EC1840A9AA63D718B` |
 | 自动化回归 | `251` 项通过（含 3 项真实 loopback HTTP 联调） |

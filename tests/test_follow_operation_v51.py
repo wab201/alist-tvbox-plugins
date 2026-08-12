@@ -24,7 +24,7 @@ sys.modules.setdefault("base", base_module)
 sys.modules.setdefault("base.spider", spider_module)
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSIONED_SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口_v61.py"
+VERSIONED_SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口_v62.py"
 SOURCE = VERSIONED_SOURCE if VERSIONED_SOURCE.exists() else ROOT / "py" / "豆瓣TMDB追更单入口.py"
 SPEC = importlib.util.spec_from_file_location("douban_tmdb_follow_v51", str(SOURCE))
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -58,6 +58,40 @@ class FollowOperationV51Test(unittest.TestCase):
         serialized = json.dumps(snapshot, ensure_ascii=False)
         self.assertNotIn("secret-tmdb-token", serialized)
         self.assertEqual([row["seq"] for row in snapshot], [3, 4, 5])
+
+    def test_native_history_import_converts_legacy_numeric_flags_to_booleans(self):
+        captured = {}
+
+        class FakeHistory(object):
+            @staticmethod
+            def arrayFrom(payload):
+                captured["rows"] = json.loads(payload)
+                return captured["rows"]
+
+            @staticmethod
+            def sync(rows):
+                captured["synced"] = rows
+
+            @staticmethod
+            def find(key):
+                return object()
+
+        fake_java = types.ModuleType("java")
+        fake_java.jclass = lambda name: FakeHistory
+        with patch.dict(sys.modules, {"java": fake_java}):
+            imported = self.spider._import_native_history([
+                {
+                    "key": "site@@@vod@@@1",
+                    "vodName": "测试剧集",
+                    "revSort": 0,
+                    "revPlay": 1,
+                    "position": 1200,
+                }
+            ])
+
+        self.assertEqual(imported, 1)
+        self.assertIs(captured["rows"][0]["revSort"], False)
+        self.assertIs(captured["rows"][0]["revPlay"], True)
 
     def test_diagnostic_failure_never_changes_business_result(self):
         with patch.object(self.spider, "_short_error", side_effect=RuntimeError("diagnostic failed")):
@@ -432,7 +466,7 @@ class FollowOperationV51Test(unittest.TestCase):
         expected = {
             "name": "豆瓣TMDB追更助手（AList-TVBox专用）",
             "id": "douban_tmdb_follow_single",
-            "version": "61",
+            "version": "62",
         }
         for field, value in expected.items():
             match = re.search(r"(?m)^\s*//@%s:(.+?)\s*$" % field, source)
@@ -441,7 +475,7 @@ class FollowOperationV51Test(unittest.TestCase):
         repository = json.loads((ROOT / "spiders_v2.json").read_text(encoding="utf-8"))
         entry = next(row for row in repository if row.get("id") == expected["id"])
         self.assertEqual(str(entry.get("version")), expected["version"])
-        expected_file = "py/豆瓣TMDB追更单入口_v61.py" if VERSIONED_SOURCE.exists() else "py/豆瓣TMDB追更单入口.py"
+        expected_file = "py/豆瓣TMDB追更单入口_v62.py" if VERSIONED_SOURCE.exists() else "py/豆瓣TMDB追更单入口.py"
         self.assertEqual(entry.get("file"), expected_file)
         self.assertIs(entry.get("valid"), True)
 
