@@ -24,10 +24,13 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/plugins/seed
 
 | 插件 | 版本 | 索引状态 | 说明 |
 | --- | ---: | --- | --- |
-| 豆瓣 TMDB 追更助手 | 62 测试版 | 可导入 | [能力与配置](plugins/douban_tmdb_follow_single/README.md) |
+| 豆瓣 TMDB 追更助手 | 63 测试版 | 可导入 | [能力与配置](plugins/douban_tmdb_follow_single/README.md) |
 | SeedHub 磁力与多网盘 | 1 | 可导入 | [能力与配置](plugins/seedhub/README.md) |
 
-### 豆瓣 TMDB 追更助手 v62 测试版
+### 豆瓣 TMDB 追更助手 v63 测试版
+
+- 动态页改为只读取云端 History 快照，不再触发本机 History 导出、全量合并和导入；完整双向同步保留在“立即同步 History”和播放结束同步路径。
+- History 无云端差异时跳过第二次本机导出和整表导入，减少动态页和详情页等待。
 
 - 统一管理后台任务、定时器和执行器，插件重新初始化或销毁后，旧任务不能继续覆盖新配置下的状态。
 - 统一响应缓存与线路质量缓存的保存、重试和退避；过期数据刷新采用单任务所有权，减少重复刷新和旧任务回写。

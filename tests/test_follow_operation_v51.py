@@ -24,7 +24,7 @@ sys.modules.setdefault("base", base_module)
 sys.modules.setdefault("base.spider", spider_module)
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSIONED_SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口_v62.py"
+VERSIONED_SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口_v63.py"
 SOURCE = VERSIONED_SOURCE if VERSIONED_SOURCE.exists() else ROOT / "py" / "豆瓣TMDB追更单入口.py"
 SPEC = importlib.util.spec_from_file_location("douban_tmdb_follow_v51", str(SOURCE))
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -466,7 +466,7 @@ class FollowOperationV51Test(unittest.TestCase):
         expected = {
             "name": "豆瓣TMDB追更助手（AList-TVBox专用）",
             "id": "douban_tmdb_follow_single",
-            "version": "62",
+            "version": "63",
         }
         for field, value in expected.items():
             match = re.search(r"(?m)^\s*//@%s:(.+?)\s*$" % field, source)
@@ -475,7 +475,7 @@ class FollowOperationV51Test(unittest.TestCase):
         repository = json.loads((ROOT / "spiders_v2.json").read_text(encoding="utf-8"))
         entry = next(row for row in repository if row.get("id") == expected["id"])
         self.assertEqual(str(entry.get("version")), expected["version"])
-        expected_file = "py/豆瓣TMDB追更单入口_v62.py" if VERSIONED_SOURCE.exists() else "py/豆瓣TMDB追更单入口.py"
+        expected_file = "py/豆瓣TMDB追更单入口_v63.py" if VERSIONED_SOURCE.exists() else "py/豆瓣TMDB追更单入口.py"
         self.assertEqual(entry.get("file"), expected_file)
         self.assertIs(entry.get("valid"), True)
 
@@ -1056,6 +1056,29 @@ class FollowOperationV51Test(unittest.TestCase):
         imported_rows = self.spider._import_native_history.call_args.args[0]
         self.assertEqual(imported_rows, [])
         self.assertEqual(result["merged"], [])
+
+    def test_history_sync_skips_second_local_export_when_cloud_has_no_delta(self):
+        now = int(time.time() * 1000)
+        local = [{
+            "key": "local@@@vod@@@1", "vodName": "测试剧集", "vodRemarks": "S01E06",
+            "createTime": now, "position": 900000, "duration": 1200000,
+        }]
+        cloud = [{
+            "key": "cloud@@@vod@@@1", "vodName": "测试剧集", "vodRemarks": "S01E06",
+            "createTime": now - 60000, "position": 1000, "duration": 1200000,
+        }]
+        self.spider._history_share_policy = {"follow": False, "watch": False}
+        self.spider._history_share_policy_loaded = True
+        self.spider._capture_native_history = Mock(return_value=local)
+        self.spider._atvp_fetch_history = Mock(return_value=cloud)
+        self.spider._import_native_history = Mock(return_value=0)
+        self.spider._atvp_history_push = Mock()
+
+        result = self.spider._sync_history_once()
+
+        self.assertEqual(self.spider._capture_native_history.call_count, 1)
+        self.spider._import_native_history.assert_called_once_with([])
+        self.assertEqual(result["imported"], 0)
 
     def test_history_share_toggle_prevents_pending_sync_from_using_old_policy(self):
         watch = {"key": "watch", "episodeUrl": "normal-play-id"}

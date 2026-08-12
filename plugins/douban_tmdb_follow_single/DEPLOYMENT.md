@@ -9,10 +9,10 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/spiders_v2.j
 插件源码地址：
 
 ```text
-https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMDB追更单入口_v62.py
+https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMDB追更单入口_v63.py
 ```
 
-本插件用于豆瓣/TMDB 浏览、剧集追更、AList-TVBox 资源搜索、线路评分和 History 续播。当前发布版本为 v62 公开测试版，稳定回退基线为 v57，v60 保留为上一版回退点；最低兼容基线为 AList-TVBox 1.42.0，当前已在 1.44.0 验证。插件由 AList-TVBox 生成订阅后交给 FongMi/TvBox 使用。同一源码空 EXT 直载时保留 FongMi 元数据分类、搜索、详情和直链播放合同，但追更、History 与网盘资源功能必须使用 AList-TVBox 生成的订阅。
+本插件用于豆瓣/TMDB 浏览、剧集追更、AList-TVBox 资源搜索、线路评分和 History 续播。当前发布版本为 v63 公开测试版，稳定回退基线为 v57，v60 保留为上一版回退点；最低兼容基线为 AList-TVBox 1.42.0，当前已在 1.44.0 验证。插件由 AList-TVBox 生成订阅后交给 FongMi/TvBox 使用。同一源码空 EXT 直载时保留 FongMi 元数据分类、搜索、详情和直链播放合同，但追更、History 与网盘资源功能必须使用 AList-TVBox 生成的订阅。
 
 完整功能不要把 `.py` 文件直接添加为普通 FongMi 站点，也不要手工填写外层 `api`、`token`、`secret`、`loader`、`source` 或 `raw`。
 
@@ -208,11 +208,11 @@ py/
 
 ### 播放提示 bad http status
 
-先确认主插件和同源过滤器都已刷新到 v62。v55 会丢弃各网盘直链所需的播放头，夸克 Cookie 缺失时会表现为详情有线路但候选返回 `bad http status`；v56 起按白名单保留 AList-TVBox 返回的标准播放头，v57 进一步阻止跨域失败回退敏感头和签名媒体直链进入长期状态，v60 重构后台任务与缓存生命周期，v61 修复首次详情 History/线路和追更确认反馈。
+先确认主插件和同源过滤器都已刷新到 v63。v55 会丢弃各网盘直链所需的播放头，夸克 Cookie 缺失时会表现为详情有线路但候选返回 `bad http status`；v56 起按白名单保留 AList-TVBox 返回的标准播放头，v57 进一步阻止跨域失败回退敏感头和签名媒体直链进入长期状态，v60 重构后台任务与缓存生命周期，v61 修复首次详情 History/线路和追更确认反馈，v63 将动态页 History 刷新改为云端快照路径。
 
 ## 文件说明
 
-- `../../py/豆瓣TMDB追更单入口_v62.py`：当前 V62 测试版明文源码。
+- `../../py/豆瓣TMDB追更单入口_v63.py`：当前 V63 测试版明文源码。
 - `../../py/豆瓣TMDB追更单入口_v60.py`：上一版不可变回退源码。
 - `../../py/豆瓣TMDB追更单入口.py`：保留的 v57 回退源码。
 - `../../spiders_v2.json`：插件仓库索引。
