@@ -11,14 +11,14 @@
 | AList-TVBox 最低兼容基线 | `1.42.0` |
 | AList-TVBox 当前验证环境 | `1.44.0` |
 | 源码文件 | `py/豆瓣TMDB追更单入口_v63.py` |
-| 源码大小 | `589500` 字节 |
-| 源码 SHA256 | `7AFF8689CA62E1F3CBC45FF1279C70BBF8EAB72E1262B60EC1840A9AA63D718B` |
-| 自动化回归 | `251` 项通过（含 3 项真实 loopback HTTP 联调） |
+| 源码大小 | `593069` 字节 |
+| 源码 SHA256 | `C9D3E35A447685702086FC06CAB482A1A375C4E390C99B4BBDB2731D5DE3352A` |
+| 自动化回归 | `253` 项通过（含 V63 History 轻量快照回归） |
 | ATVP 合同 | direct-play / upstream-1.25-raw 通过 |
-| 双运行时合同 | FongMi TV 5.6.0 官方 HEAD `1a19fee278fa2234da725d61a53bf59b69fe9127` 通过 |
+| 双运行时合同 | FongMi TV 5.6.1 模拟器运行链与 direct-PY 门禁通过 |
 | FongMi 分类合同 | TypeFragment、SiteApi、Chaquopy 与 Atvp 参数链通过 |
 | 广域网 History | 当前订阅 HTTPS 入口已实测登录、读取、写入、跨 LAN 可见和删除清理通过 |
-| 仓库部署 | 公开测试版 |
+| 仓库部署 | 公开测试版；容器主插件 `416` 与过滤器 `7` 均已部署 V63 |
 | 回退基线 | v57，源码 SHA256 `A992254BDC0A2AC4AFB32DD6A1C6A6ED5B78158848C539BAEC11356F0C68D077` |
 | 容器部署方式 | 仅通过仓库导入拉取，不在仓库保存容器凭据 |
 
