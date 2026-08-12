@@ -2,7 +2,7 @@
 """
 //@name:豆瓣TMDB追更助手（AList-TVBox专用）
 //@id:douban_tmdb_follow_single
-//@version:56
+//@version:57
 
 AList-TVBox raw Python plugin for Douban/TMDB browsing and follow-up playback.
 
@@ -1032,6 +1032,7 @@ class Spider(BaseSpider):
     RESOURCE_PARSE_CANDIDATE_LIMIT = 100
     ROUTE_PROBE_MAX_BYTES = 4096
     ROUTE_PROBE_CACHE_LIMIT = 128
+    ROUTE_PROBE_NEGATIVE_TTL = 60
     ROUTE_HEADER_VALUE_MAX_BYTES = 16 * 1024
     ROUTE_COOKIE_MAX_BYTES = 64 * 1024
     ROUTE_HEADERS_TOTAL_MAX_BYTES = 80 * 1024
@@ -1332,7 +1333,7 @@ class Spider(BaseSpider):
         self._playback_sync_tokens = {}
         self._playback_sync_inflight = {}
         self._route_probe_cache = {}
-        self._route_probe_jobs = set()
+        self._route_probe_jobs = {}
         self._resource_search_admissions = 0
         self._validated_resource_details = OrderedDict()
         self._bound_replacement_jobs = {}
@@ -1771,6 +1772,14 @@ class Spider(BaseSpider):
             if str(id or "").startswith(FOLLOWPLAY_PREFIXES):
                 return {"parse": 0, "jx": 0, "playUrl": "", "url": "", "header": {}, "msg": "播放参数无效或已损坏"}
             return {"parse": 0, "jx": 0, "playUrl": "", "url": str(id or ""), "header": {}}
+        with self._history_context_lock:
+            with self._cache_lock:
+                player_generation = self._cache_generation
+                player_backend = self._resource_capability_identity()
+        play_context = (
+            {"expected_generation": player_generation, "expected_backend": player_backend}
+            if player_backend else {}
+        )
         candidates = [{
             "url": str(parsed.get("url") or ""),
             "resourceId": str(parsed.get("resourceId") or ""),
@@ -1825,7 +1834,10 @@ class Spider(BaseSpider):
                             refresh_target = str(candidate.get("_route_refresh_target") or "").strip()
                             if not refresh_target:
                                 raise RuntimeError("缓存线路验活失败")
-                            output = dict(self._atvp_play(refresh_target, deadline=candidate_deadline) or {})
+                            output = dict(self._atvp_play(
+                                refresh_target, deadline=candidate_deadline,
+                                **play_context,
+                            ) or {})
                     else:
                         output = dict(cached_output)
                 elif probe.get("reachable") is True and isinstance(probe.get("output"), dict):
@@ -1837,7 +1849,10 @@ class Spider(BaseSpider):
                         and re.search(r"(?i)\.(?:m3u8|mp4|mkv|flv|ts)(?:[?#]|$)", target)):
                     output = {"parse": 0, "jx": 0, "url": target, "header": {}}
                 else:
-                    output = dict(self._atvp_play(target, deadline=candidate_deadline) or {})
+                    output = dict(self._atvp_play(
+                        target, deadline=candidate_deadline,
+                        **play_context,
+                    ) or {})
                 if not str(output.get("url") or "").strip():
                     raise RuntimeError("播放地址为空")
                 if not output_validated:
@@ -1877,18 +1892,37 @@ class Spider(BaseSpider):
                     quality_id, True,
                     startup_ms=(quality_probe or {}).get("startup_ms"),
                     signals=quality_probe,
+                    expected_generation=player_generation,
+                    expected_backend=player_backend,
                 )
                 self._cache_route_probe(
                     quality_id,
                     quality_probe,
                     resource_id=effective.get("resourceId") or "",
                     resource_mode=effective.get("resourceMode") or "vod",
+                    expected_generation=player_generation,
+                    expected_backend=player_backend,
                 )
-                self._remember_successful_follow_route(parsed, candidate, quality_id, quality_probe)
-                self._register_playback_sync_window(effective)
+                self._remember_successful_follow_route(
+                    parsed, candidate, quality_id, quality_probe,
+                    expected_generation=player_generation,
+                    expected_backend=player_backend,
+                )
+                with self._history_context_lock:
+                    with self._cache_lock:
+                        player_is_current = (
+                            player_generation == self._cache_generation
+                            and player_backend == self._resource_capability_identity()
+                        )
+                    if player_is_current:
+                        self._register_playback_sync_window(effective)
                 return output
             except Exception as exc:
-                self._record_route_quality(quality_id, False)
+                self._record_route_quality(
+                    quality_id, False,
+                    expected_generation=player_generation,
+                    expected_backend=player_backend,
+                )
                 errors.append(self._short_error(exc))
         detail = errors[-1] if errors else "未知错误"
         attempt_text = (
@@ -3656,7 +3690,15 @@ class Spider(BaseSpider):
         return persisted
 
     def _save_follow_state(self, items):
-        state = {"version": self.FOLLOW_STATE_VERSION, "updated_at": int(time.time()), "items": items}
+        sanitized_items = {}
+        for key, value in dict(items or {}).items():
+            if isinstance(value, dict):
+                sanitized_items[str(key)] = self._sanitize_follow_persisted_item(value)
+        state = {
+            "version": self.FOLLOW_STATE_VERSION,
+            "updated_at": int(time.time()),
+            "items": sanitized_items,
+        }
         with self._follow_enrich_lock:
             if not self._follow_state_loaded:
                 raise RuntimeError("追更状态尚未成功读取，已暂停修改")
@@ -3753,11 +3795,9 @@ class Spider(BaseSpider):
                 output[key] = _history_clip_text(output.get(key), limit)
         resource_id = str(output.get("alist_vod_id") or "").strip()
         binding_mode = str(output.get("alist_resource_mode") or "vod").strip().lower() or "vod"
-        decoded_resource_id = self._unquote_limited(resource_id)
         if resource_id and (
                 binding_mode not in self.RESOURCE_SEARCH_MODES
-                or not self._resource_id_valid(resource_id, binding_mode)
-                or self._contains_url_reference(decoded_resource_id)):
+                or not self._resource_id_persistable(resource_id, binding_mode)):
             output.pop("alist_vod_id", None)
             output.pop("alist_resource_mode", None)
             output.pop("alist_resource_provider", None)
@@ -3777,10 +3817,8 @@ class Spider(BaseSpider):
         if resource_mode not in self.RESOURCE_SEARCH_MODES:
             resource_mode = ""
         route_resource_id = str(route.get("resourceId") or "").strip()
-        decoded_route_resource_id = self._unquote_limited(route_resource_id)
         if route_resource_id and (
-                not self._resource_id_valid(route_resource_id, resource_mode)
-                or self._contains_url_reference(decoded_route_resource_id)):
+                not self._resource_id_persistable(route_resource_id, resource_mode)):
             route_resource_id = ""
         play_id = str(route.get("playId") or "").strip()
         decoded_play_id = self._unquote_limited(play_id)
@@ -5389,6 +5427,9 @@ class Spider(BaseSpider):
             return {}
         payload = self._history_followplay_payload(history) or {}
         payload_resource_id = str(payload.get("resourceId") or "").strip()
+        payload_resource_mode = str(payload.get("resourceMode") or "vod").strip().lower() or "vod"
+        if not self._resource_id_persistable(payload_resource_id, payload_resource_mode):
+            payload_resource_id = ""
         resource_id = payload_resource_id or str(item.get("alist_vod_id") or "").strip()
         fields = {
             "history_episode": episode,
@@ -5400,7 +5441,7 @@ class Spider(BaseSpider):
         if resource_id:
             fields["alist_vod_id"] = resource_id
         if payload_resource_id:
-            resource_mode = str(payload.get("resourceMode") or "vod").strip().lower() or "vod"
+            resource_mode = payload_resource_mode
             fields["alist_resource_mode"] = resource_mode
             fields["alist_resource_provider"] = self._resource_provider_key(
                 payload.get("resourceProvider"), payload_resource_id,
@@ -7146,6 +7187,17 @@ class Spider(BaseSpider):
             len(decoded) <= cls.RESOURCE_ID_MAX_LENGTH
             and not cls._contains_url_reference(decoded)
         )
+
+    @classmethod
+    def _resource_id_persistable(cls, value, mode="vod"):
+        if not cls._resource_id_valid(value, mode):
+            return False
+        kind, decoded = cls._resource_id_kind(value)
+        if kind == "offline":
+            return False
+        if kind == "share":
+            return bool(cls._resource_provider_key(decoded))
+        return not cls._contains_url_reference(decoded)
 
     @staticmethod
     def _valid_resource_password(value):
@@ -9003,17 +9055,29 @@ class Spider(BaseSpider):
         retry_phases = max(1, int(requests_left)) * 6
         return max(1, min(float(default_timeout), remaining / retry_phases))
 
-    def _atvp_play(self, play_id, timeout_seconds=None, deadline=None):
+    def _atvp_play(self, play_id, timeout_seconds=None, deadline=None,
+                   expected_generation=None, expected_backend=None):
         target = str(play_id or "").strip()
         if not target:
             raise RuntimeError("播放线路为空")
         if len(target) > self.FOLLOWPLAY_MAX_URL_LENGTH:
             raise RuntimeError("播放线路过长，已拒绝异常请求")
-        if not self._ensure_atvp_connection(force=True):
-            raise RuntimeError("未配置 AList-TVBox 地址或令牌")
+        with self._history_context_lock:
+            if not self._ensure_atvp_connection(force=True):
+                raise RuntimeError("未配置 AList-TVBox 地址或令牌")
+            with self._cache_lock:
+                current_generation = self._cache_generation
+                current_backend = self._resource_capability_identity()
+                if expected_generation is not None and expected_generation != current_generation:
+                    raise RuntimeError("播放后端已切换，请重试")
+                if expected_backend is not None and expected_backend != current_backend:
+                    raise RuntimeError("播放后端已切换，请重试")
+                request_api = str(self.atvp_api or "").rstrip("/")
+                request_token = str(self.atvp_token or "")
+                request_session = self._atvp_session
         if re.match(r"^(?:https?://|magnet:|ed2k:|thunder:)", target, re.I):
             parsed_target = urlparse(target)
-            parsed_api = urlparse(self.atvp_api)
+            parsed_api = urlparse(request_api)
             path_parts = [unquote(part) for part in parsed_target.path.split("/") if part]
             api_parts = [unquote(part) for part in parsed_api.path.split("/") if part]
             relative_parts = path_parts[len(api_parts):] if path_parts[:len(api_parts)] == api_parts else []
@@ -9022,7 +9086,7 @@ class Spider(BaseSpider):
                 and parsed_target.netloc.lower() == parsed_api.netloc.lower()
                 and len(relative_parts) == 3
                 and relative_parts[0] == "p"
-                and relative_parts[1] == self.atvp_token
+                and relative_parts[1] == request_token
                 and re.match(r"^\d+@[^/?#]+$", relative_parts[2])
             )
             if same_backend_play:
@@ -9032,6 +9096,9 @@ class Spider(BaseSpider):
                     target,
                     timeout_seconds=timeout_seconds,
                     deadline=deadline,
+                    request_api=request_api,
+                    request_token=request_token,
+                    request_session=request_session,
                 )
                 if not candidates:
                     raise RuntimeError("AList 解析未返回可播放候选")
@@ -9043,8 +9110,8 @@ class Spider(BaseSpider):
             timeout_seconds if timeout_seconds is not None else max(30, self.timeout),
             requests_left=1,
         )
-        play_url = "%s/play/%s" % (self.atvp_api.rstrip("/"), quote(self.atvp_token, safe=""))
-        response = self._atvp_session.get(
+        play_url = "%s/play/%s" % (request_api, quote(request_token, safe=""))
+        response = request_session.get(
             play_url,
             params={"id": target, "type": "client-proxy", "from": "jar"},
             headers={"Accept": "application/json", "X-CLIENT": "com.fongmi.android.tv"},
@@ -9062,17 +9129,21 @@ class Spider(BaseSpider):
             raise RuntimeError("AList 播放地址为空")
         output = dict(data)
         if str(output.get("url") or "").startswith("/"):
-            output["url"] = self.atvp_api.rstrip("/") + str(output["url"])
+            output["url"] = request_api + str(output["url"])
         return output
 
-    def _atvp_parse_candidates(self, resource_url, timeout_seconds=None, deadline=None):
-        parse_url = "%s/parse/%s" % (self.atvp_api.rstrip("/"), quote(self.atvp_token, safe=""))
+    def _atvp_parse_candidates(self, resource_url, timeout_seconds=None, deadline=None,
+                               request_api=None, request_token=None, request_session=None):
+        request_api = str(request_api if request_api is not None else self.atvp_api).rstrip("/")
+        request_token = str(request_token if request_token is not None else self.atvp_token)
+        request_session = request_session if request_session is not None else self._atvp_session
+        parse_url = "%s/parse/%s" % (request_api, quote(request_token, safe=""))
         request_timeout = self._atvp_deadline_timeout(
             deadline,
             timeout_seconds if timeout_seconds is not None else max(35, self.timeout),
             requests_left=2,
         )
-        response = self._atvp_session.post(
+        response = request_session.post(
             parse_url,
             params={"ac": "play"},
             json={"url": str(resource_url or "")},
@@ -9108,11 +9179,11 @@ class Spider(BaseSpider):
                             return candidates
         return candidates
 
-    def _route_probe_key(self, target, resource_id="", resource_mode="vod"):
+    def _route_probe_key(self, target, resource_id="", resource_mode="vod", backend=None):
         target = str(target or "").strip()
         resource_id = str(resource_id or "").strip()
         mode = str(resource_mode or "vod").strip().lower() or "vod"
-        backend = self._resource_capability_identity()
+        backend = str(backend if backend is not None else self._resource_capability_identity())
         if not target or not resource_id or not backend:
             return ""
         raw = "%s|%s|%s|%s" % (backend, mode, resource_id, target)
@@ -9134,7 +9205,10 @@ class Spider(BaseSpider):
         expired = [
             key for key, value in self._route_probe_cache.items()
             if not isinstance(value, dict)
-            or now - float(value.get("checked_at") or 0) > self.route_probe_ttl
+            or now - float(value.get("checked_at") or 0) > (
+                min(self.route_probe_ttl, self.ROUTE_PROBE_NEGATIVE_TTL)
+                if value.get("reachable") is False else self.route_probe_ttl
+            )
         ]
         for key in expired:
             self._route_probe_cache.pop(key, None)
@@ -9259,13 +9333,22 @@ class Spider(BaseSpider):
         with self._cache_lock:
             return dict(self._route_quality_history.get(key) or {})
 
-    def _record_route_quality(self, play_id, success, startup_ms=0, signals=None):
+    def _record_route_quality(self, play_id, success, startup_ms=0, signals=None,
+                              expected_generation=None, expected_backend=None):
         key = self._route_quality_key(play_id)
         if not key:
             return
         self._load_route_quality_history()
         signals = signals if isinstance(signals, dict) else {}
         with self._cache_lock:
+            if (
+                    expected_generation is not None
+                    and expected_generation != self._cache_generation):
+                return
+            if (
+                    expected_backend is not None
+                    and expected_backend != self._resource_capability_identity()):
+                return
             record = dict(self._route_quality_history.get(key) or {})
             successes = self._positive_int(record.get("successes"), 0)
             failures = self._positive_int(record.get("failures"), 0)
@@ -9622,19 +9705,38 @@ class Spider(BaseSpider):
         headers.setdefault("Accept", "*/*")
         headers["Range"] = "bytes=0-%d" % (self.ROUTE_PROBE_MAX_BYTES - 1)
         current = media_url
+        crossed_origin = False
+
+        def redirected_output():
+            if not crossed_origin:
+                return None
+            playback_output = dict(clean_output)
+            playback_output["url"] = current
+            playback_output["header"] = playback_headers
+            playback_output = self._sanitize_route_output(playback_output)
+            if not isinstance(playback_output, dict):
+                return None
+            return {
+                "checked_at": time.time(),
+                "reachable": None,
+                "fingerprint": "",
+                "output": playback_output,
+                "cross_origin": True,
+            }
+
         absolute_deadline = deadline if deadline is not None else time.monotonic() + 8
         for redirect_count in range(5):
             resolved = self._resolved_media_target(current, deadline=absolute_deadline)
             if resolved is None:
-                return None
+                return redirected_output()
             parsed, addresses = resolved
             if absolute_deadline - time.monotonic() <= 0:
-                return None
+                return redirected_output()
             response = None
             for index, address in enumerate(addresses):
                 remaining = absolute_deadline - time.monotonic()
                 if remaining <= 0:
-                    return None
+                    return redirected_output()
                 attempts_left = len(addresses) - index
                 attempt_deadline = min(
                     absolute_deadline,
@@ -9646,34 +9748,35 @@ class Spider(BaseSpider):
                 if response is not None:
                     break
             if response is None:
-                return None
+                return redirected_output()
             status = int(response.get("status") or 0)
             response_headers = response.get("headers") or {}
             if status in (301, 302, 303, 307, 308):
                 if redirect_count >= 4:
-                    return None
+                    return redirected_output()
                 location = str(response_headers.get("Location") or response_headers.get("location") or "").strip()
                 if not location:
-                    return None
+                    return redirected_output()
                 next_url = urljoin(current, location)
                 current_origin = self._media_origin(current)
                 next_origin = self._media_origin(next_url)
                 if current_origin is None or next_origin is None:
-                    return None
+                    return redirected_output()
                 if current_origin != next_origin:
+                    crossed_origin = True
                     for sensitive_header in ("Cookie", "Origin", "Referer"):
                         headers.pop(sensitive_header, None)
                         playback_headers.pop(sensitive_header, None)
                 current = next_url
                 continue
             if status not in (200, 206):
-                return None
+                return redirected_output()
             chunk = bytes(response.get("body") or b"")[:self.ROUTE_PROBE_MAX_BYTES]
             if not chunk:
-                return None
+                return redirected_output()
             content_type = str(response_headers.get("Content-Type") or response_headers.get("content-type") or "").lower()
             if "text/html" in content_type and b"<html" in chunk[:512].lower():
-                return None
+                return redirected_output()
             content_range = str(response_headers.get("Content-Range") or response_headers.get("content-range") or "")
             total_match = re.search(r"/(\d+)\s*$", content_range)
             total = int(total_match.group(1)) if total_match else 0
@@ -9705,20 +9808,34 @@ class Spider(BaseSpider):
             }
         return None
 
-    def _cache_route_probe(self, play_id, probe, resource_id="", resource_mode="vod"):
+    def _cache_route_probe(self, play_id, probe, resource_id="", resource_mode="vod",
+                           expected_generation=None, expected_backend=None):
         key = self._route_probe_key(play_id, resource_id, resource_mode)
         if not key or not isinstance(probe, dict):
             return
         cached_probe = dict(probe)
-        cached_output = self._sanitize_route_output(cached_probe.get("output"))
-        if not isinstance(cached_output, dict) or not Filter._first_http_url(cached_output.get("url")):
-            return
-        cached_probe["output"] = cached_output
-        with self._cache_lock:
-            self._route_probe_cache[key] = cached_probe
-            self._prune_route_probe_cache_locked()
+        if cached_probe.get("reachable") is True or "output" in cached_probe:
+            cached_output = self._sanitize_route_output(cached_probe.get("output"))
+            if not isinstance(cached_output, dict) or not Filter._first_http_url(cached_output.get("url")):
+                return
+            cached_probe["output"] = cached_output
+        else:
+            cached_probe.pop("output", None)
+        with self._history_context_lock:
+            with self._cache_lock:
+                if (
+                        expected_generation is not None
+                        and expected_generation != self._cache_generation):
+                    return
+                if (
+                        expected_backend is not None
+                        and expected_backend != self._resource_capability_identity()):
+                    return
+                self._route_probe_cache[key] = cached_probe
+                self._prune_route_probe_cache_locked()
 
-    def _remember_successful_follow_route(self, parsed, candidate, quality_id, probe):
+    def _remember_successful_follow_route(self, parsed, candidate, quality_id, probe,
+                                          expected_generation=None, expected_backend=None):
         if not isinstance(parsed, dict) or not isinstance(candidate, dict):
             return
         season = self._positive_int(parsed.get("season"), 0)
@@ -9742,8 +9859,7 @@ class Spider(BaseSpider):
             resource_mode = ""
         if (
                 resource_id.startswith("filter:")
-                or resource_id and not self._resource_id_valid(resource_id, resource_mode)
-                or resource_id and self._contains_url_reference(self._unquote_limited(resource_id))
+                or resource_id and not self._resource_id_persistable(resource_id, resource_mode)
         ):
             resource_id = ""
         if not play_id and not resource_id:
@@ -9757,7 +9873,7 @@ class Spider(BaseSpider):
         route_probe = probe if isinstance(probe, dict) else {}
         route = {
             "version": 1,
-            "backend": self._resource_capability_identity(),
+            "backend": expected_backend or self._resource_capability_identity(),
             "resourceId": resource_id,
             "resourceMode": resource_mode,
             "playId": play_id,
@@ -9774,47 +9890,56 @@ class Spider(BaseSpider):
         }
         if resource_provider:
             route["resourceProvider"] = resource_provider
-        with self._follow_enrich_lock:
-            items = self._follow_memory.get("items") if isinstance(self._follow_memory, dict) else {}
-            if not isinstance(items, dict):
-                return
-            item_key = str(tmdb_id) if tmdb_id and str(tmdb_id) in items else ""
-            if not item_key and source_id:
-                item_key = next((
-                    key for key, value in items.items()
-                    if isinstance(value, dict) and str(value.get("source_id") or "") == source_id
-                ), "")
-            if not item_key:
-                return
-            state_items = dict(items)
-            item = dict(state_items.get(item_key) or {})
-            item["last_play_route"] = route
-            if resource_id:
-                item["alist_vod_id"] = resource_id
-            if resource_provider:
-                item["alist_resource_provider"] = resource_provider
-            else:
-                item.pop("alist_resource_provider", None)
-            state_items[item_key] = item
-            try:
-                self._save_follow_state(state_items)
-            except Exception:
-                pass
+        with self._history_context_lock:
+            with self._cache_lock:
+                if (
+                        expected_generation is not None
+                        and expected_generation != self._cache_generation):
+                    return
+                if (
+                        expected_backend is not None
+                        and expected_backend != self._resource_capability_identity()):
+                    return
+            with self._follow_enrich_lock:
+                items = self._follow_memory.get("items") if isinstance(self._follow_memory, dict) else {}
+                if not isinstance(items, dict):
+                    return
+                item_key = str(tmdb_id) if tmdb_id and str(tmdb_id) in items else ""
+                if not item_key and source_id:
+                    item_key = next((
+                        key for key, value in items.items()
+                        if isinstance(value, dict) and str(value.get("source_id") or "") == source_id
+                    ), "")
+                if not item_key:
+                    return
+                state_items = dict(items)
+                item = dict(state_items.get(item_key) or {})
+                item["last_play_route"] = route
+                if resource_id:
+                    item["alist_vod_id"] = resource_id
+                if resource_provider:
+                    item["alist_resource_provider"] = resource_provider
+                else:
+                    item.pop("alist_resource_provider", None)
+                state_items[item_key] = item
+                try:
+                    self._save_follow_state(state_items)
+                except Exception:
+                    pass
 
-    def _probe_route_candidate(self, target):
+    def _probe_route_candidate(self, target, expected_generation=None, expected_backend=None):
         output = dict(self._atvp_play(
             target,
             timeout_seconds=max(6, min(15, self.timeout)),
             deadline=time.monotonic() + min(30, self.FOLLOWPLAY_PLAY_BUDGET),
+            expected_generation=expected_generation,
+            expected_backend=expected_backend,
         ) or {})
         result = self._probe_media_output(
             output, deadline=time.monotonic() + min(15, self.FOLLOWPLAY_PLAY_BUDGET),
         )
         if result is None:
             raise RuntimeError("媒体Range验证失败")
-        self._record_route_quality(
-            target, True, startup_ms=result.get("startup_ms"), signals=result,
-        )
         return result
 
     def _schedule_route_preheat(self, records, item):
@@ -9844,22 +9969,42 @@ class Spider(BaseSpider):
                 targets.append(identity)
             if len(targets) >= self.FOLLOW_ROUTE_LIMIT:
                 break
-        generation = self._cache_generation
         for target, resource_id, resource_mode in targets:
-            probe_key = self._route_probe_key(target, resource_id, resource_mode)
-            if not probe_key or self._route_probe_snapshot(target, resource_id, resource_mode) is not None:
-                continue
-            with self._cache_lock:
-                if probe_key in self._route_probe_jobs:
-                    continue
-                self._route_probe_jobs.add(probe_key)
+            with self._history_context_lock:
+                with self._cache_lock:
+                    generation = self._cache_generation
+                    backend = self._resource_capability_identity()
+                    probe_key = self._route_probe_key(
+                        target, resource_id, resource_mode, backend=backend,
+                    )
+                    self._prune_route_probe_cache_locked()
+                    if (
+                            not probe_key
+                            or probe_key in self._route_probe_cache
+                            or probe_key in self._route_probe_jobs):
+                        continue
+                    job_owner = object()
+                    self._route_probe_jobs[probe_key] = job_owner
 
             def worker(route=target, route_resource_id=resource_id, route_mode=resource_mode,
-                       route_key=probe_key, expected_generation=generation):
+                       route_key=probe_key, expected_generation=generation,
+                       expected_backend=backend, expected_owner=job_owner):
+                with self._history_context_lock:
+                    with self._cache_lock:
+                        active = (
+                            self._route_probe_jobs.get(route_key) is expected_owner
+                            and expected_generation == self._cache_generation
+                            and expected_backend == self._resource_capability_identity()
+                        )
+                if not active:
+                    return
                 try:
-                    result = self._probe_route_candidate(route)
+                    result = self._probe_route_candidate(
+                        route,
+                        expected_generation=expected_generation,
+                        expected_backend=expected_backend,
+                    )
                 except Exception as exc:
-                    self._record_route_quality(route, False)
                     result = {
                         "checked_at": time.time(),
                         "reachable": False,
@@ -9867,9 +10012,26 @@ class Spider(BaseSpider):
                         "error": self._short_error(exc),
                     }
                 with self._cache_lock:
-                    self._route_probe_jobs.discard(route_key)
-                    if expected_generation == self._cache_generation:
-                        self._cache_route_probe(route, result, route_resource_id, route_mode)
+                    current = self._route_probe_jobs.get(route_key)
+                    active = (
+                        current is expected_owner
+                        and expected_generation == self._cache_generation
+                        and expected_backend == self._resource_capability_identity()
+                    )
+                    if current is expected_owner:
+                        self._route_probe_jobs.pop(route_key, None)
+                if active:
+                    self._record_route_quality(
+                        route, result.get("reachable") is True,
+                        startup_ms=result.get("startup_ms"), signals=result,
+                        expected_generation=expected_generation,
+                        expected_backend=expected_backend,
+                    )
+                    self._cache_route_probe(
+                        route, result, route_resource_id, route_mode,
+                        expected_generation=expected_generation,
+                        expected_backend=expected_backend,
+                    )
 
             thread = threading.Thread(target=worker)
             thread.daemon = True
@@ -9877,7 +10039,8 @@ class Spider(BaseSpider):
                 thread.start()
             except Exception:
                 with self._cache_lock:
-                    self._route_probe_jobs.discard(probe_key)
+                    if self._route_probe_jobs.get(probe_key) is job_owner:
+                        self._route_probe_jobs.pop(probe_key, None)
 
     def _prepare_player_candidates(self, candidates):
         prepared = []

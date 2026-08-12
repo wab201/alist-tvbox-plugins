@@ -46,7 +46,7 @@ class FollowOperationV51Test(unittest.TestCase):
         expected = {
             "name": "豆瓣TMDB追更助手（AList-TVBox专用）",
             "id": "douban_tmdb_follow_single",
-            "version": "56",
+            "version": "57",
         }
         for field, value in expected.items():
             match = re.search(r"(?m)^\s*//@%s:(.+?)\s*$" % field, source)
@@ -2095,6 +2095,51 @@ class FollowOperationV51Test(unittest.TestCase):
         self.assertNotIn("Cookie", result["output"]["header"])
         self.assertNotIn("Origin", result["output"]["header"])
         self.assertNotIn("Referer", result["output"]["header"])
+
+    def test_player_uses_sanitized_cross_origin_output_when_redirect_target_fails(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集"}
+        play_id = self.spider._build_followplay(
+            "1@episode-1", item, "resource-101", 1, 1, "S01E01",
+        )
+        original = {
+            "parse": 0,
+            "url": "https://cdn.example/video.mp4",
+            "header": {
+                "Cookie": "required-play-cookie",
+                "Origin": "https://pan.example",
+                "Referer": "https://pan.example/",
+                "User-Agent": "test-agent",
+            },
+        }
+        self.spider._atvp_play = Mock(return_value=original)
+        resolved = {
+            "https://cdn.example/video.mp4": (
+                MODULE.urlparse("https://cdn.example/video.mp4"), ("203.0.113.10",),
+            ),
+            "https://other.example/video.mp4": (
+                MODULE.urlparse("https://other.example/video.mp4"), ("203.0.113.11",),
+            ),
+        }
+        self.spider._resolved_media_target = Mock(side_effect=lambda value, deadline=None: resolved[value])
+
+        def request(parsed, _address, _headers, _deadline):
+            if parsed.hostname == "cdn.example":
+                return {
+                    "status": 302,
+                    "headers": {"Location": "https://other.example/video.mp4"},
+                    "body": b"",
+                }
+            return {"status": 403, "headers": {}, "body": b""}
+
+        self.spider._pinned_media_request = Mock(side_effect=request)
+        self.spider._register_playback_sync_window = Mock(return_value=True)
+
+        result = self.spider.playerContent("线路", play_id, [])
+
+        self.assertEqual(result["url"], "https://other.example/video.mp4")
+        self.assertEqual(result["header"], {"User-Agent": "test-agent"})
 
     def test_route_output_rejects_conflicting_case_insensitive_headers(self):
         output = self.spider._sanitize_route_output({
@@ -4741,6 +4786,51 @@ class FollowOperationV51Test(unittest.TestCase):
         self.assertEqual(len(checked), 1)
         self.assertTrue(check_response.closed)
 
+    def test_atvp_play_keeps_backend_snapshot_for_parse_and_relative_output(self):
+        class FakeResponse:
+            def __init__(self, payload):
+                self.status_code = 200
+                self.headers = {}
+                self._payload = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+            def iter_content(self, chunk_size=None):
+                return iter([self._payload])
+
+            def close(self):
+                return None
+
+        old_session = Mock()
+        old_session.post.return_value = FakeResponse({
+            "list": [{"vod_play_url": "S01E01$1@old-route"}],
+        })
+        old_session.get.return_value = FakeResponse({
+            "parse": 0, "url": "/p/old-token/1@old-route", "header": {},
+        })
+        self.spider.atvp_api = "https://old-atvp.example"
+        self.spider.atvp_token = "old-token"
+        self.spider._atvp_session = old_session
+        self.spider._ensure_atvp_connection = Mock(return_value=True)
+        backend = self.spider._resource_capability_identity()
+
+        def switch_backend(*_args, **_kwargs):
+            self.spider.atvp_api = "https://new-atvp.example"
+            self.spider.atvp_token = "new-token"
+            self.spider._atvp_session = Mock()
+            return old_session.post.return_value
+
+        old_session.post.side_effect = switch_backend
+
+        result = self.spider._atvp_play(
+            "https://pan.quark.cn/s/demo",
+            deadline=time.monotonic() + 5,
+            expected_generation=self.spider._cache_generation,
+            expected_backend=backend,
+        )
+
+        self.assertEqual(result["url"], "https://old-atvp.example/p/old-token/1@old-route")
+        self.assertEqual(old_session.post.call_args.args[0], "https://old-atvp.example/parse/old-token")
+        self.assertEqual(old_session.get.call_args.args[0], "https://old-atvp.example/play/old-token")
+
     def test_route_probe_cache_requires_resource_identity(self):
         self.spider.atvp_api = "https://atvp.example"
         self.spider.atvp_token = "token"
@@ -4796,6 +4886,93 @@ class FollowOperationV51Test(unittest.TestCase):
         self.assertNotIn(old_key, self.spider._route_probe_cache)
         self.assertLessEqual(len(self.spider._route_probe_cache), self.spider.ROUTE_PROBE_CACHE_LIMIT)
 
+    def test_route_probe_cache_keeps_negative_snapshots_without_output(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        probe = {
+            "checked_at": time.time(),
+            "reachable": False,
+            "fingerprint": "",
+            "error": "HTTP 403",
+        }
+
+        self.spider._cache_route_probe("1@failed", probe, "resource-a", "vod")
+
+        cached = self.spider._route_probe_snapshot("1@failed", "resource-a", "vod")
+        self.assertIsNotNone(cached)
+        self.assertFalse(cached["reachable"])
+        self.assertNotIn("output", cached)
+
+    def test_negative_route_probe_expires_before_positive_probe(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider.route_probe_ttl = 300
+        age = self.spider.ROUTE_PROBE_NEGATIVE_TTL + 1
+        negative_key = self.spider._route_probe_key("1@failed", "resource-a", "vod")
+        positive_key = self.spider._route_probe_key("1@ok", "resource-b", "vod")
+        self.spider._route_probe_cache[negative_key] = {
+            "checked_at": time.time() - age, "reachable": False,
+        }
+        self.spider._route_probe_cache[positive_key] = {
+            "checked_at": time.time() - age,
+            "reachable": True,
+            "output": {"url": "https://cdn.example/video.mp4", "header": {}},
+        }
+
+        self.assertIsNone(self.spider._route_probe_snapshot("1@failed", "resource-a", "vod"))
+        self.assertIsNotNone(self.spider._route_probe_snapshot("1@ok", "resource-b", "vod"))
+
+    def test_old_preheat_worker_cannot_remove_new_generation_job_owner(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider._atvp_session = Mock()
+        self.spider._probe_route_candidate = Mock(return_value={
+            "checked_at": time.time(),
+            "reachable": True,
+            "fingerprint": "range-v1:test",
+            "output": {"parse": 0, "url": "https://cdn.example/video.mp4", "header": {}},
+        })
+        self.spider._record_route_quality = Mock()
+        threads = []
+
+        class DeferredThread(object):
+            daemon = False
+
+            def __init__(self, target):
+                self.target = target
+                threads.append(self)
+
+            def start(self):
+                return None
+
+        records = [{
+            "episode_key": (1, 1),
+            "resource_id": "resource-a",
+            "payload": {"url": "1@episode-1", "resourceMode": "vod"},
+        }]
+        with patch.object(MODULE.threading, "Thread", DeferredThread):
+            self.spider._schedule_route_preheat(records, {"history_episode": "S01E01"})
+            probe_key = self.spider._route_probe_key("1@episode-1", "resource-a", "vod")
+            old_owner = self.spider._route_probe_jobs[probe_key]
+            with self.spider._cache_lock:
+                self.spider._route_probe_jobs.clear()
+                self.spider._cache_generation += 1
+            self.spider._schedule_route_preheat(records, {"history_episode": "S01E01"})
+            new_owner = self.spider._route_probe_jobs[probe_key]
+
+        self.assertIsNot(old_owner, new_owner)
+        threads[0].target()
+        self.spider._probe_route_candidate.assert_not_called()
+        self.assertIs(self.spider._route_probe_jobs[probe_key], new_owner)
+        self.assertIsNone(self.spider._route_probe_snapshot("1@episode-1", "resource-a", "vod"))
+
+        threads[1].target()
+        self.spider._probe_route_candidate.assert_called_once()
+        self.assertNotIn(probe_key, self.spider._route_probe_jobs)
+        self.assertTrue(
+            self.spider._route_probe_snapshot("1@episode-1", "resource-a", "vod")["reachable"],
+        )
+
     def test_successful_route_binding_keeps_concurrent_follow_items(self):
         self.spider._follow_memory = {"version": 2, "items": {
             "101": {"tmdb_id": 101, "title": "甲剧"},
@@ -4833,6 +5010,38 @@ class FollowOperationV51Test(unittest.TestCase):
             self.spider._follow_memory["items"]["202"]["last_play_route"]["resourceId"],
             "resource-b",
         )
+
+    def test_stale_player_does_not_persist_route_after_backend_switch(self):
+        self.spider.atvp_api = "https://old-atvp.example"
+        self.spider.atvp_token = "old-token"
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {"tmdb_id": 101, "title": "测试剧集"},
+        }}
+        item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集"}
+        play_id = self.spider._build_followplay(
+            "1@episode-1", item, "old-resource", 1, 1, "S01E01",
+        )
+        output = {"parse": 0, "url": "https://cdn.example/video.mp4", "header": {}}
+
+        def switch_backend(*_args, **_kwargs):
+            with self.spider._cache_lock:
+                self.spider.atvp_api = "https://new-atvp.example"
+                self.spider.atvp_token = "new-token"
+                self.spider._cache_generation += 1
+            return output
+
+        self.spider._atvp_play = Mock(side_effect=switch_backend)
+        self.spider._probe_media_output = Mock(return_value={
+            "checked_at": time.time(), "reachable": True, "output": output,
+        })
+        self.spider._register_playback_sync_window = Mock(return_value=True)
+
+        result = self.spider.playerContent("线路", play_id, [])
+
+        self.assertEqual(result["url"], output["url"])
+        self.assertNotIn("last_play_route", self.spider._follow_memory["items"]["101"])
+        self.assertEqual(self.spider._route_probe_cache, {})
+        self.spider._register_playback_sync_window.assert_not_called()
 
     def test_route_status_is_shown_after_director_without_replacing_summary(self):
         result = self.spider._resource_error_vod({
@@ -4902,6 +5111,32 @@ class FollowOperationV51Test(unittest.TestCase):
 
         self.assertIn("101", self.spider._follow_memory["items"])
         self.spider._load_follow_state_from_loopback.assert_not_called()
+
+    def test_follow_save_sanitizes_signed_resource_urls_before_persisting(self):
+        self.spider._follow_state_loaded = True
+        captured = {}
+
+        def persist(state):
+            captured.update(state)
+            return True
+
+        self.spider._persist_follow_state = Mock(side_effect=persist)
+
+        self.assertTrue(self.spider._save_follow_state({
+            "101": {
+                "tmdb_id": 101,
+                "title": "测试剧集",
+                "alist_vod_id": "https://cdn.example/video.m3u8?signature=secret",
+                "alist_resource_mode": "pansou",
+                "alist_resource_provider": "quark",
+            },
+        }))
+
+        stored = captured["items"]["101"]
+        self.assertNotIn("alist_vod_id", stored)
+        self.assertNotIn("alist_resource_mode", stored)
+        self.assertNotIn("alist_resource_provider", stored)
+        self.assertEqual(self.spider._follow_memory["items"]["101"], stored)
 
     def test_concurrent_forced_follow_loads_are_serialized(self):
         active = {"count": 0, "max": 0}
