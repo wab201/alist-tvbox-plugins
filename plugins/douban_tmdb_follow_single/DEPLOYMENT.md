@@ -9,10 +9,10 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/spiders_v2.j
 插件源码地址：
 
 ```text
-https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMDB追更单入口_v60.py
+https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMDB追更单入口_v61.py
 ```
 
-本插件用于豆瓣/TMDB 浏览、剧集追更、AList-TVBox 资源搜索、线路评分和 History 续播。当前发布版本为 v60 公开测试版，稳定回退基线为 v57；最低兼容基线为 AList-TVBox 1.42.0，当前已在 1.44.0 验证。插件由 AList-TVBox 生成订阅后交给 FongMi/TvBox 使用。同一源码空 EXT 直载时保留 FongMi 元数据分类、搜索、详情和直链播放合同，但追更、History 与网盘资源功能必须使用 AList-TVBox 生成的订阅。
+本插件用于豆瓣/TMDB 浏览、剧集追更、AList-TVBox 资源搜索、线路评分和 History 续播。当前发布版本为 v61 公开测试版，稳定回退基线为 v57，v60 保留为上一版回退点；最低兼容基线为 AList-TVBox 1.42.0，当前已在 1.44.0 验证。插件由 AList-TVBox 生成订阅后交给 FongMi/TvBox 使用。同一源码空 EXT 直载时保留 FongMi 元数据分类、搜索、详情和直链播放合同，但追更、History 与网盘资源功能必须使用 AList-TVBox 生成的订阅。
 
 完整功能不要把 `.py` 文件直接添加为普通 FongMi 站点，也不要手工填写外层 `api`、`token`、`secret`、`loader`、`source` 或 `raw`。
 
@@ -22,6 +22,8 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMD
 
 1. 可从 AList-TVBox 访问的本仓库 `spiders_v2.json` 地址。
 2. TMDB API Read Access Token，用于 TMDB 数据和完整追更功能。
+
+广域网双向 History 默认复用当前订阅地址，不需要额外配置协议转换。只要公网 HTTPS 反代同时转发 `/api/accounts/login`、`/history/{token}` 和 `Authorization` 请求头，插件即可直接登录、读取和写入。只有订阅入口不能承载 History、且另有客户端可访问的 History 入口时，才配置 `history_api`。广域网登录不要使用开放公网 HTTP；服务端仅有内网 HTTP 时，应在服务端反代层提供 HTTPS，或通过受保护的 VPN/内网穿透访问。
 
 TMDB Token 获取方法：
 
@@ -83,6 +85,7 @@ py/
 | --- | --- | --- |
 | `atvp_plugin_mode` | 必填 | 固定为 `alist-tvbox-raw`，不要修改。 |
 | `tmdb_access_token` | 完整功能必填 | 从 TMDB 的“设置 → API → API Read Access Token”复制。只浏览豆瓣公开内容时可留空，但 TMDB 和相关追更功能不可用。 |
+| `history_api` | 特殊部署可选 | 默认留空并复用订阅地址。仅当订阅入口与 History 入口确实分离时，填写客户端可访问的 HTTPS 地址。 |
 | `history_username` | 云写入可选 | 使用能登录当前 AList-TVBox 的 `USER` 或 `ADMIN` 用户名。后台有 **用户** 菜单时，也可在其中添加用户。 |
 | `history_password` | 云写入可选 | 与上面用户名对应的登录密码。用户名和密码必须同时填写。 |
 | `resource_search_modes` | 推荐保留 | 默认示例启用 `vod1`、`vod`、`pansou`、`telegram`；插件会自动隐藏后端缺少的模式。 |
@@ -193,6 +196,8 @@ py/
 
 确认 `history_username` 和 `history_password` 同时填写，且该账号能登录当前 AList-TVBox。`USER` 和 `ADMIN` 都允许。修改后保存配置并刷新插件。
 
+如果订阅能加载但 History 通讯检测失败，确认公网 HTTPS 反代同时开放 `/api/accounts/login` 和 `/history/{token}`，并保留 `Authorization` 请求头。只有 History 使用另一入口时才填写 `history_api`，不要因为容器内网监听 HTTP 就把客户端地址改成不可达的内网 HTTP。
+
 ### 过滤器没有生效
 
 确认拦截点为“详情、播放”，作用范围覆盖目标插件，过滤器已启用且状态正常。更新源码后先重新导入主插件仓库，再单独刷新过滤器。
@@ -203,11 +208,12 @@ py/
 
 ### 播放提示 bad http status
 
-先确认主插件和同源过滤器都已刷新到 v60。v55 会丢弃各网盘直链所需的播放头，夸克 Cookie 缺失时会表现为详情有线路但候选返回 `bad http status`；v56 起按白名单保留 AList-TVBox 返回的标准播放头，v57 进一步阻止跨域失败回退敏感头和签名媒体直链进入长期状态，v60 保留这些修复并重构后台任务与缓存生命周期。
+先确认主插件和同源过滤器都已刷新到 v61。v55 会丢弃各网盘直链所需的播放头，夸克 Cookie 缺失时会表现为详情有线路但候选返回 `bad http status`；v56 起按白名单保留 AList-TVBox 返回的标准播放头，v57 进一步阻止跨域失败回退敏感头和签名媒体直链进入长期状态，v60 重构后台任务与缓存生命周期，v61 修复首次详情 History/线路和追更确认反馈。
 
 ## 文件说明
 
-- `../../py/豆瓣TMDB追更单入口_v60.py`：当前 V60 测试版明文源码。
+- `../../py/豆瓣TMDB追更单入口_v61.py`：当前 V61 测试版明文源码。
+- `../../py/豆瓣TMDB追更单入口_v60.py`：上一版不可变回退源码。
 - `../../py/豆瓣TMDB追更单入口.py`：保留的 v57 回退源码。
 - `../../spiders_v2.json`：插件仓库索引。
 - `extend.example.json`：带中文说明、可直接粘贴的插件 EXT。

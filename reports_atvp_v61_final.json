@@ -1,0 +1,90 @@
+{
+  "ok": true,
+  "script": "D:\\自写爬虫\\alist-tvbox-plugins\\py\\豆瓣TMDB追更单入口_v61.py",
+  "scenario": "direct-play",
+  "runtime": "upstream-1.25-raw",
+  "checks": [
+    {
+      "name": "Filter class has no shadowed duplicate methods",
+      "ok": true
+    },
+    {
+      "name": "Filter method exists: init",
+      "ok": true
+    },
+    {
+      "name": "Filter.init accepts extend",
+      "ok": true
+    },
+    {
+      "name": "Filter exposes at least one supported interception stage",
+      "ok": true
+    },
+    {
+      "name": "FILTER_CONFIG_SCHEMA is a dict",
+      "ok": true
+    },
+    {
+      "name": "FILTER_CONFIG_SCHEMA fields is a list",
+      "ok": true
+    },
+    {
+      "name": "Spider class has no shadowed duplicate methods",
+      "ok": true
+    },
+    {
+      "name": "method exists: init",
+      "ok": true
+    },
+    {
+      "name": "method exists: homeContent",
+      "ok": true
+    },
+    {
+      "name": "method exists: categoryContent",
+      "ok": true
+    },
+    {
+      "name": "method exists: searchContent",
+      "ok": true
+    },
+    {
+      "name": "method exists: detailContent",
+      "ok": true
+    },
+    {
+      "name": "method exists: playerContent",
+      "ok": true
+    },
+    {
+      "name": "init accepts upstream-1.25-raw inner ext",
+      "ok": true
+    },
+    {
+      "name": "upstream-1.25-raw direct-play plugin disables backend_parse",
+      "ok": true
+    },
+    {
+      "name": "direct-play plugin disables backend/category wrapping",
+      "ok": true
+    },
+    {
+      "name": "script-owned client proxy calls original parse route",
+      "ok": true
+    },
+    {
+      "name": "script-owned client proxy calls original play route",
+      "ok": true
+    },
+    {
+      "name": "script-owned play request selects client-proxy",
+      "ok": true
+    },
+    {
+      "name": "AList detail IDs bypass parse while external share targets use parse",
+      "ok": true
+    }
+  ],
+  "failures": [],
+  "details": {}
+}

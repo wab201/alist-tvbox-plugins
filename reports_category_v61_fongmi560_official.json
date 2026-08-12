@@ -1,0 +1,67 @@
+{
+  "ok": true,
+  "fongmi_root": "D:\\自写爬虫\\work\\TV-fongmi-official-head-20260812",
+  "atvp": "D:\\自写爬虫\\work\\v61_fongmi561_live_20260812\\Atvp_1.44.0.py",
+  "checks": [
+    {
+      "name": "source exists: app/src/leanback/java/com/fongmi/android/tv/ui/fragment/TypeFragment.java",
+      "ok": true,
+      "evidence": "D:\\自写爬虫\\work\\TV-fongmi-official-head-20260812\\app\\src\\leanback\\java\\com\\fongmi\\android\\tv\\ui\\fragment\\TypeFragment.java"
+    },
+    {
+      "name": "source exists: app/src/main/java/com/fongmi/android/tv/api/SiteApi.java",
+      "ok": true,
+      "evidence": "D:\\自写爬虫\\work\\TV-fongmi-official-head-20260812\\app\\src\\main\\java\\com\\fongmi\\android\\tv\\api\\SiteApi.java"
+    },
+    {
+      "name": "source exists: chaquo/src/main/java/com/fongmi/chaquo/Spider.java",
+      "ok": true,
+      "evidence": "D:\\自写爬虫\\work\\TV-fongmi-official-head-20260812\\chaquo\\src\\main\\java\\com\\fongmi\\chaquo\\Spider.java"
+    },
+    {
+      "name": "source exists: catvod/src/main/java/com/github/catvod/crawler/Spider.java",
+      "ok": true,
+      "evidence": "D:\\自写爬虫\\work\\TV-fongmi-official-head-20260812\\catvod\\src\\main\\java\\com\\github\\catvod\\crawler\\Spider.java"
+    },
+    {
+      "name": "Atvp.py exists",
+      "ok": true,
+      "evidence": "D:\\自写爬虫\\work\\v61_fongmi561_live_20260812\\Atvp_1.44.0.py"
+    },
+    {
+      "name": "TypeFragment forwards key/tid/page/filter/extend",
+      "ok": true,
+      "evidence": "TypeFragment.getVideo"
+    },
+    {
+      "name": "SiteApi forwards category arguments to spider",
+      "ok": true,
+      "evidence": "SiteApi.categoryContent"
+    },
+    {
+      "name": "Java spider contract uses HashMap extend",
+      "ok": true,
+      "evidence": "catvod crawler Spider"
+    },
+    {
+      "name": "Chaquopy serializes extend to JSON for Python",
+      "ok": true,
+      "evidence": "chaquo Spider.categoryContent"
+    },
+    {
+      "name": "Atvp category mode reads inner backend_parse",
+      "ok": true,
+      "evidence": "Atvp._category_mode_enabled"
+    },
+    {
+      "name": "Atvp direct mode forwards category arguments unchanged",
+      "ok": true,
+      "evidence": "Atvp.categoryContent"
+    },
+    {
+      "name": "Atvp wrapped mode normalizes inner category result",
+      "ok": true,
+      "evidence": "Atvp.categoryContent (keyword bookkeeping may occur before normalization)"
+    }
+  ]
+}

@@ -24,7 +24,7 @@ sys.modules.setdefault("base", base_module)
 sys.modules.setdefault("base.spider", spider_module)
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSIONED_SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口_v60.py"
+VERSIONED_SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口_v61.py"
 SOURCE = VERSIONED_SOURCE if VERSIONED_SOURCE.exists() else ROOT / "py" / "豆瓣TMDB追更单入口.py"
 SPEC = importlib.util.spec_from_file_location("douban_tmdb_follow_v51", str(SOURCE))
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -418,12 +418,21 @@ class FollowOperationV51Test(unittest.TestCase):
         self.assertEqual(self.spider._atvp_fetch_history(), [{"key": "one"}])
         self.assertIsNone(self.spider._atvp_history_push([{"key": "one"}]))
 
+    def test_history_coordinator_delegates_background_sync(self):
+        expected = {"merged": [], "errors": []}
+        self.spider._sync_history_once = Mock(return_value=expected)
+
+        result = self.spider._history_coordinator.sync_once(expected_generation=7)
+
+        self.assertIs(result, expected)
+        self.spider._sync_history_once.assert_called_once_with(expected_generation=7)
+
     def test_plugin_metadata_is_parseable_by_alist_tvbox(self):
         source = SOURCE.read_text(encoding="utf-8")
         expected = {
             "name": "豆瓣TMDB追更助手（AList-TVBox专用）",
             "id": "douban_tmdb_follow_single",
-            "version": "60",
+            "version": "61",
         }
         for field, value in expected.items():
             match = re.search(r"(?m)^\s*//@%s:(.+?)\s*$" % field, source)
@@ -432,7 +441,7 @@ class FollowOperationV51Test(unittest.TestCase):
         repository = json.loads((ROOT / "spiders_v2.json").read_text(encoding="utf-8"))
         entry = next(row for row in repository if row.get("id") == expected["id"])
         self.assertEqual(str(entry.get("version")), expected["version"])
-        expected_file = "py/豆瓣TMDB追更单入口_v60.py" if VERSIONED_SOURCE.exists() else "py/豆瓣TMDB追更单入口.py"
+        expected_file = "py/豆瓣TMDB追更单入口_v61.py" if VERSIONED_SOURCE.exists() else "py/豆瓣TMDB追更单入口.py"
         self.assertEqual(entry.get("file"), expected_file)
         self.assertIs(entry.get("valid"), True)
 
@@ -683,6 +692,58 @@ class FollowOperationV51Test(unittest.TestCase):
         )
         self.assertEqual(self.spider._history_selected_origin, "http://192.168.1.10:4568")
 
+    def test_history_get_authenticates_before_cold_read_when_credentials_exist(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "http://192.168.1.10:4568"
+        self.spider.atvp_token = "token"
+        self.spider.history_username = "user"
+        self.spider.history_password = "pass"
+        self.spider._atvp_session = Mock()
+        self.spider._atvp_session.headers = {}
+        history = Mock(status_code=200)
+
+        def login(force=False):
+            self.spider._history_auth_token = "history-token"
+            self.spider._history_selected_origin = "http://192.168.1.10:4568"
+            self.spider._atvp_session.headers["Authorization"] = "history-token"
+            return True
+
+        self.spider._atvp_history_login = Mock(side_effect=login)
+        self.spider._atvp_session.get.return_value = history
+
+        result = self.spider._atvp_history_request("GET", stream=True)
+
+        self.assertIs(result, history)
+        self.spider._atvp_history_login.assert_called_once_with(force=False)
+        self.assertEqual(
+            self.spider._atvp_session.get.call_args.args[0],
+            "http://192.168.1.10:4568/history/token",
+        )
+
+    def test_selected_history_origin_is_reused_before_stale_config_origin(self):
+        self.spider.atvp_api = "https://192.168.1.8:4568"
+        self.spider._history_selected_origin = "http://192.168.1.8:4568"
+        self.spider._history_primary_origin = "https://192.168.1.8:4568"
+
+        candidates = self.spider._history_origin_candidates()
+
+        self.assertEqual(candidates[0], "http://192.168.1.8:4568")
+        self.assertEqual(candidates[1], "https://192.168.1.8:4568")
+
+    def test_explicit_history_api_is_separate_from_https_subscription_api(self):
+        self.spider.init({
+            "atvp_plugin_mode": "alist-tvbox-raw",
+            "api": "https://tv.example.com",
+            "token": "sub-token",
+            "history_api": "http://history.example.com",
+        })
+
+        self.assertEqual(self.spider.atvp_api, "https://tv.example.com")
+        self.assertEqual(self.spider.history_api, "http://history.example.com")
+        candidates = self.spider._history_origin_candidates()
+        self.assertEqual(candidates[0], "http://history.example.com")
+        self.assertNotEqual(self.spider.atvp_api, self.spider.history_api)
+
     def test_history_public_https_never_downgrades_to_http(self):
         self.spider.atvp_api = "https://history.example:443"
 
@@ -780,10 +841,10 @@ class FollowOperationV51Test(unittest.TestCase):
             [
                 "https://192.168.1.10:4568/api/accounts/login",
                 "http://192.168.1.10:4568/api/accounts/login",
-                "https://192.168.1.10:4568/history/token",
+                "http://192.168.1.10:4568/history/token",
             ],
         )
-        self.assertEqual(self.spider._history_selected_origin, "https://192.168.1.10:4568")
+        self.assertEqual(self.spider._history_selected_origin, "http://192.168.1.10:4568")
         self.assertTrue(login.closed)
         self.assertTrue(self.spider._atvp_session.post.call_args_list[1].kwargs["stream"])
         self.assertTrue(self.spider._atvp_session.post.call_args_list[2].kwargs["stream"])
@@ -1174,6 +1235,189 @@ class FollowOperationV51Test(unittest.TestCase):
         self.assertEqual(self.spider._follow_action_state["last"]["state"], "done")
         self.assertIn("已加入追更", self.spider._follow_action_state["last"]["message"])
         self.assertGreaterEqual(self.spider._refresh_follow_categories.call_count, 2)
+
+    def test_already_followed_candidate_returns_terminal_feedback_immediately(self):
+        candidate = {
+            "title": "测试剧集", "match_title": "测试剧集",
+            "history_keys": ["site@@@vod@@@1"],
+        }
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {
+                "tmdb_id": 101, "title": "测试剧集",
+                "history_keys": ["site@@@vod@@@1"],
+            },
+        }}
+        self.spider._resolve_follow_candidate = Mock(
+            side_effect=AssertionError("已追更候选不应再次启动后台解析")
+        )
+
+        result = json.loads(self.spider._start_follow_candidate_add(
+            self.spider._encode_follow_candidate(candidate)
+        ))
+
+        self.assertIn("已在追更管理", result["msg"])
+        self.assertFalse(self.spider._follow_enrich_jobs)
+
+    def test_candidate_card_exposes_running_state_when_category_refreshes(self):
+        candidate = {"title": "测试剧集", "match_title": "测试剧集", "sources": ["播放记录"]}
+        self.spider._set_follow_action_status(
+            "running", "正在确认追更：测试剧集", "candidate", "测试剧集",
+        )
+
+        card = self.spider._follow_candidate_card(candidate)
+
+        self.assertIn("正在确认", card["vod_remarks"])
+
+    def test_candidate_history_clear_requires_confirmation_and_deletes_exact_keys(self):
+        candidate = {
+            "title": "不追更剧集", "match_title": "不追更剧集",
+            "sources": ["播放记录"],
+            "history_keys": ["site@@@vod@@@1", "site@@@vod@@@2"],
+        }
+        self.spider._native_history_delete_java = Mock(return_value=2)
+        self.spider._atvp_history_delete = Mock(return_value=True)
+        self.spider._ensure_atvp_connection = Mock(return_value=True)
+        self.spider._alist_tvbox_plugin = True
+        self.spider.history_username = "user"
+        self.spider.history_password = "pass"
+        self.spider._refresh_follow_categories = Mock(return_value=True)
+
+        requested = json.loads(self.spider._request_follow_candidate_clear(
+            self.spider._encode_follow_candidate(candidate)
+        ))
+        pending = dict(self.spider._follow_action_state["pending"])
+        completed = json.loads(self.spider._execute_follow_candidate_clear(pending["nonce"]))
+
+        self.assertIn("待确认清理播放记录", requested["msg"])
+        self.assertIn("已清理播放记录", completed["msg"])
+        self.spider._native_history_delete_java.assert_called_once_with(candidate["history_keys"])
+        self.assertEqual(
+            [call.args[0] for call in self.spider._atvp_history_delete.call_args_list],
+            candidate["history_keys"],
+        )
+
+    def test_candidate_clear_mode_keeps_favorites_but_targets_history_only(self):
+        candidate = {
+            "title": "收藏与记录剧集", "match_title": "收藏与记录剧集",
+            "sources": ["收藏", "播放记录"],
+            "keep_keys": ["keep@@@vod@@@1"],
+            "history_keys": ["history@@@vod@@@1"],
+        }
+        self.spider._native_follow_candidates = Mock(return_value=([candidate], []))
+
+        result = self.spider._category_follow_candidates(1, {"mode": "clear"})
+        card = result["list"][0]
+
+        self.assertTrue(card["action"].startswith(self.spider.FOLLOW_CANDIDATE_CLEAR_PREFIX))
+        self.assertIn("仅清理播放记录", card["vod_remarks"])
+        self.assertIn("收藏保留", card["vod_remarks"])
+
+    def test_candidate_clear_without_history_credentials_keeps_local_record(self):
+        candidate = {
+            "title": "不追更剧集", "match_title": "不追更剧集",
+            "sources": ["播放记录"], "history_keys": ["site@@@vod@@@1"],
+        }
+        self.spider._alist_tvbox_plugin = True
+        self.spider._ensure_atvp_connection = Mock(return_value=True)
+        self.spider._native_history_delete_java = Mock(return_value=1)
+        self.spider._refresh_follow_categories = Mock(return_value=True)
+
+        self.spider._request_follow_candidate_clear(
+            self.spider._encode_follow_candidate(candidate)
+        )
+        pending = dict(self.spider._follow_action_state["pending"])
+        result = json.loads(self.spider._execute_follow_candidate_clear(pending["nonce"]))
+
+        self.assertIn("未配置History写入账号", result["msg"])
+        self.spider._native_history_delete_java.assert_not_called()
+
+    def test_history_delete_reauthenticates_once_after_expired_session(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "http://192.168.1.10:4568"
+        self.spider.atvp_token = "token"
+        self.spider.history_username = "user"
+        self.spider.history_password = "pass"
+        self.spider._history_auth_token = "expired"
+        expired = Mock(status_code=401)
+        success = Mock(status_code=204)
+        self.spider._atvp_session = Mock()
+        self.spider._atvp_session.headers = {"Authorization": "expired"}
+        self.spider._atvp_session.delete.side_effect = [expired, success]
+        self.spider._atvp_history_login = Mock(return_value=True)
+
+        self.assertTrue(self.spider._atvp_history_delete("site@@@vod@@@1"))
+
+        self.spider._atvp_history_login.assert_called_once_with(force=True)
+        self.assertEqual(self.spider._atvp_session.delete.call_count, 2)
+
+    def test_history_delete_falls_back_to_authenticated_id_delete_after_server_error(self):
+        class JsonResponse(object):
+            def __init__(self, payload):
+                self.status_code = 200
+                self.headers = {}
+                self.payload = json.dumps(payload).encode("utf-8")
+
+            def iter_content(self, chunk_size=None):
+                return iter((self.payload,))
+
+            def close(self):
+                pass
+
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "https://history.example.com"
+        self.spider.atvp_token = "token"
+        self.spider.history_username = "user"
+        self.spider.history_password = "pass"
+        self.spider._history_auth_token = "history-token"
+        failed = Mock(status_code=500)
+        failed.close = Mock()
+        success = Mock(status_code=200)
+        success.close = Mock()
+        self.spider._atvp_session = Mock()
+        self.spider._atvp_session.headers = {"Authorization": "history-token"}
+        self.spider._atvp_session.delete.side_effect = [failed, success]
+        self.spider._atvp_session.get.return_value = JsonResponse({
+            "id": 37, "key": "site@@@vod@@@1",
+        })
+
+        self.assertTrue(self.spider._atvp_history_delete("site@@@vod@@@1"))
+
+        self.spider._atvp_session.get.assert_called_once()
+        self.assertEqual(
+            self.spider._atvp_session.delete.call_args_list[1].args[0],
+            "https://history.example.com/api/history/37",
+        )
+
+    def test_history_delete_fallback_rejects_mismatched_key(self):
+        class JsonResponse(object):
+            status_code = 200
+            headers = {}
+
+            def iter_content(self, chunk_size=None):
+                return iter((json.dumps({
+                    "id": 37, "key": "different@@@history@@@key",
+                }).encode("utf-8"),))
+
+            def close(self):
+                pass
+
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "https://history.example.com"
+        self.spider.atvp_token = "token"
+        self.spider.history_username = "user"
+        self.spider.history_password = "pass"
+        self.spider._history_auth_token = "history-token"
+        failed = Mock(status_code=500)
+        failed.close = Mock()
+        self.spider._atvp_session = Mock()
+        self.spider._atvp_session.headers = {"Authorization": "history-token"}
+        self.spider._atvp_session.delete.return_value = failed
+        self.spider._atvp_session.get.return_value = JsonResponse()
+
+        with self.assertRaises(RuntimeError):
+            self.spider._atvp_history_delete("site@@@vod@@@1")
+
+        self.assertEqual(self.spider._atvp_session.delete.call_count, 1)
 
     def test_candidate_confirmation_failure_keeps_live_failed_feedback(self):
         candidate = {
@@ -2513,6 +2757,8 @@ class FollowOperationV51Test(unittest.TestCase):
 
         self.spider._pinned_media_request = Mock(side_effect=request)
         self.spider._register_playback_sync_window = Mock(return_value=True)
+        original_invalidate = self.spider._invalidate_route_probe
+        self.spider._invalidate_route_probe = Mock(side_effect=original_invalidate)
 
         result = self.spider.playerContent("线路", play_id, [])
 
@@ -3583,7 +3829,7 @@ class FollowOperationV51Test(unittest.TestCase):
         )
         self.spider._schedule_supplement_resource_search.assert_not_called()
 
-    def test_ready_entry_cache_skips_first_detail_search_and_revalidation(self):
+    def test_ready_entry_cache_revalidates_current_route_without_search(self):
         self.spider._alist_tvbox_plugin = True
         self.spider.atvp_api = "https://atvp.example"
         self.spider.atvp_token = "token"
@@ -3606,7 +3852,7 @@ class FollowOperationV51Test(unittest.TestCase):
         self.assertTrue(self.spider._cache_ready_resource_rows(item, [row]))
         self.spider._atvp_history_snapshot = Mock(return_value=[])
         self.spider._resource_candidates = Mock(side_effect=AssertionError("不应首次搜索"))
-        self.spider._validated_playable_detail = Mock(side_effect=AssertionError("不应重验"))
+        self.spider._validated_playable_detail = Mock(return_value=detail)
 
         result = self.spider._alist_detail_from_metadata(
             "tmdb:tv:101",
@@ -3616,7 +3862,165 @@ class FollowOperationV51Test(unittest.TestCase):
         self.assertIn("已预热线路", result["list"][0]["vod_play_from"])
         self.assertIn("S01E01", result["list"][0]["vod_play_url"])
         self.spider._resource_candidates.assert_not_called()
-        self.spider._validated_playable_detail.assert_not_called()
+        self.spider._validated_playable_detail.assert_called_once()
+        self.assertTrue(
+            self.spider._validated_playable_detail.call_args.kwargs["force_refresh"]
+        )
+
+    def test_detail_flag_switch_discards_short_lived_probe_before_play(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集"}
+        play_id = self.spider._build_followplay(
+            "1@episode-1", item, "resource-101", 1, 1, "S01E01",
+        )
+        key = self.spider._route_probe_key("1@episode-1", "resource-101", "vod")
+        self.spider._route_probe_cache[key] = {
+            "checked_at": time.time(), "reachable": True,
+            "output": {"url": "https://cdn.example/old.mp4", "header": {}},
+        }
+        output = {"parse": 0, "url": "https://cdn.example/new.mp4", "header": {}}
+        self.spider._atvp_play = Mock(return_value=output)
+        self.spider._probe_media_output = Mock(return_value={
+            "checked_at": time.time(), "reachable": True, "output": output,
+        })
+        self.spider._register_playback_sync_window = Mock(return_value=True)
+        invalidate = self.spider._invalidate_route_probe
+        self.spider._invalidate_route_probe = Mock(side_effect=invalidate)
+
+        self.spider.playerContent("线路A", play_id, [])
+        first_calls = self.spider._atvp_play.call_count
+        self.spider.playerContent("线路B", play_id, [])
+
+        self.assertGreaterEqual(self.spider._atvp_play.call_count, first_calls + 1)
+        self.spider._invalidate_route_probe.assert_called_once_with(
+            "1@episode-1", "resource-101", "vod",
+        )
+
+    def test_flag_switch_is_scoped_to_same_route_context(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集"}
+        first_id = self.spider._build_followplay(
+            "1@episode-1", item, "resource-101", 1, 1, "S01E01",
+        )
+        second_id = self.spider._build_followplay(
+            "1@episode-2", item, "resource-101", 1, 2, "S01E02",
+        )
+        self.spider._atvp_play = Mock(side_effect=[
+            {"parse": 0, "url": "https://cdn.example/1.mp4", "header": {}},
+            {"parse": 0, "url": "https://cdn.example/2.mp4", "header": {}},
+        ])
+        self.spider._probe_media_output = Mock(side_effect=lambda output, deadline=None: {
+            "checked_at": time.time(), "reachable": True, "output": output,
+        })
+        self.spider._register_playback_sync_window = Mock(return_value=True)
+        self.spider._invalidate_route_probe = Mock()
+
+        self.spider.playerContent("线路A", first_id, [])
+        self.spider.playerContent("线路B", second_id, [])
+
+        self.assertFalse(self.spider._invalidate_route_probe.called)
+
+    def test_real_flag_switch_with_different_play_id_forces_refresh(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集"}
+        first_id = self.spider._build_followplay(
+            "1@line-a", item, "resource-a", 1, 1, "S01E01",
+        )
+        second_id = self.spider._build_followplay(
+            "1@line-b", item, "resource-b", 1, 1, "S01E01",
+        )
+        first = {"parse": 0, "url": "https://cdn.example/a.mp4", "header": {}}
+        second = {"parse": 0, "url": "https://cdn.example/b.mp4", "header": {}}
+        self.spider._atvp_play = Mock(side_effect=[first, second, second])
+        self.spider._probe_media_output = Mock(side_effect=lambda output, deadline=None: {
+            "checked_at": time.time(), "reachable": True, "output": output,
+        })
+        self.spider._register_playback_sync_window = Mock(return_value=True)
+        invalidate = self.spider._invalidate_route_probe
+        self.spider._invalidate_route_probe = Mock(side_effect=invalidate)
+
+        self.spider.playerContent("线路A", first_id, [])
+        self.spider.playerContent("线路B", second_id, [])
+
+        self.spider._invalidate_route_probe.assert_called_once_with(
+            "1@line-b", "resource-b", "vod",
+        )
+
+    def test_failed_probe_reissues_signed_output_once(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集"}
+        play_id = self.spider._build_followplay(
+            "1@episode-1", item, "resource-101", 1, 1, "S01E01",
+        )
+        expired = {"parse": 0, "url": "https://cdn.example/expired.mp4", "header": {}}
+        refreshed = {"parse": 0, "url": "https://cdn.example/refreshed.mp4", "header": {}}
+        self.spider._atvp_play = Mock(side_effect=[expired, refreshed])
+        self.spider._probe_media_output = Mock(side_effect=[None, {
+            "checked_at": time.time(), "reachable": True, "output": refreshed,
+        }])
+        self.spider._register_playback_sync_window = Mock(return_value=True)
+
+        result = self.spider.playerContent("线路A", play_id, [])
+
+        self.assertEqual(result["url"], refreshed["url"])
+        self.assertEqual(self.spider._atvp_play.call_count, 2)
+        self.assertEqual(self.spider._probe_media_output.call_count, 2)
+
+    def test_first_detail_uses_blocking_history_snapshot_for_resume(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        item = {
+            "tmdb_id": 101, "source_id": "tmdb:tv:101", "media_type": "tv",
+            "title": "测试剧集",
+        }
+        self.spider._follow_memory = {"version": 2, "items": {"101": dict(item)}}
+        history = {"key": "site@@@vod@@@1", "vodName": "测试剧集", "position": 88000}
+        self.spider._atvp_history_snapshot = Mock(return_value=[history])
+        self.spider._atvp_history_for_item = Mock(return_value=history)
+        self.spider._history_resume_fields = Mock(return_value={"resume_position": 88000})
+        ready = {"vod_name": "测试剧集", "vod_play_from": "线路", "vod_play_url": "E1$play"}
+        self.spider._ready_resource_detail = Mock(return_value=ready)
+
+        self.spider._alist_detail_from_metadata(
+            "tmdb:tv:101", {"list": [{"vod_id": "tmdb:tv:101", "vod_name": "测试剧集"}]},
+        )
+
+        self.spider._atvp_history_snapshot.assert_called_once_with(nonblocking=False)
+        called_item = self.spider._ready_resource_detail.call_args.args[1]
+        self.assertEqual(called_item["resume_position"], 88000)
+
+    def test_pending_entry_preheat_without_ready_route_falls_back_to_foreground_search(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        item = {
+            "tmdb_id": 101, "source_id": "tmdb:tv:101", "media_type": "tv",
+            "title": "测试剧集",
+        }
+        self.spider._follow_memory = {"version": 2, "items": {"101": dict(item)}}
+        self.spider._resource_entry_preheat_jobs[
+            self.spider._entry_resource_preheat_key(item)
+        ] = object()
+        candidate = {"vod_id": "foreground-resource", "_resource_mode": "vod"}
+        detail = {"list": [{
+            "vod_name": "测试剧集", "vod_play_from": "前台线路",
+            "vod_play_url": "S01E01$1@foreground-episode",
+        }]}
+        self.spider._atvp_history_snapshot = Mock(return_value=[])
+        self.spider._resource_candidates = Mock(return_value=[candidate])
+        self.spider._resource_detail = Mock(return_value=detail)
+
+        result = self.spider._alist_detail_from_metadata(
+            "tmdb:tv:101", {"list": [{"vod_id": "tmdb:tv:101", "vod_name": "测试剧集"}]},
+        )
+
+        self.assertIn("前台线路", result["list"][0]["vod_play_from"])
+        self.spider._resource_candidates.assert_called_once()
 
     def test_pending_entry_preheat_uses_bound_route_without_global_search(self):
         self.spider._alist_tvbox_plugin = True
@@ -5763,6 +6167,16 @@ class FollowOperationV51Test(unittest.TestCase):
             self.spider._utf8_size(json.dumps(bounded, ensure_ascii=False, separators=(",", ":"))),
             self.spider.HISTORY_RESPONSE_MAX_BYTES,
         )
+
+    def test_history_upload_payload_deduplicates_keys_and_keeps_newest(self):
+        rows = [
+            {"key": "same", "createTime": 10, "position": 100},
+            {"key": "same", "createTime": 20, "position": 200},
+            {"key": "other", "createTime": 15, "position": 50},
+        ]
+        payload = self.spider._history_upload_payload(rows)
+        self.assertEqual([row["key"] for row in payload], ["same", "other"])
+        self.assertEqual(payload[0]["position"], 200)
 
     def test_history_callback_rejects_oversized_targets_before_json_parse(self):
         pending = {"captured": {}, "event": MODULE.threading.Event()}

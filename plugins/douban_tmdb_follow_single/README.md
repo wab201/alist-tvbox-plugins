@@ -1,7 +1,7 @@
 # 豆瓣 TMDB 追更助手
 
 - 插件 ID：`douban_tmdb_follow_single`
-- 当前版本：`60`（公开测试版）
+- 当前版本：`61`（公开测试版）
 - 运行环境：AList-TVBox raw Python 插件；兼容空 EXT 直接 FongMi 元数据模式
 - 最低兼容基线：AList-TVBox `1.42.0`
 - 当前验证环境：AList-TVBox `1.44.0`
@@ -58,6 +58,8 @@
 
 `tmdb_access_token` 从 TMDB 网站的 **设置 -> API -> API Read Access Token** 获取。需要把本机播放记录写回 AList-TVBox History 并同步到其他客户端时，再填写可登录当前容器的 `USER` 或 `ADMIN` 用户名和密码；用户名或密码任一留空都会按只读模式运行，只读取已有云端 History，不会把本机新增进度上传到其他客户端。
 
+默认直接复用当前订阅下发的 AList-TVBox 地址访问 `/api/accounts/login` 和 `/history/{token}`。订阅公网 HTTPS 入口已经完整反代这些路由时，不需要填写 `history_api`。只有订阅地址不能承载 History、且另有客户端可访问的 History 入口时，才填写 `history_api` 覆盖默认地址。广域网账号登录必须使用 HTTPS 或受保护的 VPN/内网穿透通道，不要通过开放公网 HTTP 传输账号密码。
+
 推荐直接使用带中文说明的 [extend.example.json](extend.example.json)。不要手工添加 AList-TVBox 生成的 `api`、`token`、`secret`、`loader`、`source` 或 `raw` 外层字段。
 
 ## 文档
@@ -70,5 +72,5 @@
 插件源码公开地址：
 
 ```text
-https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMDB追更单入口_v60.py
+https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMDB追更单入口_v61.py
 ```
