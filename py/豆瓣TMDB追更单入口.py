@@ -2,7 +2,7 @@
 """
 //@name:豆瓣TMDB追更助手（AList-TVBox专用）
 //@id:douban_tmdb_follow_single
-//@version:55
+//@version:56
 
 AList-TVBox raw Python plugin for Douban/TMDB browsing and follow-up playback.
 
@@ -249,7 +249,12 @@ class Filter:
     """AList-TVBox detail/player filter sharing this file with the Spider."""
 
     FOLLOW_CACHE_KEY = "douban_tmdb_follow_state_v1"
-    SAFE_ROUTE_HEADERS = frozenset(("user-agent", "referer", "origin"))
+    # Preserve the standard playback headers returned by AList-TVBox for every
+    # cloud-drive provider; Quark Cookie rejection is one confirmed example.
+    SAFE_ROUTE_HEADERS = frozenset((
+        "user-agent", "referer", "origin", "cookie",
+        "accept", "range", "content-type",
+    ))
     HISTORY_RESPONSE_MAX_BYTES = HISTORY_RESPONSE_MAX_BYTES
     HISTORY_ROW_LIMIT = HISTORY_ROW_LIMIT
     FOLLOWPLAY_MAX_ID_LENGTH = 65536
@@ -1027,6 +1032,9 @@ class Spider(BaseSpider):
     RESOURCE_PARSE_CANDIDATE_LIMIT = 100
     ROUTE_PROBE_MAX_BYTES = 4096
     ROUTE_PROBE_CACHE_LIMIT = 128
+    ROUTE_HEADER_VALUE_MAX_BYTES = 16 * 1024
+    ROUTE_COOKIE_MAX_BYTES = 64 * 1024
+    ROUTE_HEADERS_TOTAL_MAX_BYTES = 80 * 1024
     ERROR_PREFIX = "douban-error:"
     FILTER_CACHE_KEY = "douban_meta_wish_filters_v12_follow_candidates"
     FOLLOW_CACHE_KEY = "douban_tmdb_follow_state_v1"
@@ -1085,9 +1093,9 @@ class Spider(BaseSpider):
     RESOURCE_HOT_ROUTE_LIMIT = 5
     RESOURCE_HOT_VALIDATION_BUDGET = 24
     RESOURCE_HOT_VALIDATION_ATTEMPT_LIMIT = 8
-    RESOURCE_HOT_GROUPS_PER_RESULT = 1
     RESOURCE_HOT_JOB_LIMIT = 2
     RESOURCE_HOT_JOB_QUEUE_LIMIT = 8
+    RESOURCE_ENTRY_PREHEAT_LIMIT = 3
     RESOURCE_FOREGROUND_MODE_WORKERS = 4
     RESOURCE_FOREGROUND_MODE_QUEUE_LIMIT = 4
     RESOURCE_BACKGROUND_MODE_WORKERS = 2
@@ -1279,6 +1287,7 @@ class Spider(BaseSpider):
         self._cache_generation = 0
         self._refreshing_cache_keys = set()
         self._resource_search_jobs = {}
+        self._resource_entry_preheat_jobs = {}
         self._resource_search_executor = ThreadPoolExecutor(max_workers=self.RESOURCE_HOT_JOB_LIMIT)
         self._resource_foreground_mode_executor = ThreadPoolExecutor(
             max_workers=self.RESOURCE_FOREGROUND_MODE_WORKERS,
@@ -1427,6 +1436,7 @@ class Spider(BaseSpider):
             self._persistent_cache_saving = False
             self._refreshing_cache_keys.clear()
             self._resource_search_jobs.clear()
+            self._resource_entry_preheat_jobs.clear()
             self._route_probe_cache.clear()
             self._route_probe_jobs.clear()
             self._validated_resource_details.clear()
@@ -1470,6 +1480,7 @@ class Spider(BaseSpider):
         self._load_follow_action_state()
         if not self.user_id and self.cookie:
             self._resolve_user_id()
+        self._schedule_entry_resource_preheat()
 
     def destroy(self):
         with self._history_context_lock:
@@ -1600,12 +1611,14 @@ class Spider(BaseSpider):
         return self.atvp_api
 
     def homeContent(self, filter=False):
+        self._schedule_entry_resource_preheat()
         result = {"class": [{"type_id": key, "type_name": name} for key, name in self.CATEGORIES]}
         if filter:
             result["filters"] = self._get_filters()
         return result
 
     def homeVideoContent(self):
+        self._schedule_entry_resource_preheat()
         try:
             params = {"start": 0, "count": 30, "updated_at": "", "items_only": 1, "for_mobile": 1}
             data = self._get_json(self.API + "/subject_collection/subject_real_time_hotest/items", params=params, ttl=self.list_cache_ttl)
@@ -1629,6 +1642,7 @@ class Spider(BaseSpider):
             if tid in ("follow_updates", "follow_candidates", "follow_sync", "follow_manage"):
                 self._flush_playback_sync_on_navigation()
                 self._load_follow_state(force=True)
+                self._schedule_entry_resource_preheat(page=page)
             if tid == "follow_updates":
                 return self._category_follow_updates(page)
             if tid == "follow_candidates":
@@ -1761,6 +1775,7 @@ class Spider(BaseSpider):
             "url": str(parsed.get("url") or ""),
             "resourceId": str(parsed.get("resourceId") or ""),
             "resourceMode": str(parsed.get("resourceMode") or "vod"),
+            "resourceProvider": str(parsed.get("resourceProvider") or ""),
             "name": str(parsed.get("name") or ""),
         }]
         unique_candidates = []
@@ -1797,6 +1812,8 @@ class Spider(BaseSpider):
                 output_validated = False
                 if isinstance(cached_output, dict) and str(cached_output.get("url") or "").strip():
                     cached_output = self._sanitize_route_output(cached_output)
+                    if not isinstance(cached_output, dict) or not str(cached_output.get("url") or "").strip():
+                        raise RuntimeError("缓存播放请求头无效")
                     if candidate.get("_route_requires_validation"):
                         probe_deadline = min(candidate_deadline, time.monotonic() + 2.5)
                         checked = self._probe_media_output(cached_output, deadline=probe_deadline)
@@ -1836,6 +1853,8 @@ class Spider(BaseSpider):
                         # of hiding a useful route; leave quality_probe empty
                         # so no reachable=True snapshot is persisted.
                         output = self._sanitize_route_output(output)
+                        if not isinstance(output, dict) or not str(output.get("url") or "").strip():
+                            raise RuntimeError("播放请求头无效")
                     else:
                         raise RuntimeError("媒体Range验证失败")
                 output.setdefault("parse", 0)
@@ -1843,9 +1862,14 @@ class Spider(BaseSpider):
                 output.setdefault("playUrl", "")
                 output.setdefault("header", {})
                 output = self._sanitize_route_output(output)
+                if not isinstance(output, dict) or not str(output.get("url") or "").strip():
+                    raise RuntimeError("播放请求头无效")
                 effective = dict(parsed)
                 effective["url"] = target
                 effective["resourceId"] = candidate.get("resourceId") or parsed.get("resourceId")
+                effective["resourceProvider"] = (
+                    candidate.get("resourceProvider") or parsed.get("resourceProvider") or ""
+                )
                 if candidate.get("name"):
                     effective["name"] = candidate["name"]
                 self._inject_resume(output, effective)
@@ -3736,7 +3760,14 @@ class Spider(BaseSpider):
                 or self._contains_url_reference(decoded_resource_id)):
             output.pop("alist_vod_id", None)
             output.pop("alist_resource_mode", None)
+            output.pop("alist_resource_provider", None)
             output.pop("binding_updated_at", None)
+            resource_id = ""
+        binding_provider = self._resource_provider_key(output.get("alist_resource_provider")) if resource_id else ""
+        if binding_provider:
+            output["alist_resource_provider"] = binding_provider
+        else:
+            output.pop("alist_resource_provider", None)
 
         route = output.get("last_play_route")
         if not isinstance(route, dict):
@@ -3765,7 +3796,8 @@ class Spider(BaseSpider):
             output.pop("last_play_route", None)
             return output
         quality = route.get("quality") if isinstance(route.get("quality"), dict) else {}
-        output["last_play_route"] = {
+        route_provider = self._resource_provider_key(route.get("resourceProvider"))
+        sanitized_route = {
             "version": 1,
             "backend": str(route.get("backend") or "")[:64],
             "resourceId": route_resource_id,
@@ -3782,6 +3814,9 @@ class Spider(BaseSpider):
             },
             "updatedAt": self._positive_int(route.get("updatedAt"), 0),
         }
+        if route_provider:
+            sanitized_route["resourceProvider"] = route_provider
+        output["last_play_route"] = sanitized_route
         return output
 
     def _merge_follow_title_aliases(self, item, values):
@@ -5353,7 +5388,8 @@ class Spider(BaseSpider):
         if not episode:
             return {}
         payload = self._history_followplay_payload(history) or {}
-        resource_id = str(payload.get("resourceId") or item.get("alist_vod_id") or "").strip()
+        payload_resource_id = str(payload.get("resourceId") or "").strip()
+        resource_id = payload_resource_id or str(item.get("alist_vod_id") or "").strip()
         fields = {
             "history_episode": episode,
             "history_position": self._bounded_int(history.get("position"), 0, 0, 2147483647000),
@@ -5363,6 +5399,12 @@ class Spider(BaseSpider):
         }
         if resource_id:
             fields["alist_vod_id"] = resource_id
+        if payload_resource_id:
+            resource_mode = str(payload.get("resourceMode") or "vod").strip().lower() or "vod"
+            fields["alist_resource_mode"] = resource_mode
+            fields["alist_resource_provider"] = self._resource_provider_key(
+                payload.get("resourceProvider"), payload_resource_id,
+            )
         return fields
 
     def _reconcile_follow_histories(self, histories):
@@ -5382,16 +5424,35 @@ class Spider(BaseSpider):
                 episode = resume_fields["history_episode"]
                 resource_id = str(resume_fields.get("alist_vod_id") or "")
                 item = dict(value)
+                previous_resource_id = str(item.get("alist_vod_id") or "")
                 history_changed = (
                     str(item.get("history_episode") or "") != episode
                     or self._positive_int(item.get("history_position"), 0) != resume_fields["history_position"]
                     or self._positive_int(item.get("history_duration"), 0) != resume_fields["history_duration"]
                     or str(item.get("history_vod_name") or "") != resume_fields["history_vod_name"]
                     or (resource_id and str(item.get("alist_vod_id") or "") != resource_id)
+                    or (
+                        "alist_resource_mode" in resume_fields
+                        and str(item.get("alist_resource_mode") or "vod").strip().lower()
+                        != resume_fields["alist_resource_mode"]
+                    )
+                    or (
+                        "alist_resource_provider" in resume_fields
+                        and self._resource_provider_key(item.get("alist_resource_provider"))
+                        != resume_fields["alist_resource_provider"]
+                    )
                 )
                 if history_changed:
                     resume_fields["history_updated_at"] = now
                     item.update(resume_fields)
+                    if (
+                            "alist_resource_provider" in resume_fields
+                            and not resume_fields["alist_resource_provider"]):
+                        item.pop("alist_resource_provider", None)
+                    if resource_id and resource_id != previous_resource_id:
+                        route = item.get("last_play_route") if isinstance(item.get("last_play_route"), dict) else {}
+                        if str(route.get("resourceId") or "").strip() != resource_id:
+                            item.pop("last_play_route", None)
                 seen_changed = False
                 if self._history_is_complete(history):
                     seen = str(item.get("seen_episode") or "")
@@ -5595,6 +5656,13 @@ class Spider(BaseSpider):
         except Exception:
             pass
         try:
+            ready = self._ready_resource_detail(raw_id, item, base_vod)
+            if ready:
+                return {"list": [ready]}
+        except Exception:
+            pass
+        entry_preheat_pending = self._entry_resource_preheat_pending(item)
+        try:
             resource_deadline = time.monotonic() + self.RESOURCE_FOREGROUND_BUDGET
             bound_resource = self._bound_resource_row(item)
             bound_resource_id = str((bound_resource or {}).get("vod_id") or "").strip()
@@ -5603,7 +5671,10 @@ class Spider(BaseSpider):
             bound_invalidated = False
             if bound_resource:
                 try:
-                    bound_detail = self._resource_detail(bound_resource, deadline=resource_deadline)
+                    cached_bound_detail = self._validated_resource_detail(bound_resource)
+                    bound_detail = cached_bound_detail or self._resource_detail(
+                        bound_resource, deadline=resource_deadline,
+                    )
                     route = item.get("last_play_route") if isinstance(item.get("last_play_route"), dict) else {}
                     remembered_play_id = str(route.get("playId") or "").strip()
                     remembered_probe = self._route_probe_snapshot(
@@ -5611,7 +5682,10 @@ class Spider(BaseSpider):
                         bound_resource_id,
                         route.get("resourceMode") or bound_resource.get("_resource_mode") or "vod",
                     )
-                    if (
+                    if cached_bound_detail is not None:
+                        validated_bound = cached_bound_detail
+                        bound_validated = True
+                    elif (
                             remembered_probe
                             and remembered_probe.get("reachable") is True
                             and self._bound_detail_contains_route(bound_detail, route)):
@@ -5635,7 +5709,11 @@ class Spider(BaseSpider):
                         rewritten = self._rewrite_resource_vod(
                             bound_vod, item, bound_resource_id,
                             mode=bound_resource.get("_resource_mode") or "vod",
-                            provider_hint=bound_vod.get("vod_remarks") or bound_vod.get("type_name") or bound_vod.get("type"),
+                            provider_hint=self._resource_provider_key(
+                                bound_resource.get("provider"), bound_vod.get("provider"),
+                                bound_vod.get("type"), bound_vod.get("type_name"),
+                                bound_vod.get("vod_remarks"), bound_resource_id,
+                            ),
                             validated=True,
                         )
                         if rewritten:
@@ -5650,6 +5728,20 @@ class Spider(BaseSpider):
                         self._schedule_bound_route_replacement(item, bound_resource_id)
                         bound_resource = None
                         bound_invalidated = True
+            if entry_preheat_pending:
+                merged = self._merge_resource_vods(
+                    bound_groups, item, raw_id, base_vod,
+                    preferred_resource_id=preferred_resource_id,
+                )
+                if merged:
+                    return {"list": [merged]}
+                if bound_invalidated:
+                    return {"list": [self._resource_error_vod(
+                        base_vod, "原绑定线路失效，后台备选线路验证中",
+                    )]}
+                return {"list": [self._resource_error_vod(
+                    base_vod, "后台预热播放线路，完成后当前详情页会自动刷新",
+                )]}
             candidates = self._resource_candidates(
                 item, deadline=min(resource_deadline, time.monotonic() + self.RESOURCE_SEARCH_BUDGET),
             )
@@ -5673,7 +5765,10 @@ class Spider(BaseSpider):
                     if vod:
                         rewritten = self._rewrite_resource_vod(
                             vod, item, resource_id, mode=row.get("_resource_mode") or "vod",
-                            provider_hint=row.get("vod_remarks") or row.get("type_name") or row.get("type"),
+                            provider_hint=self._resource_provider_key(
+                                row.get("provider"), row.get("type"), row.get("type_name"),
+                                row.get("vod_remarks"), row.get("source"), resource_id,
+                            ),
                             validated=bool(
                                 row.get("_validated_groups")
                                 and self._validated_resource_detail(row) is not None
@@ -5765,12 +5860,22 @@ class Spider(BaseSpider):
                 or not self._resource_id_valid(resource_id, resource_mode)
                 or resource_mode not in self.RESOURCE_SEARCH_MODES):
             return None
-        return {
+        route_resource_id = str(route.get("resourceId") or "").strip()
+        item_resource_id = str(item.get("alist_vod_id") or "").strip()
+        provider = self._resource_provider_key(
+            route.get("resourceProvider") if route_matches and route_resource_id == resource_id else "",
+            item.get("alist_resource_provider") if item_resource_id == resource_id else "",
+            resource_id,
+        )
+        output = {
             "vod_id": resource_id,
             "vod_name": str(item.get("title") or ""),
             "_resource_mode": resource_mode,
             "_bound_route": True,
         }
+        if provider:
+            output["provider"] = provider
+        return output
 
     def _bound_replacement_key(self, item, bound_resource_id):
         identity = str(item.get("tmdb_id") or item.get("source_id") or "").strip()
@@ -5833,6 +5938,15 @@ class Spider(BaseSpider):
                     return False
                 updated["alist_vod_id"] = resource_id
                 updated["alist_resource_mode"] = resource_mode
+                provider = self._resource_provider_key(
+                    (row or {}).get("provider"), (row or {}).get("type"),
+                    (row or {}).get("type_name"), (row or {}).get("vod_remarks"),
+                    (row or {}).get("source"), resource_id,
+                )
+                if provider:
+                    updated["alist_resource_provider"] = provider
+                else:
+                    updated.pop("alist_resource_provider", None)
                 updated["binding_updated_at"] = int(time.time())
                 route = updated.get("last_play_route") if isinstance(updated.get("last_play_route"), dict) else {}
                 if expected_bound and str(route.get("resourceId") or "").strip() == expected_bound:
@@ -5857,7 +5971,9 @@ class Spider(BaseSpider):
         def worker():
             try:
                 deadline = time.monotonic() + self.RESOURCE_HOT_VALIDATION_BUDGET
-                candidates = self._resource_candidates(dict(item), deadline=deadline)
+                candidates = self._resource_candidates(
+                    dict(item), deadline=deadline, background=True,
+                )
                 candidates = [
                     dict(row) for row in candidates or []
                     if isinstance(row, dict)
@@ -6109,7 +6225,7 @@ class Spider(BaseSpider):
             release_once()
             return None
 
-    def _resource_candidates(self, item, deadline=None):
+    def _resource_candidates(self, item, deadline=None, background=False):
         title = str(item.get("title") or "").strip()
         if not title:
             return []
@@ -6147,7 +6263,9 @@ class Spider(BaseSpider):
             if foreground_modes:
                 futures = {}
                 for mode in foreground_modes:
-                    future = self._submit_resource_mode_search(mode, query_titles[:2], deadline)
+                    future = self._submit_resource_mode_search(
+                        mode, query_titles[:2], deadline, background=background,
+                    )
                     if future is None:
                         mode_rows.setdefault(mode, [])
                     else:
@@ -6194,6 +6312,189 @@ class Spider(BaseSpider):
         identity = str(item.get("tmdb_id") or item.get("source_id") or self._normalize_media_title(item.get("title")) or "")
         raw = "%s|%s|%s|%s" % (self.atvp_api.rstrip("/"), Filter._token_hash(self.atvp_token), mode, identity)
         return "resource-search:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _entry_resource_preheat_key(self, item):
+        return self._resource_search_cache_key(item, "entry-preheat")
+
+    @staticmethod
+    def _compact_ready_resource_row(row):
+        if not isinstance(row, dict):
+            return None
+        output = {}
+        for key in (
+                "vod_id", "id", "vod_name", "name", "vod_remarks", "type_name", "type",
+                "provider", "source", "_resource_mode", "_validated_groups"):
+            value = row.get(key)
+            if value not in (None, "") and not isinstance(value, (dict, list, tuple, set)):
+                output[key] = value
+        resource_id = str(output.get("vod_id") or output.get("id") or "").strip()
+        if not resource_id:
+            return None
+        return output
+
+    def _cache_ready_resource_rows(
+            self, item, rows, expected_generation=None, cache_key=None):
+        compact = []
+        for row in rows or []:
+            value = self._compact_ready_resource_row(row)
+            if value is None or self._validated_resource_detail(value) is None:
+                continue
+            compact.append(value)
+            if len(compact) >= self.RESOURCE_HOT_ROUTE_LIMIT:
+                break
+        if not compact:
+            return False
+        frozen_key = str(cache_key or self._entry_resource_preheat_key(item))
+        with self._cache_lock:
+            if expected_generation is not None and expected_generation != self._cache_generation:
+                return False
+            self._cache_set(frozen_key, compact)
+        return True
+
+    def _ready_resource_rows(self, item):
+        cached = self._cache_get(
+            self._entry_resource_preheat_key(item), self.RESOURCE_SEARCH_CACHE_TTL,
+        )
+        if not isinstance(cached, list):
+            return []
+        ready = []
+        for row in cached[:self.RESOURCE_HOT_ROUTE_LIMIT]:
+            value = self._compact_ready_resource_row(row)
+            if value is None or self._validated_resource_detail(value) is None:
+                continue
+            ready.append(value)
+        return ready
+
+    def _entry_resource_preheat_pending(self, item):
+        key = self._entry_resource_preheat_key(item)
+        with self._cache_lock:
+            return key in self._resource_entry_preheat_jobs
+
+    def _ready_resource_detail(self, raw_id, item, base_vod):
+        groups = []
+        for row in self._ready_resource_rows(item):
+            detail = self._validated_resource_detail(row)
+            vod = self._payload_first_vod(detail)
+            if not vod:
+                continue
+            rewritten = self._rewrite_resource_vod(
+                vod, item, row.get("vod_id") or row.get("id"),
+                mode=row.get("_resource_mode") or "vod",
+                provider_hint=self._resource_provider_key(
+                    row.get("provider"), row.get("type"), row.get("type_name"),
+                    row.get("vod_remarks"), row.get("source"),
+                    row.get("vod_id") or row.get("id"),
+                ),
+                validated=True,
+            )
+            if not rewritten:
+                continue
+            rewritten["_resource_mode"] = row.get("_resource_mode") or "vod"
+            groups.extend(self._split_resource_vod_groups(rewritten))
+        if not groups:
+            return None
+        return self._merge_resource_vods(
+            groups, item, raw_id, base_vod,
+            preferred_resource_id=str(item.get("alist_vod_id") or "").strip(),
+        )
+
+    def _schedule_entry_resource_preheat(self, items=None, page=1):
+        if (
+                not self._alist_tvbox_plugin
+                or not self.route_preheat
+                or not self.atvp_api
+                or not self.atvp_token
+                or self._atvp_session is None):
+            return False
+        source_items = list(items or (self._follow_memory.get("items") or {}).values())
+        source_items = [dict(item) for item in source_items if isinstance(item, dict) and item.get("title")]
+        for item in source_items:
+            tmdb_id = self._positive_int(item.get("tmdb_id"), 0)
+            if tmdb_id and not item.get("source_id"):
+                item["source_id"] = "tmdb:tv:%s" % tmdb_id
+            if tmdb_id and not item.get("media_type"):
+                item["media_type"] = "tv"
+        if items is None and page > 1:
+            start = (self._positive_int(page, 1) - 1) * self.follow_page_size
+            source_items = source_items[start:start + self.follow_page_size]
+        source_items.sort(key=lambda item: (
+            0 if str(item.get("alist_vod_id") or "").strip() else 1,
+            0 if self._has_follow_update(item) else 1,
+            str(item.get("next_air_date") or "9999"),
+            str(item.get("title") or ""),
+        ))
+        scheduled = False
+        for item in source_items[:self.RESOURCE_ENTRY_PREHEAT_LIMIT]:
+            if self._ready_resource_rows(item):
+                continue
+            key = self._entry_resource_preheat_key(item)
+            with self._cache_lock:
+                if key in self._resource_entry_preheat_jobs:
+                    continue
+                if len(self._resource_entry_preheat_jobs) >= self.RESOURCE_ENTRY_PREHEAT_LIMIT:
+                    break
+                owner = object()
+                generation = self._cache_generation
+                self._resource_entry_preheat_jobs[key] = owner
+            expected_resource_id = str(item.get("alist_vod_id") or "").strip()
+
+            def worker(
+                    source_item=item, cache_key=key, job_owner=owner,
+                    expected_generation=generation, expected_bound=expected_resource_id):
+                first_refreshed_groups = 0
+                try:
+                    deadline = time.monotonic() + self.RESOURCE_HOT_VALIDATION_BUDGET
+                    candidates = self._resource_candidates(
+                        source_item, deadline=deadline, background=True,
+                    )
+                    candidates = self._checked_resource_rows(
+                        candidates[:self.RESOURCE_HOT_VALIDATION_ATTEMPT_LIMIT], deadline,
+                    )
+
+                    def publish_partial(current):
+                        nonlocal first_refreshed_groups
+                        if self._cache_ready_resource_rows(
+                                source_item, current,
+                                expected_generation=expected_generation,
+                                cache_key=cache_key):
+                            group_count = self._validated_resource_group_count(current)
+                            if group_count > 0 and first_refreshed_groups <= 0:
+                                first_refreshed_groups = group_count
+                                self._schedule_active_detail_refresh(source_item)
+
+                    playable = self._playable_resource_rows(
+                        candidates, source_item, deadline,
+                        expected_generation=expected_generation,
+                        on_update=publish_partial,
+                    )[:self.RESOURCE_HOT_ROUTE_LIMIT]
+                    if self._cache_ready_resource_rows(
+                            source_item, playable,
+                            expected_generation=expected_generation,
+                            cache_key=cache_key):
+                        if not expected_bound and playable:
+                            self._replace_bound_resource(
+                                source_item, playable[0],
+                                expected_generation=expected_generation,
+                                expected_item_resource_id="",
+                            )
+                        final_group_count = self._validated_resource_group_count(playable)
+                        if final_group_count > first_refreshed_groups:
+                            self._schedule_active_detail_refresh(source_item)
+                except Exception:
+                    pass
+                finally:
+                    with self._cache_lock:
+                        if self._resource_entry_preheat_jobs.get(cache_key) is job_owner:
+                            self._resource_entry_preheat_jobs.pop(cache_key, None)
+
+            try:
+                self._resource_search_executor.submit(worker)
+                scheduled = True
+            except Exception:
+                with self._cache_lock:
+                    if self._resource_entry_preheat_jobs.get(key) is owner:
+                        self._resource_entry_preheat_jobs.pop(key, None)
+        return scheduled
 
     def _schedule_supplement_resource_search(self, modes, queries, item, cache_key):
         with self._cache_lock:
@@ -6256,31 +6557,37 @@ class Spider(BaseSpider):
                     candidates[:self.RESOURCE_HOT_ROUTE_LIMIT * 3], total_deadline,
                 )
                 validation_deadline = total_deadline
-                detail_refresh_scheduled = False
+                first_refreshed_groups = 0
 
                 def publish_partial(current):
-                    nonlocal detail_refresh_scheduled
+                    nonlocal first_refreshed_groups
                     with self._cache_lock:
                         active = (
                             generation == self._cache_generation
                             and self._resource_search_jobs.get(cache_key) is job_id
                         )
+                        if active:
+                            self._cache_set(cache_key, current[:self.RESOURCE_HOT_ROUTE_LIMIT])
                     if active:
-                        self._cache_set(cache_key, current[:self.RESOURCE_HOT_ROUTE_LIMIT])
-                        if current and not detail_refresh_scheduled:
-                            detail_refresh_scheduled = True
+                        group_count = self._validated_resource_group_count(current)
+                        if group_count > 0 and first_refreshed_groups <= 0:
+                            first_refreshed_groups = group_count
                             self._schedule_active_detail_refresh(item)
                 playable = self._playable_resource_rows(
                     checked, item, validation_deadline, expected_generation=generation,
                     on_update=publish_partial,
                 )[:self.RESOURCE_HOT_ROUTE_LIMIT]
                 with self._cache_lock:
-                    active = (
+                    committed = (
                         generation == self._cache_generation
                         and self._resource_search_jobs.get(cache_key) is job_id
                     )
-                if active:
-                    self._cache_set(cache_key, playable)
+                    if committed:
+                        self._cache_set(cache_key, playable)
+                if committed:
+                    final_group_count = self._validated_resource_group_count(playable)
+                    if final_group_count > first_refreshed_groups:
+                        self._schedule_active_detail_refresh(item)
             except Exception:
                 pass
             finally:
@@ -6375,6 +6682,7 @@ class Spider(BaseSpider):
     def _playable_resource_rows(
             self, rows, item, deadline=None, expected_generation=None, on_update=None):
         playable = []
+        contexts = []
         for row in list(rows or [])[:self.RESOURCE_HOT_VALIDATION_ATTEMPT_LIMIT]:
             remaining = self.resource_limit - self._validated_resource_group_count(playable)
             if remaining <= 0:
@@ -6384,7 +6692,7 @@ class Spider(BaseSpider):
             try:
                 detail = self._resource_detail(row, deadline=deadline, use_validated_cache=False)
                 validated_detail = self._validated_playable_detail(
-                    detail, item, deadline, remaining,
+                    detail, item, deadline, 1,
                     resource_id=row.get("vod_id") or row.get("id"),
                     resource_mode=row.get("_resource_mode") or "vod",
                 )
@@ -6401,11 +6709,47 @@ class Spider(BaseSpider):
                         checked_row, validated_detail, expected_generation=expected_generation):
                     continue
                 playable.append(checked_row)
+                contexts.append((checked_row, detail))
                 if callable(on_update):
                     on_update(list(playable))
             except Exception:
                 # Missing/expired CK and provider parse failures are intentionally fail-closed.
                 continue
+        while self._validated_resource_group_count(playable) < self.resource_limit:
+            grew = False
+            for checked_row, detail in contexts:
+                remaining = self.resource_limit - self._validated_resource_group_count(playable)
+                if remaining <= 0:
+                    break
+                if deadline is not None and deadline - time.monotonic() < 1:
+                    return playable
+                current_groups = self._positive_int(checked_row.get("_validated_groups"), 0)
+                try:
+                    expanded_detail = self._validated_playable_detail(
+                        detail, item, deadline, current_groups + 1,
+                        resource_id=checked_row.get("vod_id") or checked_row.get("id"),
+                        resource_mode=checked_row.get("_resource_mode") or "vod",
+                    )
+                    expanded_vod = self._payload_first_vod(expanded_detail)
+                    expanded_groups, _limited = _split_bounded_shared(
+                        (expanded_vod or {}).get("vod_play_url"),
+                        "$$$", self.RESOURCE_PLAY_GROUP_SCAN_LIMIT,
+                    )
+                    if len(expanded_groups) <= current_groups:
+                        continue
+                    checked_row["_validated_groups"] = len(expanded_groups)
+                    if not self._store_validated_resource_detail(
+                            checked_row, expanded_detail,
+                            expected_generation=expected_generation):
+                        checked_row["_validated_groups"] = current_groups
+                        continue
+                    grew = True
+                    if callable(on_update):
+                        on_update(list(playable))
+                except Exception:
+                    continue
+            if not grew:
+                break
         return playable
 
     @staticmethod
@@ -6462,7 +6806,7 @@ class Spider(BaseSpider):
             ),
             reverse=True,
         )
-        group_limit = min(max_groups, self.RESOURCE_HOT_GROUPS_PER_RESULT)
+        group_limit = min(max_groups, len(ranked_groups))
         for index, group in ranked_groups:
             if len(kept_urls) >= group_limit:
                 break
@@ -6483,6 +6827,18 @@ class Spider(BaseSpider):
                     continue
                 remaining = deadline - time.monotonic() if deadline is not None else 15
                 if remaining < 1:
+                    break
+                cached_probe = self._route_probe_snapshot(
+                    play_id, resource_id, resource_mode,
+                )
+                if (
+                        isinstance(cached_probe, dict)
+                        and cached_probe.get("reachable") is True
+                        and isinstance(cached_probe.get("output"), dict)):
+                    verified = True
+                    verified_probe = cached_probe
+                    verified_output = dict(cached_probe["output"])
+                    verified_play_id = play_id
                     break
                 play_deadline = min(
                     deadline if deadline is not None else float("inf"),
@@ -7727,7 +8083,7 @@ class Spider(BaseSpider):
             if group_index not in grouped:
                 group_order.append(group_index)
             grouped.setdefault(group_index, []).append(record)
-            provider = str(record.get("provider") or "")
+            provider = self._resource_provider_key(record.get("provider"))
             episode_key = record.get("episode_key")
             if (
                     not provider
@@ -7826,6 +8182,74 @@ class Spider(BaseSpider):
         season = self._positive_int(route.get("season"), 0)
         episode = self._positive_int(route.get("episode"), 0)
         return "S%02dE%02d" % (season, episode) if season and episode else ""
+
+    def _resource_group_episode_coverage(self, group, item, declared_season=0):
+        latest = re.match(
+            r"^S0*(\d{1,2})E0*(\d{1,3})$", str((item or {}).get("latest_episode") or ""), re.I,
+        )
+        if not latest or str((item or {}).get("media_type") or "tv") == "movie":
+            return (0, 0, 0, 0)
+        target_season = int(latest.group(1))
+        target_episode = int(latest.group(2))
+        if target_episode <= 0:
+            return (0, 0, 0, 0)
+        default_season = self._positive_int(declared_season, 0) or self._tracking_season(item)
+        episodes = set()
+        parts, _limited = _split_bounded_shared(
+            group, "#", self.RESOURCE_GROUP_EPISODE_LIMIT,
+        )
+        for index, part in enumerate(parts, 1):
+            name, separator, play_id = part.rpartition("$")
+            if not separator or not play_id:
+                continue
+            payload = self._parse_followplay(play_id)
+            if payload:
+                explicit = payload.get("episodeExplicit") is not False
+                season = self._positive_int(payload.get("season"), 0)
+                episode = self._positive_int(payload.get("episode"), 0)
+            else:
+                season, episode, explicit = self._episode_from_text_info(
+                    name, index, default_season,
+                )
+            if explicit and season == target_season and 0 < episode <= target_episode:
+                episodes.add(episode)
+        contiguous = 0
+        while contiguous + 1 in episodes:
+            contiguous += 1
+        return (
+            1 if len(episodes) == target_episode else 0,
+            1 if target_episode in episodes else 0,
+            len(episodes),
+            contiguous,
+        )
+
+    def _resource_group_contains_resume(self, group, item, declared_season=0):
+        resume = re.match(
+            r"^S0*(\d{1,2})E0*(\d{1,3})$", self._route_resume_episode(item), re.I,
+        )
+        if not resume:
+            return False
+        target = int(resume.group(1)), int(resume.group(2))
+        default_season = self._positive_int(declared_season, 0) or self._tracking_season(item)
+        parts, _limited = _split_bounded_shared(
+            group, "#", self.RESOURCE_GROUP_EPISODE_LIMIT,
+        )
+        for index, part in enumerate(parts, 1):
+            name, separator, play_id = part.rpartition("$")
+            if not separator or not play_id:
+                continue
+            payload = self._parse_followplay(play_id)
+            if payload:
+                explicit = payload.get("episodeExplicit") is not False
+                season = self._positive_int(payload.get("season"), 0)
+                episode = self._positive_int(payload.get("episode"), 0)
+            else:
+                season, episode, explicit = self._episode_from_text_info(
+                    name, index, default_season,
+                )
+            if explicit and (season, episode) == target:
+                return True
+        return False
 
     def _rewrite_resource_vod(
             self, vod, item, resource_id, mode="", provider_hint="", validated=False):
@@ -7929,6 +8353,29 @@ class Spider(BaseSpider):
                 offset = raw_numbers[0] - 1
                 for row in parsed_entries:
                     row["episode"] -= offset
+            metadata_provider = self._resource_provider_key(provider_hint, resource_id, source_name)
+            target_providers = {
+                provider for provider in (
+                    self._resource_provider_key(row.get("target")) for row in parsed_entries
+                ) if provider
+            }
+            unknown_target_url = any(
+                urlparse(str(row.get("target") or "")).scheme in ("http", "https")
+                and bool(urlparse(str(row.get("target") or "")).hostname)
+                and not self._resource_provider_key(row.get("target"))
+                for row in parsed_entries
+            )
+            if unknown_target_url or len(target_providers) > 1:
+                resolved_provider = ""
+            elif target_providers:
+                target_provider = next(iter(target_providers))
+                resolved_provider = (
+                    target_provider
+                    if not metadata_provider or metadata_provider == target_provider
+                    else ""
+                )
+            else:
+                resolved_provider = metadata_provider
             entries = []
             kept_parsed_entries = []
             group_rewritten_length = 0
@@ -7936,6 +8383,7 @@ class Spider(BaseSpider):
                 play_id = self._build_followplay(
                     row["target"], item, resource_id, row["season"], row["episode"], row["name"],
                     resource_mode=mode,
+                    resource_provider=resolved_provider,
                     episode_explicit=row["explicit"],
                 )
                 if play_id:
@@ -7971,29 +8419,6 @@ class Spider(BaseSpider):
                 rewritten_sources.append(source_name)
                 rewritten_urls.append("#".join(entries))
                 rewritten_seasons.append(group_season or default_season)
-                metadata_provider = self._resource_provider_key(provider_hint, resource_id, source_name)
-                target_providers = {
-                    provider for provider in (
-                        self._resource_provider_key(row.get("target")) for row in parsed_entries
-                    ) if provider
-                }
-                unknown_target_url = any(
-                    urlparse(str(row.get("target") or "")).scheme in ("http", "https")
-                    and bool(urlparse(str(row.get("target") or "")).hostname)
-                    and not self._resource_provider_key(row.get("target"))
-                    for row in parsed_entries
-                )
-                if unknown_target_url or len(target_providers) > 1:
-                    resolved_provider = ""
-                elif target_providers:
-                    target_provider = next(iter(target_providers))
-                    resolved_provider = (
-                        target_provider
-                        if not metadata_provider or metadata_provider == target_provider
-                        else ""
-                    )
-                else:
-                    resolved_provider = metadata_provider
                 rewritten_providers.append(resolved_provider)
                 rewritten_quality.append(quality)
         if not rewritten_urls:
@@ -8120,7 +8545,7 @@ class Spider(BaseSpider):
                     declared_seasons[depth] if depth < len(declared_seasons) else 0, 0,
                 )
                 provider = (
-                    str(declared_providers[depth] or "").strip()
+                    self._resource_provider_key(declared_providers[depth])
                     if depth < len(declared_providers)
                     else self._resource_provider_key(base_source, resource_id)
                 )
@@ -8130,6 +8555,12 @@ class Spider(BaseSpider):
                     "resource_id": resource_id,
                     "season": declared_season,
                     "provider": provider,
+                    "coverage": self._resource_group_episode_coverage(
+                        group_urls[depth], item, declared_season,
+                    ),
+                    "resume": self._resource_group_contains_resume(
+                        group_urls[depth], item, declared_season,
+                    ),
                     "quality": quality,
                     "mode": str(vod.get("_resource_mode") or "").strip().lower(),
                     "order": len(candidates),
@@ -8142,10 +8573,25 @@ class Spider(BaseSpider):
         if not candidates:
             return None
 
+        resume_active = bool(self._route_resume_episode(item))
+
         def candidate_quality(candidate):
             quality = candidate["quality"]
+            resume_score = 0
+            if candidate.get("resume"):
+                resume_score = 2 if (
+                    resume_active
+                    and preferred_resource_id
+                    and candidate["resource_id"] == preferred_resource_id
+                ) else 1
             return (
-                1 if preferred_resource_id and candidate["resource_id"] == preferred_resource_id else 0,
+                resume_score,
+                *candidate.get("coverage", (0, 0, 0, 0)),
+                1 if (
+                    not resume_active
+                    and preferred_resource_id
+                    and candidate["resource_id"] == preferred_resource_id
+                ) else 0,
                 self._positive_int(quality.get("resolution"), 0),
                 self._positive_int(quality.get("total"), 0),
                 self._positive_int(quality.get("startup"), 0),
@@ -8160,21 +8606,24 @@ class Spider(BaseSpider):
                     mode not in best_by_mode
                     or candidate_quality(candidate) > candidate_quality(best_by_mode[mode])):
                 best_by_mode[mode] = candidate
-        mode_best = sorted(
-            best_by_mode.values(),
-            key=lambda candidate: (
-                self.RESOURCE_MODE_PRIORITY.get(candidate["mode"], 99),
-                candidate["order"],
-            ),
-        )
-        preserved_ids = {id(candidate) for candidate in mode_best}
+        mode_best = sorted(best_by_mode.values(), key=candidate_quality, reverse=True)
+        preserved = list(mode_best)
+        preferred_candidates = [
+            candidate for candidate in candidates
+            if preferred_resource_id and candidate["resource_id"] == preferred_resource_id
+        ]
+        if preferred_candidates:
+            preferred_candidate = max(preferred_candidates, key=candidate_quality)
+            if all(id(candidate) != id(preferred_candidate) for candidate in preserved):
+                preserved.append(preferred_candidate)
+        preserved_ids = {id(candidate) for candidate in preserved}
         remaining_candidates = sorted(
             (candidate for candidate in candidates if id(candidate) not in preserved_ids),
             key=candidate_quality,
             reverse=True,
         )
         route_limit = min(self.resource_limit, self.FOLLOW_ROUTE_LIMIT)
-        ordered_candidates = mode_best + remaining_candidates
+        ordered_candidates = sorted(preserved, key=candidate_quality, reverse=True) + remaining_candidates
         if len(ordered_candidates) > route_limit:
             route_candidates_limited = True
         selected_candidates = ordered_candidates[:route_limit]
@@ -9087,21 +9536,69 @@ class Spider(BaseSpider):
 
     @staticmethod
     def _sanitize_route_output(output):
-        clean = dict(output or {})
+        if not isinstance(output, dict):
+            return None
+        clean = dict(output)
         raw_headers = clean.get("header")
+        if raw_headers in (None, ""):
+            raw_headers = {}
         if isinstance(raw_headers, str):
             try:
                 raw_headers = json.loads(raw_headers)
             except Exception:
-                raw_headers = {}
+                return None
         if not isinstance(raw_headers, dict):
-            raw_headers = {}
-        clean["header"] = {
-            str(key): str(value)
-            for key, value in raw_headers.items()
-            if str(key).strip().lower() in Filter.SAFE_ROUTE_HEADERS and value is not None
+            return None
+        canonical_names = {
+            "user-agent": "User-Agent",
+            "referer": "Referer",
+            "origin": "Origin",
+            "cookie": "Cookie",
+            "accept": "Accept",
+            "range": "Range",
+            "content-type": "Content-Type",
         }
+        headers = {}
+        total_bytes = 0
+        for raw_key, raw_value in raw_headers.items():
+            key = str(raw_key).strip().lower()
+            if key not in Filter.SAFE_ROUTE_HEADERS or raw_value is None:
+                continue
+            value = str(raw_value)
+            if not key or "\r" in key or "\n" in key or "\r" in value or "\n" in value:
+                return None
+            value_bytes = len(value.encode("utf-8", "replace"))
+            value_limit = (
+                Spider.ROUTE_COOKIE_MAX_BYTES
+                if key == "cookie"
+                else Spider.ROUTE_HEADER_VALUE_MAX_BYTES
+            )
+            if value_bytes > value_limit:
+                return None
+            canonical = canonical_names[key]
+            if canonical in headers:
+                if headers[canonical] != value:
+                    return None
+                continue
+            total_bytes += len(canonical.encode("ascii")) + value_bytes + 2
+            if total_bytes > Spider.ROUTE_HEADERS_TOTAL_MAX_BYTES:
+                return None
+            headers[canonical] = value
+        clean["header"] = headers
         return clean
+
+    @staticmethod
+    def _media_origin(value):
+        try:
+            parsed = urlparse(str(value or "").strip())
+            scheme = str(parsed.scheme or "").lower()
+            host = str(parsed.hostname or "").rstrip(".").lower()
+            if scheme not in ("http", "https") or not host:
+                return None
+            port = parsed.port or (443 if scheme == "https" else 80)
+            return scheme, host, port
+        except Exception:
+            return None
 
     def _safe_atvp_play_output(self, output):
         if not isinstance(output, dict):
@@ -9114,10 +9611,13 @@ class Spider(BaseSpider):
     def _probe_media_output(self, output, deadline=None):
         started_at = time.monotonic()
         clean_output = self._sanitize_route_output(output)
+        if not isinstance(clean_output, dict):
+            return None
         media_url = Filter._first_http_url(clean_output.get("url"))
         if not media_url:
             return None
-        headers = dict(clean_output.get("header") or {})
+        playback_headers = dict(clean_output.get("header") or {})
+        headers = dict(playback_headers)
         headers.setdefault("User-Agent", self.user_agent)
         headers.setdefault("Accept", "*/*")
         headers["Range"] = "bytes=0-%d" % (self.ROUTE_PROBE_MAX_BYTES - 1)
@@ -9155,7 +9655,16 @@ class Spider(BaseSpider):
                 location = str(response_headers.get("Location") or response_headers.get("location") or "").strip()
                 if not location:
                     return None
-                current = urljoin(current, location)
+                next_url = urljoin(current, location)
+                current_origin = self._media_origin(current)
+                next_origin = self._media_origin(next_url)
+                if current_origin is None or next_origin is None:
+                    return None
+                if current_origin != next_origin:
+                    for sensitive_header in ("Cookie", "Origin", "Referer"):
+                        headers.pop(sensitive_header, None)
+                        playback_headers.pop(sensitive_header, None)
+                current = next_url
                 continue
             if status not in (200, 206):
                 return None
@@ -9173,6 +9682,12 @@ class Spider(BaseSpider):
                     response_headers.get("Content-Length") or response_headers.get("content-length"), 0,
                 )
             signals = self._media_quality_signals(current, content_type, chunk)
+            playback_output = dict(clean_output)
+            playback_output["url"] = current
+            playback_output["header"] = playback_headers
+            playback_output = self._sanitize_route_output(playback_output)
+            if not isinstance(playback_output, dict):
+                return None
             return {
                 "checked_at": time.time(),
                 "reachable": True,
@@ -9186,7 +9701,7 @@ class Spider(BaseSpider):
                 "codec": signals.get("codec") or "",
                 "height": signals.get("height") or 0,
                 "subtitle": signals.get("subtitle"),
-                "output": clean_output,
+                "output": playback_output,
             }
         return None
 
@@ -9194,8 +9709,13 @@ class Spider(BaseSpider):
         key = self._route_probe_key(play_id, resource_id, resource_mode)
         if not key or not isinstance(probe, dict):
             return
+        cached_probe = dict(probe)
+        cached_output = self._sanitize_route_output(cached_probe.get("output"))
+        if not isinstance(cached_output, dict) or not Filter._first_http_url(cached_output.get("url")):
+            return
+        cached_probe["output"] = cached_output
         with self._cache_lock:
-            self._route_probe_cache[key] = dict(probe)
+            self._route_probe_cache[key] = cached_probe
             self._prune_route_probe_cache_locked()
 
     def _remember_successful_follow_route(self, parsed, candidate, quality_id, probe):
@@ -9215,6 +9735,9 @@ class Spider(BaseSpider):
             play_id = ""
         resource_id = str(candidate.get("resourceId") or parsed.get("resourceId") or "").strip()
         resource_mode = str(parsed.get("resourceMode") or "vod").strip().lower() or "vod"
+        resource_provider = self._resource_provider_key(
+            candidate.get("resourceProvider"), parsed.get("resourceProvider"),
+        )
         if resource_mode not in self.RESOURCE_SEARCH_MODES:
             resource_mode = ""
         if (
@@ -9249,6 +9772,8 @@ class Spider(BaseSpider):
             },
             "updatedAt": int(time.time()),
         }
+        if resource_provider:
+            route["resourceProvider"] = resource_provider
         with self._follow_enrich_lock:
             items = self._follow_memory.get("items") if isinstance(self._follow_memory, dict) else {}
             if not isinstance(items, dict):
@@ -9266,6 +9791,10 @@ class Spider(BaseSpider):
             item["last_play_route"] = route
             if resource_id:
                 item["alist_vod_id"] = resource_id
+            if resource_provider:
+                item["alist_resource_provider"] = resource_provider
+            else:
+                item.pop("alist_resource_provider", None)
             state_items[item_key] = item
             try:
                 self._save_follow_state(state_items)
@@ -9487,7 +10016,9 @@ class Spider(BaseSpider):
         return int(match.group(1)) if match else 1
 
     @staticmethod
-    def _build_followplay(url, item, resource_id, season, episode, name, episode_explicit=True, resource_mode="vod"):
+    def _build_followplay(
+            url, item, resource_id, season, episode, name, episode_explicit=True,
+            resource_mode="vod", resource_provider=""):
         def clipped(value, limit):
             return str(value or "").strip()[:limit]
 
@@ -9501,6 +10032,7 @@ class Spider(BaseSpider):
         ]
         resume = re.match(r"^S0*(\d{1,2})E0*(\d{1,3})$", str(item.get("history_episode") or ""), re.I)
         resource_mode = clipped(resource_mode or "vod", 16)
+        resource_provider = Spider._resource_provider_key(resource_provider)
         values = {
             "url": primary_url,
             "mediaType": clipped(item.get("media_type") or "movie", 16),
@@ -9526,6 +10058,8 @@ class Spider(BaseSpider):
             # never embed another route or a signed media response.
             "fallbacks": "[]",
         }
+        if resource_provider:
+            values["resourceProvider"] = resource_provider
 
         def encode(payload_values):
             payload = urlencode(payload_values).encode("utf-8")
@@ -9566,6 +10100,7 @@ class Spider(BaseSpider):
             return None
         parsed["resourceId"] = resource_id
         parsed["resourceMode"] = resource_mode
+        parsed["resourceProvider"] = self._resource_provider_key(parsed.get("resourceProvider"))
         for key in ("season", "episode", "tmdbId", "resumeSeason", "resumeEpisode"):
             parsed[key] = self._int_value(parsed.get(key))
         for key in ("resumePosition", "resumeDuration"):

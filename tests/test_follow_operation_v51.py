@@ -46,7 +46,7 @@ class FollowOperationV51Test(unittest.TestCase):
         expected = {
             "name": "豆瓣TMDB追更助手（AList-TVBox专用）",
             "id": "douban_tmdb_follow_single",
-            "version": "55",
+            "version": "56",
         }
         for field, value in expected.items():
             match = re.search(r"(?m)^\s*//@%s:(.+?)\s*$" % field, source)
@@ -231,6 +231,56 @@ class FollowOperationV51Test(unittest.TestCase):
         self.spider._import_native_history.assert_called_once_with(merged)
         self.assertEqual(result["uploaded"], 1)
         self.assertEqual(result["upload_blocked"], 1)
+
+    def test_history_resource_change_restores_mode_provider_and_clears_old_route(self):
+        old_resource = "https://pan.quark.cn/s/old"
+        new_resource = "https://pan.baidu.com/s/new"
+        item = {
+            "media_type": "tv", "tmdb_id": 101, "title": "测试剧集",
+            "trackingSeason": 1, "alist_vod_id": old_resource,
+            "alist_resource_mode": "vod", "alist_resource_provider": "quark",
+            "last_play_route": {
+                "resourceId": old_resource, "resourceMode": "vod",
+                "resourceProvider": "quark", "playId": "1@old-route",
+                "season": 1, "episode": 1,
+            },
+        }
+        play_id = self.spider._build_followplay(
+            "1@new-route", item, new_resource, 1, 2, "S01E02",
+            resource_mode="pansou", resource_provider="baidu",
+        )
+        history = {
+            "vodName": "测试剧集", "vodFlag": "测试线路",
+            "episodeUrl": "S01E02$" + play_id,
+            "position": 120000, "duration": 1200000,
+        }
+        self.spider._follow_memory = {"version": 2, "items": {"101": item}}
+
+        self.assertEqual(self.spider._reconcile_follow_histories([history]), 1)
+
+        updated = self.spider._follow_memory["items"]["101"]
+        self.assertEqual(updated["alist_vod_id"], new_resource)
+        self.assertEqual(updated["alist_resource_mode"], "pansou")
+        self.assertEqual(updated["alist_resource_provider"], "baidu")
+        self.assertNotIn("last_play_route", updated)
+
+    def test_history_conflicting_provider_clears_previous_provider(self):
+        new_resource = "https://pan.baidu.com/s/new"
+        item = {
+            "media_type": "tv", "tmdb_id": 101, "title": "测试剧集",
+            "trackingSeason": 1, "alist_vod_id": "old-resource",
+            "alist_resource_mode": "vod", "alist_resource_provider": "quark",
+        }
+        play_id = self.spider._build_followplay(
+            "1@new-route", item, new_resource, 1, 2, "S01E02",
+            resource_mode="pansou", resource_provider="quark",
+        )
+        fields = self.spider._history_resume_fields(item, {
+            "vodName": "测试剧集", "episodeUrl": "S01E02$" + play_id,
+        })
+
+        self.assertEqual(fields["alist_vod_id"], new_resource)
+        self.assertEqual(fields["alist_resource_provider"], "")
 
     def test_history_private_https_origin_falls_back_to_http(self):
         self.spider._alist_tvbox_plugin = True
@@ -1030,9 +1080,127 @@ class FollowOperationV51Test(unittest.TestCase):
         ], item, "tmdb:tv:101", {"vod_name": "测试剧集"})
 
         self.assertIsNotNone(merged)
+        sources = str(merged["vod_play_from"]).split("$$$")
         groups = str(merged["vod_play_url"]).split("$$$")
-        self.assertIn("S01E02补全$play-b-2", groups[0])
+        self.assertIn("夸克分享B", sources[0])
+        incomplete_index = next(index for index, source in enumerate(sources) if "夸克分享A" in source)
+        self.assertIn("S01E02补全$play-b-2", groups[incomplete_index])
         self.assertIn("同盘补全 1 集", merged["vod_remarks"])
+
+    def test_complete_route_is_default_over_single_episode_higher_quality(self):
+        item = {
+            "media_type": "tv", "tmdb_id": 270603,
+            "title": "遭到流放的转生重骑士凭借游戏知识大开无双",
+            "trackingSeason": 1, "latest_episode": "S01E06",
+        }
+        complete = {
+            "vod_play_from": "完整1080P",
+            "vod_play_url": "#".join(
+                "S01E%02d$complete-%d" % (episode, episode)
+                for episode in range(1, 7)
+            ),
+            "resource_id": "complete-resource",
+            "group_seasons": [1], "group_providers": ["quark"],
+            "group_quality": [{"resolution": 16, "total": 70}],
+            "_resource_mode": "vod",
+        }
+        single = {
+            "vod_play_from": "单集4K",
+            "vod_play_url": "S01E06$single-6",
+            "resource_id": "single-resource",
+            "group_seasons": [1], "group_providers": ["baidu"],
+            "group_quality": [{"resolution": 20, "total": 99}],
+            "_resource_mode": "vod",
+        }
+
+        merged = self.spider._merge_resource_vods(
+            [complete, single], item, "tmdb:tv:270603", {"vod_name": item["title"]},
+            preferred_resource_id="single-resource",
+        )
+
+        sources = merged["vod_play_from"].split("$$$")
+        self.assertIn("完整1080P", sources[0])
+        self.assertIn("单集4K", sources[1])
+        self.assertNotIn("同盘补全", merged["vod_remarks"])
+
+    def test_verified_resume_route_survives_single_route_limit(self):
+        self.spider.resource_limit = 1
+        item = {
+            "media_type": "tv", "tmdb_id": 101, "title": "测试剧集",
+            "trackingSeason": 1, "latest_episode": "S01E06",
+            "_bound_route_validated": True,
+            "last_play_route": {"season": 1, "episode": 6},
+        }
+        complete = {
+            "vod_play_from": "完整线路",
+            "vod_play_url": "#".join(
+                "S01E%02d$complete-%d" % (episode, episode)
+                for episode in range(1, 7)
+            ),
+            "resource_id": "complete-resource", "group_seasons": [1],
+            "group_providers": ["quark"], "_resource_mode": "vod",
+        }
+        resume = {
+            "vod_play_from": "续播线路", "vod_play_url": "S01E06$resume-6",
+            "resource_id": "resume-resource", "group_seasons": [1],
+            "group_providers": ["baidu"], "_resource_mode": "vod",
+        }
+
+        merged = self.spider._merge_resource_vods(
+            [complete, resume], item, "tmdb:tv:101", {"vod_name": "测试剧集"},
+            preferred_resource_id="resume-resource",
+        )
+
+        self.assertEqual(len(merged["vod_play_from"].split("$$$")), 1)
+        self.assertIn("继续播放", merged["vod_play_from"])
+        self.assertIn("续播线路", merged["vod_play_from"])
+
+    def test_exact_resume_group_wins_with_same_resource_and_single_route_limit(self):
+        self.spider.resource_limit = 1
+        item = {
+            "media_type": "tv", "tmdb_id": 101, "title": "测试剧集",
+            "trackingSeason": 3, "latest_episode": "S03E06",
+            "history_episode": "S02E03", "_resume_verified": True,
+        }
+        vod = {
+            "vod_play_from": "第三季完整$$$第二季续播",
+            "vod_play_url": "#".join(
+                "S03E%02d$season-3-%d" % (episode, episode)
+                for episode in range(1, 7)
+            ) + "$$$S02E03$season-2-resume",
+            "resource_id": "shared-resource",
+            "group_seasons": [3, 2],
+            "group_providers": ["quark", "quark"],
+            "_resource_mode": "vod",
+        }
+
+        merged = self.spider._merge_resource_vods(
+            [vod], item, "tmdb:tv:101", {"vod_name": "测试剧集"},
+            preferred_resource_id="shared-resource",
+        )
+
+        self.assertEqual(len(merged["vod_play_from"].split("$$$")), 1)
+        self.assertIn("第二季续播", merged["vod_play_from"])
+        self.assertIn("S02E03", merged["vod_play_url"])
+
+    def test_noncanonical_provider_does_not_enable_episode_completion(self):
+        item = {
+            "media_type": "tv", "tmdb_id": 101, "title": "测试剧集",
+            "trackingSeason": 1, "latest_episode": "S01E03",
+        }
+        merged = self.spider._merge_resource_vods([
+            {
+                "vod_play_from": "来源A", "vod_play_url": "S01E01$a-1#S01E03$a-3",
+                "resource_id": "opaque-a", "group_providers": ["provider-x"],
+            },
+            {
+                "vod_play_from": "来源B", "vod_play_url": "S01E02$b-2",
+                "resource_id": "opaque-b", "group_providers": ["provider-x"],
+            },
+        ], item, "tmdb:tv:101", {"vod_name": "测试剧集"})
+
+        self.assertNotIn("补全", merged["vod_play_url"])
+        self.assertNotIn("同盘补全", merged["vod_remarks"])
 
     def test_missing_episode_is_not_mixed_across_cloud_providers(self):
         item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集", "trackingSeason": 1}
@@ -1148,7 +1316,15 @@ class FollowOperationV51Test(unittest.TestCase):
             [rewritten, baidu_donor], item, "tmdb:tv:101", {"vod_name": "测试剧集"}
         )
 
-        self.assertNotIn("补全", str(merged["vod_play_url"]).split("$$$")[0])
+        conflict_group = next(
+            group for group in str(merged["vod_play_url"]).split("$$$")
+            if any(
+                (self.spider._parse_followplay(part.rpartition("$")[2]) or {}).get("resourceId")
+                == "opaque-conflict-id"
+                for part in group.split("#")
+            )
+        )
+        self.assertNotIn("补全", conflict_group)
         self.assertNotIn("同盘补全", merged["vod_remarks"])
 
     def test_pansou_provider_aliases_domains_and_offline_types_are_recognized(self):
@@ -1816,7 +1992,11 @@ class FollowOperationV51Test(unittest.TestCase):
             "parse": 0,
             "jx": 0,
             "url": "https://cdn.example/episode-1.m3u8?sig=ok",
-            "header": {"User-Agent": "test", "Cookie": "should-drop"},
+            "header": {
+                "User-Agent": "test",
+                "Cookie": "required-play-cookie",
+                "Authorization": "should-drop",
+            },
         }
         self.spider._atvp_play = Mock(return_value=direct_output)
         self.spider._probe_media_output = Mock(return_value=None)
@@ -1824,8 +2004,113 @@ class FollowOperationV51Test(unittest.TestCase):
         result = self.spider.playerContent("安全线路", play_id, [])
 
         self.assertEqual(result["url"], direct_output["url"])
-        self.assertEqual(result["header"], {"User-Agent": "test"})
+        self.assertEqual(result["header"], {
+            "User-Agent": "test",
+            "Cookie": "required-play-cookie",
+        })
         self.assertEqual(self.spider._route_probe_cache, {})
+
+    def test_media_probe_keeps_required_cookie_and_drops_unapproved_headers(self):
+        captured = {}
+        self.spider._resolved_media_target = Mock(return_value=(
+            MODULE.urlparse("https://cdn.example/video.mp4?sig=ok"),
+            ("203.0.113.10",),
+        ))
+
+        def request(_parsed, _address, headers, _deadline):
+            captured.update(headers)
+            return {
+                "status": 206,
+                "headers": {
+                    "Content-Type": "video/mp4",
+                    "Content-Range": "bytes 0-3/1024",
+                },
+                "body": b"test",
+            }
+
+        self.spider._pinned_media_request = Mock(side_effect=request)
+        result = self.spider._probe_media_output({
+            "parse": 0,
+            "url": "https://cdn.example/video.mp4?sig=ok",
+            "header": {
+                "Cookie": "required-play-cookie",
+                "Referer": "https://pan.example/",
+                "Authorization": "should-drop",
+            },
+        }, deadline=time.monotonic() + 5)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(captured["Cookie"], "required-play-cookie")
+        self.assertNotIn("Authorization", captured)
+        self.assertEqual(result["output"]["header"]["Cookie"], "required-play-cookie")
+
+    def test_media_probe_drops_sensitive_headers_on_cross_origin_redirect(self):
+        requests = []
+        resolved = {
+            "https://cdn.example/video.mp4": (
+                MODULE.urlparse("https://cdn.example/video.mp4"),
+                ("203.0.113.10",),
+            ),
+            "https://other.example/video.mp4": (
+                MODULE.urlparse("https://other.example/video.mp4"),
+                ("203.0.113.11",),
+            ),
+        }
+        self.spider._resolved_media_target = Mock(side_effect=lambda value, deadline=None: resolved[value])
+
+        def request(parsed, _address, headers, _deadline):
+            requests.append((parsed.hostname, dict(headers)))
+            if parsed.hostname == "cdn.example":
+                return {
+                    "status": 302,
+                    "headers": {"Location": "https://other.example/video.mp4"},
+                    "body": b"",
+                }
+            return {
+                "status": 206,
+                "headers": {
+                    "Content-Type": "video/mp4",
+                    "Content-Range": "bytes 0-3/1024",
+                },
+                "body": b"test",
+            }
+
+        self.spider._pinned_media_request = Mock(side_effect=request)
+        result = self.spider._probe_media_output({
+            "parse": 0,
+            "url": "https://cdn.example/video.mp4",
+            "header": {
+                "Cookie": "required-play-cookie",
+                "Origin": "https://pan.example",
+                "Referer": "https://pan.example/",
+            },
+        }, deadline=time.monotonic() + 5)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(requests[0][1]["Cookie"], "required-play-cookie")
+        self.assertNotIn("Cookie", requests[1][1])
+        self.assertNotIn("Origin", requests[1][1])
+        self.assertNotIn("Referer", requests[1][1])
+        self.assertEqual(result["output"]["url"], "https://other.example/video.mp4")
+        self.assertNotIn("Cookie", result["output"]["header"])
+        self.assertNotIn("Origin", result["output"]["header"])
+        self.assertNotIn("Referer", result["output"]["header"])
+
+    def test_route_output_rejects_conflicting_case_insensitive_headers(self):
+        output = self.spider._sanitize_route_output({
+            "url": "https://cdn.example/video.mp4",
+            "header": {"Cookie": "first", "cookie": "second"},
+        })
+
+        self.assertIsNone(output)
+
+    def test_route_output_rejects_oversized_cookie(self):
+        output = self.spider._sanitize_route_output({
+            "url": "https://cdn.example/video.mp4",
+            "header": {"Cookie": "x" * (self.spider.ROUTE_COOKIE_MAX_BYTES + 1)},
+        })
+
+        self.assertIsNone(output)
 
     def test_persisted_binding_remains_valid_without_route_ttl(self):
         self.spider.atvp_api = "https://atvp.example"
@@ -1925,7 +2210,8 @@ class FollowOperationV51Test(unittest.TestCase):
         call_lock = MODULE.threading.Lock()
         call_count = {"value": 0}
 
-        def candidates(_item, deadline=None):
+        def candidates(_item, deadline=None, background=False):
+            self.assertTrue(background)
             with call_lock:
                 call_count["value"] += 1
                 current = call_count["value"]
@@ -2112,6 +2398,38 @@ class FollowOperationV51Test(unittest.TestCase):
             if not part.rpartition("$")[2].startswith(self.spider.SELECT_PROMPT_ID)
         )
         self.assertEqual(self.spider._parse_followplay(high_play_id)["url"], "1@best-late")
+
+    def test_resource_rewrite_stops_at_sixty_four_group_scan_boundary(self):
+        item = {"media_type": "tv", "tmdb_id": 101, "title": "测试剧集", "trackingSeason": 1}
+        scan_limit = self.spider.RESOURCE_PLAY_GROUP_SCAN_LIMIT
+        sources = ["线路%02d" % index for index in range(1, scan_limit + 2)]
+        vod = {
+            "vod_name": "测试剧集",
+            "vod_play_from": "$$$".join(sources),
+            "vod_play_url": "$$$".join(
+                "S01E01$1@route-%02d" % index for index in range(1, scan_limit + 2)
+            ),
+            "_route_quality": [
+                {"resolution": index, "total": index}
+                for index in range(1, scan_limit + 2)
+            ],
+        }
+
+        rewritten = self.spider._rewrite_resource_vod(
+            vod, item, "resource-101", mode="vod", validated=True,
+        )
+        merged = self.spider._merge_resource_vods(
+            [rewritten], item, "tmdb:tv:101", {"vod_name": "测试剧集"},
+        )
+
+        rewritten_sources = rewritten["vod_play_from"].split("$$$")
+        selected_sources = merged["vod_play_from"].split("$$$")
+        self.assertEqual(len(rewritten_sources), scan_limit)
+        self.assertEqual(len(rewritten["vod_play_url"].split("$$$")), scan_limit)
+        self.assertTrue(rewritten["_route_candidates_limited"])
+        self.assertTrue(any("线路64" in source for source in selected_sources), selected_sources)
+        self.assertFalse(any("线路65" in source for source in rewritten_sources), rewritten_sources)
+        self.assertFalse(any("线路65" in source for source in selected_sources), selected_sources)
 
     def test_detail_collects_candidate_pool_before_selecting_three_routes(self):
         self.spider._alist_tvbox_plugin = True
@@ -2841,6 +3159,261 @@ class FollowOperationV51Test(unittest.TestCase):
             {"pansou", "telegram"},
         )
         self.spider._schedule_supplement_resource_search.assert_not_called()
+
+    def test_ready_entry_cache_skips_first_detail_search_and_revalidation(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider.route_preheat = False
+        item = {
+            "tmdb_id": 101, "source_id": "tmdb:tv:101", "media_type": "tv",
+            "title": "测试剧集", "alist_vod_id": "ready-resource",
+            "alist_resource_mode": "vod",
+        }
+        self.spider._follow_memory = {"version": 2, "items": {"101": dict(item)}}
+        row = {
+            "vod_id": "ready-resource", "vod_name": "测试剧集",
+            "_resource_mode": "vod", "_validated_groups": 1,
+        }
+        detail = {"list": [{
+            "vod_name": "测试剧集", "vod_play_from": "已预热线路",
+            "vod_play_url": "S01E01$1@ready-episode",
+        }]}
+        self.assertTrue(self.spider._store_validated_resource_detail(row, detail))
+        self.assertTrue(self.spider._cache_ready_resource_rows(item, [row]))
+        self.spider._atvp_history_snapshot = Mock(return_value=[])
+        self.spider._resource_candidates = Mock(side_effect=AssertionError("不应首次搜索"))
+        self.spider._validated_playable_detail = Mock(side_effect=AssertionError("不应重验"))
+
+        result = self.spider._alist_detail_from_metadata(
+            "tmdb:tv:101",
+            {"list": [{"vod_id": "tmdb:tv:101", "vod_name": "测试剧集"}]},
+        )
+
+        self.assertIn("已预热线路", result["list"][0]["vod_play_from"])
+        self.assertIn("S01E01", result["list"][0]["vod_play_url"])
+        self.spider._resource_candidates.assert_not_called()
+        self.spider._validated_playable_detail.assert_not_called()
+
+    def test_pending_entry_preheat_uses_bound_route_without_global_search(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider.route_preheat = False
+        item = {
+            "tmdb_id": 101, "source_id": "tmdb:tv:101", "media_type": "tv",
+            "title": "测试剧集", "alist_vod_id": "bound-resource",
+            "alist_resource_mode": "vod",
+        }
+        self.spider._follow_memory = {"version": 2, "items": {"101": dict(item)}}
+        preheat_key = self.spider._entry_resource_preheat_key(item)
+        self.spider._resource_entry_preheat_jobs[preheat_key] = object()
+        bound_detail = {"list": [{
+            "vod_name": "测试剧集", "vod_play_from": "绑定兜底",
+            "vod_play_url": "S01E01$1@bound-episode",
+        }]}
+        self.spider._atvp_history_snapshot = Mock(return_value=[])
+        self.spider._resource_detail = Mock(return_value=bound_detail)
+        self.spider._validated_playable_detail = Mock(return_value=bound_detail)
+        self.spider._resource_candidates = Mock(side_effect=AssertionError("预热中不应全局搜索"))
+
+        result = self.spider._alist_detail_from_metadata(
+            "tmdb:tv:101",
+            {"list": [{"vod_id": "tmdb:tv:101", "vod_name": "测试剧集"}]},
+        )
+
+        self.assertIn("绑定兜底", result["list"][0]["vod_play_from"])
+        self.spider._resource_candidates.assert_not_called()
+        self.spider._validated_playable_detail.assert_called_once()
+
+    def test_entry_preheat_publishes_playable_cache_binds_fallback_and_refreshes_detail(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider._atvp_session = Mock()
+        item = {
+            "tmdb_id": 101, "title": "测试剧集", "latest_episode": "S01E06",
+        }
+        self.spider._follow_memory = {"version": 2, "items": {"101": dict(item)}}
+        first_row = {
+            "vod_id": "ready-resource", "vod_name": "测试剧集",
+            "_resource_mode": "pansou", "_validated_groups": 1,
+        }
+        second_row = {
+            "vod_id": "ready-resource-2", "vod_name": "测试剧集备选",
+            "_resource_mode": "telegram", "_validated_groups": 1,
+        }
+        first_detail = {"list": [{
+            "vod_name": "测试剧集", "vod_play_from": "盘搜已验证",
+            "vod_play_url": "S01E01$1@ready-1#S01E06$1@ready-6",
+        }]}
+        second_detail = {"list": [{
+            "vod_name": "测试剧集备选", "vod_play_from": "电报已验证",
+            "vod_play_url": "S01E01$1@ready-2",
+        }]}
+        self.spider._resource_candidates = Mock(return_value=[first_row, second_row])
+        self.spider._checked_resource_rows = Mock(side_effect=lambda rows, _deadline=None: rows)
+
+        def playable(rows, _item, _deadline=None, expected_generation=None, on_update=None):
+            self.spider._store_validated_resource_detail(
+                rows[0], first_detail, expected_generation=expected_generation,
+            )
+            on_update(rows[:1])
+            self.spider._store_validated_resource_detail(
+                rows[1], second_detail, expected_generation=expected_generation,
+            )
+            on_update(rows[:2])
+            return rows
+
+        self.spider._playable_resource_rows = Mock(side_effect=playable)
+        self.spider._replace_bound_resource = Mock(return_value=True)
+        self.spider._schedule_active_detail_refresh = Mock(return_value=True)
+
+        self.assertTrue(self.spider._schedule_entry_resource_preheat([item]))
+        deadline = time.time() + 2
+        while self.spider._resource_entry_preheat_jobs and time.time() < deadline:
+            time.sleep(0.01)
+
+        self.assertFalse(self.spider._resource_entry_preheat_jobs)
+        self.assertEqual(self.spider._ready_resource_rows(item)[0]["vod_id"], "ready-resource")
+        self.spider._replace_bound_resource.assert_called_once()
+        self.assertEqual(self.spider._schedule_active_detail_refresh.call_count, 2)
+        refresh_item = self.spider._schedule_active_detail_refresh.call_args_list[0].args[0]
+        self.assertEqual(refresh_item["source_id"], "tmdb:tv:101")
+        self.spider._resource_candidates.assert_called_once()
+        self.assertTrue(self.spider._resource_candidates.call_args.kwargs["background"])
+
+    def test_entry_preheat_keeps_multiple_valid_groups_from_one_resource(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider._atvp_session = Mock()
+        item = {
+            "tmdb_id": 101, "source_id": "tmdb:tv:101", "media_type": "tv",
+            "title": "测试剧集", "trackingSeason": 1, "latest_episode": "S01E02",
+        }
+        row = {
+            "vod_id": "multi-group-resource", "vod_name": "测试剧集",
+            "_resource_mode": "pansou",
+        }
+        detail = {"list": [{
+            "vod_name": "测试剧集",
+            "vod_play_from": "来源A$$$来源B",
+            "vod_play_url": "S01E01$1@route-a$$$S01E02$1@route-b",
+        }]}
+        self.spider._resource_candidates = Mock(return_value=[row])
+        self.spider._checked_resource_rows = Mock(side_effect=lambda rows, _deadline=None: rows)
+        self.spider._resource_detail = Mock(return_value=detail)
+        self.spider._atvp_play = Mock(side_effect=lambda play_id, **_kwargs: {
+            "parse": 0, "url": "https://cdn.example/%s.mp4" % play_id,
+            "header": {"Cookie": "required"},
+        })
+        self.spider._probe_media_output = Mock(side_effect=lambda output, deadline=None: {
+            "checked_at": time.time(), "reachable": True,
+            "output": dict(output), "startup_ms": 10,
+        })
+        self.spider._schedule_active_detail_refresh = Mock(return_value=True)
+
+        self.assertTrue(self.spider._schedule_entry_resource_preheat([item]))
+        deadline = time.time() + 2
+        while self.spider._resource_entry_preheat_jobs and time.time() < deadline:
+            time.sleep(0.01)
+
+        ready = self.spider._ready_resource_detail(
+            "tmdb:tv:101", item, {"vod_id": "tmdb:tv:101", "vod_name": "测试剧集"},
+        )
+        self.assertIsNotNone(ready)
+        self.assertIn("来源A", ready["vod_play_from"])
+        self.assertIn("来源B", ready["vod_play_from"])
+        self.assertEqual(len(ready["vod_play_url"].split("$$$")), 2)
+
+    def test_home_and_follow_category_entries_retry_resource_preheat(self):
+        self.spider._schedule_entry_resource_preheat = Mock(return_value=True)
+        self.spider._flush_playback_sync_on_navigation = Mock()
+        self.spider._load_follow_state = Mock()
+
+        self.spider.homeContent(False)
+        self.spider.categoryContent("unknown", "2", False, {})
+        self.spider.categoryContent("follow_updates", "3", False, {})
+
+        self.assertEqual(self.spider._schedule_entry_resource_preheat.call_count, 2)
+        self.spider._schedule_entry_resource_preheat.assert_any_call()
+        self.spider._schedule_entry_resource_preheat.assert_any_call(page=3)
+
+    def test_old_generation_cannot_write_ready_rows_to_new_backend_cache(self):
+        self.spider.atvp_api = "https://old-atvp.example"
+        self.spider.atvp_token = "old-token"
+        item = {"tmdb_id": 101, "title": "测试剧集"}
+        row = {
+            "vod_id": "old-resource", "vod_name": "测试剧集",
+            "_resource_mode": "pansou", "_validated_groups": 1,
+        }
+        detail = {"list": [{
+            "vod_name": "测试剧集", "vod_play_from": "旧后端线路",
+            "vod_play_url": "S01E01$1@old-route",
+        }]}
+        old_generation = self.spider._cache_generation
+        old_key = self.spider._entry_resource_preheat_key(item)
+        self.assertTrue(self.spider._store_validated_resource_detail(row, detail))
+
+        with self.spider._cache_lock:
+            self.spider.atvp_api = "https://new-atvp.example"
+            self.spider.atvp_token = "new-token"
+            self.spider._cache_generation += 1
+        new_key = self.spider._entry_resource_preheat_key(item)
+
+        self.assertFalse(self.spider._cache_ready_resource_rows(
+            item, [row], expected_generation=old_generation, cache_key=old_key,
+        ))
+        self.assertNotIn(old_key, self.spider._cache)
+        self.assertNotIn(new_key, self.spider._cache)
+
+    def test_supplement_search_refreshes_after_each_material_route_growth(self):
+        item = {"title": "测试剧集", "year": "2026", "trackingSeason": 1}
+        rows = [
+            {
+                "vod_id": "route-a", "vod_name": "测试剧集 2026",
+                "_resource_mode": "pansou", "_validated_groups": 1,
+            },
+            {
+                "vod_id": "route-b", "vod_name": "测试剧集 2026",
+                "_resource_mode": "telegram", "_validated_groups": 1,
+            },
+        ]
+        self.spider._resource_search_mode = Mock(side_effect=lambda mode, *_args: [
+            row for row in rows if row["_resource_mode"] == mode
+        ])
+        self.spider._checked_resource_rows = Mock(side_effect=lambda values, _deadline=None: values)
+        self.spider._resource_fair_candidate_order = Mock(side_effect=lambda values, *_args, **_kwargs: values)
+
+        def playable(values, *_args, **kwargs):
+            callback = kwargs["on_update"]
+            callback(values[:1])
+            callback(values[:2])
+            return values
+
+        self.spider._playable_resource_rows = Mock(side_effect=playable)
+        self.spider._schedule_active_detail_refresh = Mock(return_value=True)
+        cache_key = "supplement-growth-test"
+
+        self.assertTrue(self.spider._schedule_supplement_resource_search(
+            ["pansou", "telegram"], ["测试剧集"], item, cache_key,
+        ))
+        deadline = time.time() + 2
+        while cache_key in self.spider._resource_search_jobs and time.time() < deadline:
+            time.sleep(0.01)
+
+        self.assertNotIn(cache_key, self.spider._resource_search_jobs)
+        self.assertEqual(self.spider._schedule_active_detail_refresh.call_count, 2)
+
+    def test_init_triggers_resource_preheat_after_state_load(self):
+        fresh = Spider()
+        fresh._schedule_entry_resource_preheat = Mock(return_value=True)
+        try:
+            fresh.init({})
+            fresh._schedule_entry_resource_preheat.assert_called_once_with()
+        finally:
+            fresh.destroy()
 
     def test_resource_mode_search_executor_queues_without_exceeding_four_active_searches(self):
         release = MODULE.threading.Event()
@@ -3729,6 +4302,67 @@ class FollowOperationV51Test(unittest.TestCase):
         cached = self.spider._route_probe_snapshot("1@episode-6", "resource-101", "vod")
         self.assertEqual(cached["output"]["url"], direct_output["url"])
 
+    def test_candidate_provider_survives_rewrite_player_persistence_and_restart(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.route_preheat = False
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        item = {
+            "media_type": "tv", "tmdb_id": 101, "source_id": "tmdb:tv:101",
+            "title": "测试剧集", "trackingSeason": 1, "latest_episode": "S01E06",
+        }
+        self.spider._follow_memory = {"version": 2, "items": {"101": dict(item)}}
+        self.spider._atvp_history_snapshot = Mock(return_value=[])
+        self.spider._resource_candidates = Mock(return_value=[{
+            "vod_id": "opaque-resource", "vod_name": "测试剧集",
+            "provider": "夸克", "_resource_mode": "vod",
+        }])
+        self.spider._resource_detail = Mock(return_value={"list": [{
+            "vod_name": "测试剧集", "vod_play_from": "我的云盘",
+            "vod_play_url": "S01E06$1@episode-6",
+        }]})
+
+        detail = self.spider._alist_detail_from_metadata(
+            "tmdb:tv:101", {"list": [{"vod_id": "tmdb:tv:101", "vod_name": "测试剧集"}]},
+        )
+        real_play_id = next(
+            part.rpartition("$")[2]
+            for group in detail["list"][0]["vod_play_url"].split("$$$")
+            for part in group.split("#")
+            if not part.rpartition("$")[2].startswith(self.spider.SELECT_PROMPT_ID)
+        )
+        parsed = self.spider._parse_followplay(real_play_id)
+        self.assertEqual(parsed["resourceProvider"], "quark")
+
+        direct_output = {
+            "parse": 0, "jx": 0, "url": "https://cdn.example/video.m3u8", "header": {},
+        }
+        checked = {
+            "reachable": True, "checked_at": time.time(), "startup_ms": 100,
+            "height": 1080, "codec": "h264", "subtitle": False,
+            "output": direct_output,
+        }
+        self.spider._atvp_play = Mock(return_value=direct_output)
+        self.spider._probe_media_output = Mock(return_value=checked)
+        self.spider._register_playback_sync_window = Mock(return_value=True)
+
+        result = self.spider.playerContent("我的云盘", real_play_id, [])
+
+        self.assertEqual(result["url"], direct_output["url"])
+        stored = self.spider._follow_memory["items"]["101"]
+        self.assertEqual(stored["last_play_route"]["resourceProvider"], "quark")
+        self.assertEqual(stored["alist_resource_provider"], "quark")
+        persisted = self.spider._sanitize_follow_persisted_item(stored)
+        fresh = Spider()
+        try:
+            fresh.atvp_api = self.spider.atvp_api
+            fresh.atvp_token = self.spider.atvp_token
+            bound = fresh._bound_resource_row(persisted)
+            self.assertEqual(bound["vod_id"], "opaque-resource")
+            self.assertEqual(bound["provider"], "quark")
+        finally:
+            fresh.destroy()
+
     def test_numeric_play_id_is_persisted_and_restored(self):
         self.spider.atvp_api = "https://atvp.example"
         self.spider.atvp_token = "token"
@@ -4124,6 +4758,23 @@ class FollowOperationV51Test(unittest.TestCase):
             probe["output"]["url"],
         )
 
+    def test_route_probe_cache_rejects_oversized_headers(self):
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        probe = {
+            "checked_at": time.time(),
+            "reachable": True,
+            "output": {
+                "parse": 0,
+                "url": "https://cdn.example/video.m3u8",
+                "header": {"Cookie": "x" * (self.spider.ROUTE_COOKIE_MAX_BYTES + 1)},
+            },
+        }
+
+        self.spider._cache_route_probe("1@same-play", probe, "resource-a", "vod")
+
+        self.assertEqual(self.spider._route_probe_cache, {})
+
     def test_route_probe_cache_prunes_expired_and_overflow_entries(self):
         self.spider.atvp_api = "https://atvp.example"
         self.spider.atvp_token = "token"
@@ -4335,9 +4986,11 @@ class FollowOperationV51Test(unittest.TestCase):
             "title": "测试剧集",
             "alist_vod_id": "magnet:?xt=urn:btih:ABC",
             "alist_resource_mode": "vod",
+            "alist_resource_provider": "quark",
             "last_play_route": {
                 "resourceId": "data:text/plain,secret",
                 "resourceMode": "vod",
+                "resourceProvider": "quark",
                 "playId": "1@javascript:alert(1)",
                 "season": 1,
                 "episode": 1,
@@ -4352,6 +5005,7 @@ class FollowOperationV51Test(unittest.TestCase):
 
         item = self.spider._follow_memory["items"]["101"]
         self.assertNotIn("alist_vod_id", item)
+        self.assertNotIn("alist_resource_provider", item)
         self.assertNotIn("last_play_route", item)
         self.spider._persist_follow_state.assert_called_once()
 
