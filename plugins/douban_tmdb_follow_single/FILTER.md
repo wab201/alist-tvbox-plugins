@@ -1,13 +1,13 @@
 # 过滤器复用说明
 
-过滤器是可选功能。同一份 `豆瓣TMDB追更单入口.py` 同时包含 `Spider` 和 `Filter`，可给其他 AList-TVBox 受管站点补充 History 选集和续播位置。追更助手的独立备选线路不会共享给其他站点。
+过滤器是可选功能。同一份 `豆瓣TMDB追更单入口_v60.py` 同时包含 `Spider` 和 `Filter`，可给其他 AList-TVBox 受管站点补充 History 选集和续播位置。追更助手的独立备选线路不会共享给其他站点。
 
 ## 准备
 
 准备该 Python 文件的 HTTPS 直链。地址必须能被 AList-TVBox 容器访问，并以 `.py` 结尾：
 
 ```text
-https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMDB追更单入口.py
+https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMDB追更单入口_v60.py
 ```
 
 过滤器地址不是 FongMi 配置地址，也不是 `spiders_v2.json` 地址。
@@ -16,7 +16,7 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMD
 
 1. 使用管理员账号登录 AList-TVBox。
 2. 打开 **订阅**，点击 **过滤器管理**。
-3. 在 **过滤器地址** 中填写 `豆瓣TMDB追更单入口.py` 的 HTTPS 直链。
+3. 在 **过滤器地址** 中填写 `豆瓣TMDB追更单入口_v60.py` 的 HTTPS 直链。
 4. **名称** 可填写“追更 History 过滤器”，也可留空使用文件名。
 5. **拦截点** 只选择“详情”和“播放”，即 `detail`、`player`。
 6. **作用范围** 选择“除外”。

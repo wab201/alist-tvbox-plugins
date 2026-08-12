@@ -24,7 +24,8 @@ sys.modules.setdefault("base", base_module)
 sys.modules.setdefault("base.spider", spider_module)
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口.py"
+VERSIONED_SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口_v60.py"
+SOURCE = VERSIONED_SOURCE if VERSIONED_SOURCE.exists() else ROOT / "py" / "豆瓣TMDB追更单入口.py"
 SPEC = importlib.util.spec_from_file_location("douban_tmdb_follow_v51", str(SOURCE))
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
@@ -41,12 +42,388 @@ class FollowOperationV51Test(unittest.TestCase):
     def tearDown(self):
         self.spider.destroy()
 
+    def test_diagnostics_are_bounded_and_redact_configured_secrets(self):
+        self.spider.tmdb_access_token = "secret-tmdb-token"
+        self.spider.DIAGNOSTIC_LIMIT = 3
+
+        for index in range(5):
+            self.spider._diagnostic_event(
+                "test.event", "ERROR",
+                exc=RuntimeError("request token=secret-tmdb-token failed"),
+                request_url="https://example.test/play?token=secret-tmdb-token&index=%d" % index,
+            )
+
+        snapshot = self.spider._diagnostic_snapshot()
+        self.assertEqual(len(snapshot), 3)
+        serialized = json.dumps(snapshot, ensure_ascii=False)
+        self.assertNotIn("secret-tmdb-token", serialized)
+        self.assertEqual([row["seq"] for row in snapshot], [3, 4, 5])
+
+    def test_diagnostic_failure_never_changes_business_result(self):
+        with patch.object(self.spider, "_short_error", side_effect=RuntimeError("diagnostic failed")):
+            self.assertIsNone(self.spider._diagnostic_event("test.failure", exc=RuntimeError("boom")))
+        self.assertEqual(self.spider._diagnostic_snapshot(), [])
+
+    def test_task_supervisor_rejects_new_work_after_shutdown(self):
+        supervisor = MODULE._TaskSupervisor()
+        supervisor.shutdown()
+
+        with self.assertRaises(RuntimeError):
+            supervisor.start_thread(lambda: None)
+        with self.assertRaises(RuntimeError):
+            supervisor.start_timer(0, lambda: None)
+
+    def test_task_supervisor_thread_start_failure_rolls_back_tracking(self):
+        supervisor = MODULE._TaskSupervisor()
+        thread = Mock()
+        thread.start.side_effect = RuntimeError("thread start failed")
+
+        with patch.object(MODULE.threading, "Thread", return_value=thread):
+            with self.assertRaises(RuntimeError):
+                supervisor.start_thread(lambda: None)
+
+        self.assertEqual(supervisor._threads, set())
+        supervisor.shutdown()
+
+    def test_task_supervisor_shutdown_is_idempotent(self):
+        supervisor = MODULE._TaskSupervisor()
+        executor = Mock()
+        supervisor.register_executor(executor)
+
+        supervisor.shutdown()
+        supervisor.shutdown()
+
+        executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+
+    def test_destroy_then_init_rebuilds_task_runtime(self):
+        old_tasks = self.spider._tasks
+        self.spider.destroy()
+
+        self.spider.init({})
+
+        self.assertIsNot(self.spider._tasks, old_tasks)
+        self.assertFalse(self.spider._tasks.is_closed())
+        completed = MODULE.threading.Event()
+        self.assertTrue(self.spider._tasks.start_thread(completed.set, name="reinit-check"))
+        self.assertTrue(completed.wait(1))
+
+    def test_playback_timer_owner_mismatch_is_not_tracked(self):
+        self.spider._playback_sync_pending["key"] = {"owner": object()}
+
+        self.assertFalse(
+            self.spider._schedule_playback_sync_check("key", 1, expected_owner=object())
+        )
+
+        self.assertEqual(self.spider._tasks._timers, set())
+
+    def test_cached_failure_backoff_grows_and_success_resets_it(self):
+        key = "cache:test"
+        self.spider.failure_ttl = 60
+        self.spider._remember_failure(key, RuntimeError("first"))
+        first = self.spider._failures[key]
+        self.spider._remember_failure(key, RuntimeError("second"))
+        second = self.spider._failures[key]
+
+        self.assertGreaterEqual(second[1] - second[0], first[1] - first[0])
+        self.assertTrue(self.spider._has_cached_failure(key))
+        self.spider._clear_cached_failure(key)
+        self.assertFalse(self.spider._has_cached_failure(key))
+        self.assertNotIn(key, self.spider._failure_attempts)
+
+    def test_destroy_flushes_dirty_persistent_response_cache(self):
+        fresh = Spider()
+        fresh.setCache = Mock()
+        fresh._persistent_cache["json:test"] = (time.time(), {"ok": True})
+        fresh._persistent_cache_dirty = True
+
+        fresh.destroy()
+
+        fresh.setCache.assert_called_once()
+        cache_key, payload = fresh.setCache.call_args.args
+        self.assertEqual(cache_key, fresh.RESPONSE_CACHE_KEY)
+        self.assertEqual(payload["entries"][-1][0], "json:test")
+
+    def test_clean_empty_response_cache_does_not_write_on_destroy(self):
+        fresh = Spider()
+        fresh.setCache = Mock()
+
+        fresh.destroy()
+
+        fresh.setCache.assert_not_called()
+
+    def test_async_response_cache_exception_keeps_dirty_for_later_retry(self):
+        fresh = Spider()
+        attempted = MODULE.threading.Event()
+
+        def fail_save(*_args):
+            attempted.set()
+            raise RuntimeError("cache unavailable")
+
+        fresh.setCache = Mock(side_effect=fail_save)
+        fresh._persistent_cache["json:test"] = (time.time(), {"ok": True})
+
+        self.assertTrue(fresh._schedule_response_cache_save())
+        self.assertTrue(attempted.wait(1))
+        deadline = time.time() + 1
+        while fresh._persistent_cache_saving and time.time() < deadline:
+            time.sleep(0.01)
+
+        self.assertFalse(fresh._persistent_cache_saving)
+        self.assertTrue(fresh._persistent_cache_dirty)
+        fresh._tasks.shutdown(wait=False)
+
+    def test_async_response_cache_failed_result_keeps_dirty_for_later_retry(self):
+        fresh = Spider()
+        attempted = MODULE.threading.Event()
+
+        def fail_save(*_args):
+            attempted.set()
+            return "failed"
+
+        fresh.setCache = Mock(side_effect=fail_save)
+        fresh._persistent_cache["json:test"] = (time.time(), {"ok": True})
+
+        self.assertTrue(fresh._schedule_response_cache_save())
+        self.assertTrue(attempted.wait(1))
+        deadline = time.time() + 1
+        while fresh._persistent_cache_saving and time.time() < deadline:
+            time.sleep(0.01)
+
+        self.assertFalse(fresh._persistent_cache_saving)
+        self.assertTrue(fresh._persistent_cache_dirty)
+        fresh._tasks.shutdown(wait=False)
+
+    def test_response_cache_flush_exception_keeps_dirty(self):
+        fresh = Spider()
+        fresh.setCache = Mock(side_effect=RuntimeError("cache unavailable"))
+        fresh._persistent_cache["json:test"] = (time.time(), {"ok": True})
+        fresh._persistent_cache_dirty = True
+
+        self.assertFalse(fresh._flush_response_cache_sync())
+
+        self.assertTrue(fresh._persistent_cache_dirty)
+        fresh._tasks.shutdown(wait=False)
+
+    def test_response_cache_flush_failed_result_keeps_dirty(self):
+        fresh = Spider()
+        fresh.setCache = Mock(return_value="failed")
+        fresh._persistent_cache["json:test"] = (time.time(), {"ok": True})
+        fresh._persistent_cache_dirty = True
+
+        self.assertFalse(fresh._flush_response_cache_sync())
+
+        self.assertTrue(fresh._persistent_cache_dirty)
+        fresh._tasks.shutdown(wait=False)
+
+    def test_old_response_cache_worker_cannot_clear_new_save_owner(self):
+        fresh = Spider()
+        fresh.setCache = Mock()
+        fresh._persistent_cache["json:old"] = (time.time(), {"old": True})
+
+        self.assertTrue(fresh._schedule_response_cache_save())
+        old_owner = fresh._persistent_cache_saving
+        with fresh._cache_lock:
+            fresh._cache_generation += 1
+            new_owner = object()
+            fresh._persistent_cache_saving = new_owner
+        deadline = time.time() + 1
+        while old_owner is fresh._persistent_cache_saving and time.time() < deadline:
+            time.sleep(0.01)
+
+        self.assertIs(fresh._persistent_cache_saving, new_owner)
+        fresh._persistent_cache_saving = None
+        fresh._tasks.shutdown(wait=False)
+
+    def test_response_cache_write_finishes_before_lifecycle_generation_switch(self):
+        fresh = Spider()
+        entered = MODULE.threading.Event()
+        release = MODULE.threading.Event()
+        switched = MODULE.threading.Event()
+
+        def blocking_save(*_args):
+            entered.set()
+            release.wait(1)
+            return None
+
+        fresh.setCache = blocking_save
+        fresh._persistent_cache["json:old"] = (time.time(), {"old": True})
+        self.assertTrue(fresh._schedule_response_cache_save())
+        self.assertTrue(entered.wait(1))
+
+        def switch_generation():
+            with fresh._cache_persist_lock:
+                with fresh._cache_lock:
+                    fresh._cache_generation += 1
+            switched.set()
+
+        switcher = MODULE.threading.Thread(target=switch_generation)
+        switcher.start()
+        self.assertFalse(switched.wait(0.05))
+        release.set()
+        self.assertTrue(switched.wait(1))
+        switcher.join(1)
+        fresh._tasks.shutdown(wait=False)
+
+    def test_old_cache_refresh_cannot_clear_new_single_flight_owner(self):
+        old_started = MODULE.threading.Event()
+        old_release = MODULE.threading.Event()
+        new_started = MODULE.threading.Event()
+        new_release = MODULE.threading.Event()
+        key = "json:shared"
+
+        def old_loader():
+            old_started.set()
+            old_release.wait(1)
+            return {"old": True}
+
+        def new_loader():
+            new_started.set()
+            new_release.wait(1)
+            return {"new": True}
+
+        self.assertTrue(self.spider._schedule_cache_refresh(key, old_loader))
+        self.assertTrue(old_started.wait(1))
+        with self.spider._cache_lock:
+            self.spider._cache_generation += 1
+            self.spider._refreshing_cache_keys.clear()
+        self.assertTrue(self.spider._schedule_cache_refresh(key, new_loader))
+        self.assertTrue(new_started.wait(1))
+        new_owner = self.spider._refreshing_cache_keys[key]
+
+        old_release.set()
+        deadline = time.time() + 1
+        while self.spider._refreshing_cache_keys.get(key) is not new_owner and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertIs(self.spider._refreshing_cache_keys.get(key), new_owner)
+
+        new_release.set()
+        deadline = time.time() + 1
+        while key in self.spider._refreshing_cache_keys and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertNotIn(key, self.spider._refreshing_cache_keys)
+
+    def test_route_quality_save_failures_keep_dirty(self):
+        for failure in (RuntimeError("cache unavailable"), "failed"):
+            fresh = Spider()
+            attempted = MODULE.threading.Event()
+
+            def fail_save(*_args, result=failure):
+                attempted.set()
+                if isinstance(result, Exception):
+                    raise result
+                return result
+
+            fresh.setCache = fail_save
+            fresh._route_quality_history["a" * 64] = {"updatedAt": int(time.time())}
+            self.assertTrue(fresh._schedule_route_quality_save())
+            self.assertTrue(attempted.wait(1))
+            deadline = time.time() + 1
+            while fresh._route_quality_saving and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(fresh._route_quality_dirty)
+            fresh._route_quality_dirty = False
+            fresh._tasks.shutdown(wait=False)
+
+    def test_follow_page_refresh_uses_supervised_executor(self):
+        self.assertIn(self.spider._follow_refresh_executor, self.spider._tasks._executors)
+        item = {"tmdb_id": 101, "title": "测试", "last_checked": 0}
+        self.spider._follow_memory = {"version": 2, "items": {"101": dict(item)}}
+        self.spider._refresh_follow_item = Mock(return_value=dict(item, last_checked=int(time.time())))
+
+        with patch.object(MODULE, "ThreadPoolExecutor", side_effect=AssertionError("临时线程池不应创建")):
+            self.assertTrue(self.spider._refresh_follow_page_async([item]))
+            self._wait_follow_jobs()
+
+    def test_stale_follow_enrichment_cannot_write_into_new_lifecycle(self):
+        started = MODULE.threading.Event()
+        release = MODULE.threading.Event()
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {"tmdb_id": 101, "title": "旧生命周期", "pending_metadata": True},
+        }}
+
+        def delayed_tmdb(*_args, **_kwargs):
+            started.set()
+            release.wait(1)
+            return {"id": 101, "name": "旧任务返回", "seasons": []}
+
+        self.spider._tmdb_api = delayed_tmdb
+        self.spider._attach_tmdb_title_aliases = lambda item, _data: item
+        self.spider._attach_douban_to_tmdb_item = lambda item, _data: item
+
+        self.assertTrue(self.spider._start_follow_enrichment("tmdb", "101"))
+        self.assertTrue(started.wait(1))
+        with self.spider._cache_lock:
+            self.spider._cache_generation += 1
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {"tmdb_id": 101, "title": "新生命周期", "pending_metadata": True},
+        }}
+        release.set()
+        self._wait_follow_jobs()
+
+        self.assertEqual(self.spider._follow_memory["items"]["101"]["title"], "新生命周期")
+        self.spider._persist_follow_state.assert_not_called()
+
+    def test_stale_follow_page_refresh_cannot_persist_new_lifecycle(self):
+        started = MODULE.threading.Event()
+        release = MODULE.threading.Event()
+        old_item = {"tmdb_id": 101, "title": "旧页面", "last_checked": 0}
+        self.spider._follow_memory = {"version": 2, "items": {"101": dict(old_item)}}
+
+        def delayed_refresh(_item):
+            started.set()
+            release.wait(1)
+            return {"tmdb_id": 101, "title": "旧刷新返回", "last_checked": int(time.time())}
+
+        self.spider._refresh_follow_item = delayed_refresh
+
+        self.assertTrue(self.spider._refresh_follow_page_async([old_item]))
+        self.assertTrue(started.wait(1))
+        with self.spider._cache_lock:
+            self.spider._cache_generation += 1
+        self.spider._follow_memory = {"version": 2, "items": {
+            "101": {"tmdb_id": 101, "title": "新页面", "last_checked": 0},
+        }}
+        release.set()
+        self._wait_follow_jobs()
+
+        self.assertEqual(self.spider._follow_memory["items"]["101"]["title"], "新页面")
+        self.spider._persist_follow_state.assert_not_called()
+
+    def test_runtime_components_are_bound_to_the_spider_instance(self):
+        self.assertIs(self.spider._tmdb_client.owner, self.spider)
+        self.assertIs(self.spider._douban_client.owner, self.spider)
+        self.assertIs(self.spider._follow_repository.owner, self.spider)
+        self.assertIs(self.spider._history_coordinator.owner, self.spider)
+        self.assertIs(self.spider._cache_coordinator.owner, self.spider)
+
+    def test_tmdb_legacy_methods_delegate_to_component(self):
+        self.spider._tmdb_client.api = Mock(return_value={"id": 1})
+        self.spider._tmdb_client.image = Mock(return_value="https://image.test/a.jpg")
+
+        self.assertEqual(self.spider._tmdb_api("/test", {"page": 1}, 10, False), {"id": 1})
+        self.assertEqual(self.spider._tmdb_image("/a.jpg"), "https://image.test/a.jpg")
+        self.spider._tmdb_client.api.assert_called_once_with("/test", {"page": 1}, 10, False)
+
+    def test_douban_legacy_methods_delegate_to_component(self):
+        self.spider._douban_client.request_json = Mock(return_value={"ok": True})
+        self.spider._douban_client.request_text = Mock(return_value="page")
+
+        self.assertEqual(self.spider._request_json("https://example.test", {"q": "x"}), {"ok": True})
+        self.assertEqual(self.spider._request_text("https://example.test/page"), "page")
+
+    def test_history_legacy_methods_delegate_to_component(self):
+        self.spider._history_coordinator.fetch = Mock(return_value=[{"key": "one"}])
+        self.spider._history_coordinator.push = Mock(return_value=None)
+
+        self.assertEqual(self.spider._atvp_fetch_history(), [{"key": "one"}])
+        self.assertIsNone(self.spider._atvp_history_push([{"key": "one"}]))
+
     def test_plugin_metadata_is_parseable_by_alist_tvbox(self):
         source = SOURCE.read_text(encoding="utf-8")
         expected = {
             "name": "豆瓣TMDB追更助手（AList-TVBox专用）",
             "id": "douban_tmdb_follow_single",
-            "version": "57",
+            "version": "60",
         }
         for field, value in expected.items():
             match = re.search(r"(?m)^\s*//@%s:(.+?)\s*$" % field, source)
@@ -55,7 +432,8 @@ class FollowOperationV51Test(unittest.TestCase):
         repository = json.loads((ROOT / "spiders_v2.json").read_text(encoding="utf-8"))
         entry = next(row for row in repository if row.get("id") == expected["id"])
         self.assertEqual(str(entry.get("version")), expected["version"])
-        self.assertEqual(entry.get("file"), "py/豆瓣TMDB追更单入口.py")
+        expected_file = "py/豆瓣TMDB追更单入口_v60.py" if VERSIONED_SOURCE.exists() else "py/豆瓣TMDB追更单入口.py"
+        self.assertEqual(entry.get("file"), expected_file)
         self.assertIs(entry.get("valid"), True)
 
     def _wait_follow_jobs(self, timeout=2):
