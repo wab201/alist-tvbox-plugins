@@ -24,7 +24,7 @@ sys.modules.setdefault("base", base_module)
 sys.modules.setdefault("base.spider", spider_module)
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSIONED_SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口_v65.py"
+VERSIONED_SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口_v66.py"
 SOURCE = VERSIONED_SOURCE if VERSIONED_SOURCE.exists() else ROOT / "py" / "豆瓣TMDB追更单入口.py"
 SPEC = importlib.util.spec_from_file_location("douban_tmdb_follow_v51", str(SOURCE))
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -466,7 +466,7 @@ class FollowOperationV51Test(unittest.TestCase):
         expected = {
             "name": "豆瓣TMDB追更助手（AList-TVBox专用）",
             "id": "douban_tmdb_follow_single",
-            "version": "65",
+            "version": "66",
         }
         for field, value in expected.items():
             match = re.search(r"(?m)^\s*//@%s:(.+?)\s*$" % field, source)
@@ -475,7 +475,7 @@ class FollowOperationV51Test(unittest.TestCase):
         repository = json.loads((ROOT / "spiders_v2.json").read_text(encoding="utf-8"))
         entry = next(row for row in repository if row.get("id") == expected["id"])
         self.assertEqual(str(entry.get("version")), expected["version"])
-        expected_file = "py/豆瓣TMDB追更单入口_v65.py" if VERSIONED_SOURCE.exists() else "py/豆瓣TMDB追更单入口.py"
+        expected_file = "py/豆瓣TMDB追更单入口_v66.py" if VERSIONED_SOURCE.exists() else "py/豆瓣TMDB追更单入口.py"
         self.assertEqual(entry.get("file"), expected_file)
         self.assertIs(entry.get("valid"), True)
 
@@ -4549,6 +4549,60 @@ class FollowOperationV51Test(unittest.TestCase):
 
         self.assertIn("前台线路", result["list"][0]["vod_play_from"])
         self.spider._resource_candidates.assert_called_once()
+
+    def test_foreground_candidate_detail_uses_short_slice_and_tries_next_mode(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider.route_preheat = False
+        self.spider._atvp_history_snapshot = Mock(return_value=[])
+        self.spider._resource_candidates = Mock(return_value=[
+            {"vod_id": "slow-vod", "_resource_mode": "vod"},
+            {"vod_id": "fast-pansou", "_resource_mode": "pansou"},
+        ])
+        fast_detail = {"list": [{
+            "vod_name": "测试剧集", "vod_play_from": "盘搜线路",
+            "vod_play_url": "S01E01$1@fast",
+        }]}
+        deadlines = []
+
+        def detail(row, deadline=None):
+            deadlines.append(deadline)
+            if row["vod_id"] == "slow-vod":
+                raise RuntimeError("slow endpoint")
+            return fast_detail
+
+        self.spider._resource_detail = Mock(side_effect=detail)
+        with patch.object(MODULE.time, "monotonic", return_value=100.0):
+            result = self.spider._alist_detail_from_metadata(
+                "tmdb:tv:101",
+                {"list": [{"vod_id": "tmdb:tv:101", "vod_name": "测试剧集"}]},
+            )
+
+        self.assertIn("盘搜线路", result["list"][0]["vod_play_from"])
+        self.assertEqual(len(deadlines), 2)
+        self.assertEqual(deadlines, [
+            100.0 + self.spider.RESOURCE_FOREGROUND_DETAIL_SLICE,
+            100.0 + self.spider.RESOURCE_FOREGROUND_DETAIL_SLICE,
+        ])
+
+    def test_empty_foreground_result_schedules_current_entry_preheat(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider._atvp_history_snapshot = Mock(return_value=[])
+        self.spider._resource_candidates = Mock(return_value=[])
+        self.spider._schedule_entry_resource_preheat = Mock(return_value=True)
+        self.spider._supplement_resource_state = Mock(return_value=(0, False))
+
+        result = self.spider._alist_detail_from_metadata(
+            "tmdb:tv:101",
+            {"list": [{"vod_id": "tmdb:tv:101", "vod_name": "测试剧集"}]},
+        )
+
+        self.assertIn("后台线路验证中", result["list"][0]["vod_director"])
+        scheduled = self.spider._schedule_entry_resource_preheat.call_args.args[0]
+        self.assertEqual(scheduled[0]["tmdb_id"], 101)
 
     def test_pending_entry_preheat_uses_bound_route_without_global_search(self):
         self.spider._alist_tvbox_plugin = True
