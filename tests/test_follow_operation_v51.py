@@ -24,7 +24,7 @@ sys.modules.setdefault("base", base_module)
 sys.modules.setdefault("base.spider", spider_module)
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSIONED_SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口_v69.py"
+VERSIONED_SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口_v70.py"
 SOURCE = VERSIONED_SOURCE if VERSIONED_SOURCE.exists() else ROOT / "py" / "豆瓣TMDB追更单入口.py"
 SPEC = importlib.util.spec_from_file_location("douban_tmdb_follow_v51", str(SOURCE))
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -466,7 +466,7 @@ class FollowOperationV51Test(unittest.TestCase):
         expected = {
             "name": "豆瓣TMDB追更助手（AList-TVBox专用）",
             "id": "douban_tmdb_follow_single",
-            "version": "69",
+            "version": "70",
         }
         for field, value in expected.items():
             match = re.search(r"(?m)^\s*//@%s:(.+?)\s*$" % field, source)
@@ -475,7 +475,7 @@ class FollowOperationV51Test(unittest.TestCase):
         repository = json.loads((ROOT / "spiders_v2.json").read_text(encoding="utf-8"))
         entry = next(row for row in repository if row.get("id") == expected["id"])
         self.assertEqual(str(entry.get("version")), expected["version"])
-        expected_file = "py/豆瓣TMDB追更单入口_v69.py" if VERSIONED_SOURCE.exists() else "py/豆瓣TMDB追更单入口.py"
+        expected_file = "py/豆瓣TMDB追更单入口_v70.py" if VERSIONED_SOURCE.exists() else "py/豆瓣TMDB追更单入口.py"
         self.assertEqual(entry.get("file"), expected_file)
         self.assertIs(entry.get("valid"), True)
 
@@ -4706,7 +4706,7 @@ class FollowOperationV51Test(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["vodRemarks"], "S01E14")
 
-    def test_pending_entry_preheat_uses_bound_route_without_global_search(self):
+    def test_pending_entry_preheat_uses_complete_bound_route_without_global_search(self):
         self.spider._alist_tvbox_plugin = True
         self.spider.atvp_api = "https://atvp.example"
         self.spider.atvp_token = "token"
@@ -4714,7 +4714,7 @@ class FollowOperationV51Test(unittest.TestCase):
         item = {
             "tmdb_id": 101, "source_id": "tmdb:tv:101", "media_type": "tv",
             "title": "测试剧集", "alist_vod_id": "bound-resource",
-            "alist_resource_mode": "vod",
+            "alist_resource_mode": "vod", "latest_episode": "S01E01",
         }
         self.spider._follow_memory = {"version": 2, "items": {"101": dict(item)}}
         preheat_key = self.spider._entry_resource_preheat_key(item)
@@ -4736,6 +4736,47 @@ class FollowOperationV51Test(unittest.TestCase):
         self.assertIn("绑定兜底", result["list"][0]["vod_play_from"])
         self.spider._resource_candidates.assert_not_called()
         self.spider._validated_playable_detail.assert_called_once()
+
+    def test_pending_entry_preheat_searches_when_bound_route_is_incomplete(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider.atvp_api = "https://atvp.example"
+        self.spider.atvp_token = "token"
+        self.spider.route_preheat = False
+        item = {
+            "tmdb_id": 101, "source_id": "tmdb:tv:101", "media_type": "tv",
+            "title": "测试剧集", "alist_vod_id": "bound-resource",
+            "alist_resource_mode": "vod", "latest_episode": "S01E06",
+        }
+        self.spider._follow_memory = {"version": 2, "items": {"101": dict(item)}}
+        preheat_key = self.spider._entry_resource_preheat_key(item)
+        self.spider._resource_entry_preheat_jobs[preheat_key] = object()
+        bound_detail = {"list": [{
+            "vod_name": "测试剧集", "vod_play_from": "绑定单集",
+            "vod_play_url": "S01E06$1@bound-episode",
+        }]}
+        candidate = {"vod_id": "complete-resource", "_resource_mode": "pansou"}
+        complete_detail = {"list": [{
+            "vod_name": "测试剧集", "vod_play_from": "完整线路",
+            "vod_play_url": "#".join(
+                "S01E%02d$1@complete-%d" % (episode, episode)
+                for episode in range(1, 7)
+            ),
+        }]}
+        self.spider._atvp_history_snapshot = Mock(return_value=[])
+        self.spider._validated_playable_detail = Mock(return_value=bound_detail)
+        self.spider._resource_candidates = Mock(return_value=[candidate])
+        self.spider._resource_detail = Mock(side_effect=[bound_detail, complete_detail])
+
+        result = self.spider._alist_detail_from_metadata(
+            "tmdb:tv:101",
+            {"list": [{"vod_id": "tmdb:tv:101", "vod_name": "测试剧集"}]},
+        )
+
+        vod = result["list"][0]
+        self.assertIn("完整线路", vod["vod_play_from"])
+        self.assertIn("S01E01", vod["vod_play_url"])
+        self.assertIn("S01E06", vod["vod_play_url"])
+        self.spider._resource_candidates.assert_called_once()
 
     def test_entry_preheat_publishes_playable_cache_binds_fallback_and_refreshes_detail(self):
         self.spider._alist_tvbox_plugin = True
