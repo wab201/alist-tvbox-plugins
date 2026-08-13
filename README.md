@@ -24,11 +24,14 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/plugins/seed
 
 | 插件 | 版本 | 索引状态 | 说明 |
 | --- | ---: | --- | --- |
-| 豆瓣 TMDB 追更助手 | 63 测试版 | 可导入 | [能力与配置](plugins/douban_tmdb_follow_single/README.md) |
+| 豆瓣 TMDB 追更助手 | 64 测试版 | 可导入 | [能力与配置](plugins/douban_tmdb_follow_single/README.md) |
 | SeedHub 磁力与多网盘 | 1 | 可导入 | [能力与配置](plugins/seedhub/README.md) |
 
-### 豆瓣 TMDB 追更助手 v63 测试版
+### 豆瓣 TMDB 追更助手 v64 测试版
 
+- 播放成功后分阶段刷新 FongMi 最近观看：覆盖播放器 History 的异步写入和 5 秒保存节流，追更状态同步不再依赖退出影视模块重进。
+- 新播放会使旧的云端 History 快照失效；晚到的轻量请求不能覆盖完整同步刚发布的高集数进度。
+- 完整线路就绪门禁改为单一播放组连续覆盖目标集；不同残缺组只能用于详情展示或明确的同盘补全，不会被自动绑定为完整线路。
 - 动态页改为只读取云端 History 快照，不再触发本机 History 导出、全量合并和导入；完整双向同步保留在“立即同步 History”和播放结束同步路径。
 - History 无云端差异时跳过第二次本机导出和整表导入，减少动态页和详情页等待。
 
