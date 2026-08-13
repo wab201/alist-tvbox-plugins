@@ -24,7 +24,7 @@ sys.modules.setdefault("base", base_module)
 sys.modules.setdefault("base.spider", spider_module)
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSIONED_SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口_v68.py"
+VERSIONED_SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口_v69.py"
 SOURCE = VERSIONED_SOURCE if VERSIONED_SOURCE.exists() else ROOT / "py" / "豆瓣TMDB追更单入口.py"
 SPEC = importlib.util.spec_from_file_location("douban_tmdb_follow_v51", str(SOURCE))
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -466,7 +466,7 @@ class FollowOperationV51Test(unittest.TestCase):
         expected = {
             "name": "豆瓣TMDB追更助手（AList-TVBox专用）",
             "id": "douban_tmdb_follow_single",
-            "version": "68",
+            "version": "69",
         }
         for field, value in expected.items():
             match = re.search(r"(?m)^\s*//@%s:(.+?)\s*$" % field, source)
@@ -475,7 +475,7 @@ class FollowOperationV51Test(unittest.TestCase):
         repository = json.loads((ROOT / "spiders_v2.json").read_text(encoding="utf-8"))
         entry = next(row for row in repository if row.get("id") == expected["id"])
         self.assertEqual(str(entry.get("version")), expected["version"])
-        expected_file = "py/豆瓣TMDB追更单入口_v68.py" if VERSIONED_SOURCE.exists() else "py/豆瓣TMDB追更单入口.py"
+        expected_file = "py/豆瓣TMDB追更单入口_v69.py" if VERSIONED_SOURCE.exists() else "py/豆瓣TMDB追更单入口.py"
         self.assertEqual(entry.get("file"), expected_file)
         self.assertIs(entry.get("valid"), True)
 
@@ -2632,6 +2632,52 @@ class FollowOperationV51Test(unittest.TestCase):
             "1@bound-episode",
         )
         self.spider._resource_candidates.assert_called_once()
+
+    def test_followed_tmdb_detail_uses_persisted_metadata_without_sync_tmdb_request(self):
+        self.spider._follow_memory = {"version": 2, "items": {
+            "326695": {
+                "tmdb_id": 326695, "title": "择日飞升", "pic": "poster.jpg",
+                "year": "2026", "season_count": 1, "latest_episode": "S01E06",
+                "latest_episode_name": "第 6 集", "next_air_date": "2026-08-15",
+            },
+        }}
+        self.spider._tmdb_detail = Mock(side_effect=AssertionError("must not block on TMDB"))
+        self.spider._start_follow_enrichment = Mock(return_value=True)
+        self.spider._alist_detail_from_metadata = Mock(return_value={"list": [{"vod_name": "择日飞升"}]})
+
+        result = self.spider.detailContent(["tmdb:tv:326695"])
+
+        self.assertEqual(result["list"][0]["vod_name"], "择日飞升")
+        self.spider._tmdb_detail.assert_not_called()
+        metadata = self.spider._alist_detail_from_metadata.call_args.args[1]["list"][0]
+        self.assertEqual(metadata["vod_pic"], "poster.jpg")
+        self.assertEqual(metadata["vod_remarks"], "已播 S01E06 · 下集 2026-08-15")
+        self.assertIn("当前更新至 S01E06 第 6 集", metadata["vod_content"])
+        self.assertIsInstance(
+            self.spider._alist_detail_from_metadata.call_args.kwargs.get("deadline"), float,
+        )
+
+    def test_detail_deadline_is_not_reset_after_metadata_stage(self):
+        self.spider._alist_tvbox_plugin = True
+        self.spider._follow_memory = {"version": 2, "items": {}}
+        metadata = {"list": [{"vod_id": "tmdb:tv:101", "vod_name": "测试剧集"}]}
+        self.spider._atvp_history_snapshot = Mock(return_value=[])
+        self.spider._ready_resource_detail = Mock(return_value=None)
+        self.spider._bound_resource_row = Mock(return_value=None)
+        self.spider._resource_candidates = Mock(return_value=[])
+        self.spider._schedule_entry_resource_preheat = Mock(return_value=False)
+        self.spider._entry_resource_preheat_pending = Mock(return_value=False)
+        self.spider._supplement_resource_state = Mock(return_value=(0, False))
+        deadline = time.monotonic() + 2
+
+        self.spider._alist_detail_from_metadata(
+            "tmdb:tv:101", metadata, deadline=deadline,
+        )
+
+        ready_deadline = self.spider._ready_resource_detail.call_args.kwargs["deadline"]
+        candidate_deadline = self.spider._resource_candidates.call_args.kwargs["deadline"]
+        self.assertLessEqual(ready_deadline, deadline)
+        self.assertLessEqual(candidate_deadline, deadline)
 
     def test_valid_bound_route_keeps_two_backups_and_bound_episode_first(self):
         self.spider._alist_tvbox_plugin = True
