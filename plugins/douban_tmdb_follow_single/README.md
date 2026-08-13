@@ -5,7 +5,7 @@
 - 运行环境：AList-TVBox raw Python 插件；兼容空 EXT 直接 FongMi 元数据模式
 - 最低兼容基线：AList-TVBox `1.42.0`
 - 当前验证环境：AList-TVBox `1.44.0`
-- 发布状态：测试版索引已启用，可通过仓库导入；稳定回退基线为 v57
+- 发布状态：V70 测试版索引已启用，可通过仓库导入；历史版本通过 Git 提交或标签回退
 
 ## 主要能力
 
@@ -72,5 +72,5 @@
 插件源码公开地址：
 
 ```text
-https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMDB追更单入口_v64.py
+https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMDB追更单入口.py
 ```

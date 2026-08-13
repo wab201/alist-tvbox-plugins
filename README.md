@@ -24,10 +24,15 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/plugins/seed
 
 | 插件 | 版本 | 索引状态 | 说明 |
 | --- | ---: | --- | --- |
-| 豆瓣 TMDB 追更助手 | 64 测试版 | 可导入 | [能力与配置](plugins/douban_tmdb_follow_single/README.md) |
+| 豆瓣 TMDB 追更助手 | 70 测试版 | 可导入 | [能力与配置](plugins/douban_tmdb_follow_single/README.md) |
 | SeedHub 磁力与多网盘 | 1 | 可导入 | [能力与配置](plugins/seedhub/README.md) |
 
-### 豆瓣 TMDB 追更助手 v64 测试版
+### 豆瓣 TMDB 追更助手 v70 测试版
+
+- 追更详情预热进行中时，只有单条绑定线路连续覆盖 E01 至当前目标集才直接返回。
+- 旧绑定只有最近单集时继续执行受限前台搜索，并保留旧线路作为超时兜底。
+- 已追更剧集首开复用本地 TMDB 元数据并共享统一资源截止时间，避免资料请求与线路搜索串行叠加导致 ANR。
+- 同一资源接口按网盘提供方轮询候选，后台验证会继续寻找完整季度线路。
 
 - 播放成功后分阶段刷新 FongMi 最近观看：覆盖播放器 History 的异步写入和 5 秒保存节流，追更状态同步不再依赖退出影视模块重进。
 - 新播放会使旧的云端 History 快照失效；晚到的轻量请求不能覆盖完整同步刚发布的高集数进度。
@@ -41,7 +46,7 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/plugins/seed
 - 新增脱敏诊断事件与诊断快照，关键失败可定位到具体阶段，同时避免令牌、Cookie 和认证信息进入诊断内容。
 - 修复跨生命周期缓存保存、线路质量失败重试、追更页刷新任务和资源搜索名额释放等并发边界问题。
 - 修复首次详情云端 History 时序、追更确认反馈与候选记录清理；广域网 History 默认复用订阅 HTTPS 地址，并兼容 AList-TVBox 1.44.0 单条删除接口异常。
-- 本测试版继续保留 v57 源码和 v60 上一版回退文件；仓库入口可通过一次索引切换原子回退。
+- 仓库只保留固定入口 `py/豆瓣TMDB追更单入口.py`；历史版本通过 Git 提交或标签原子回退，不再重复提交整份源码。
 
 ## 精简结构
 
@@ -76,6 +81,7 @@ plugins/
 - 明文 raw Python 插件的 `file` 必须以 `.py` 结尾。
 - 只有通过兼容与安全检查的版本才设置 `valid: true`。
 - 每次发布同步更新仓库根 `README.md` 的插件版本与当前版本摘要，以及对应插件的 `README.md`、`DEPLOYMENT.md`、`CHANGELOG.md` 和 `STATUS.md`。
+- 同一插件只保留一个固定源码入口；历史版本由 Git 提交或标签保存，禁止新增 `_vNN.py` 发布副本。
 - 每个插件的每个版本都必须在自己的 `CHANGELOG.md` 中书写更新说明。
 - 更新说明只描述用户可感知的功能新增、功能调整、体验优化和问题修复，不写测试过程、测试数量、审计过程、发布命令、日志、源码大小、哈希或其他验证数据。
 - 对应单插件索引存在时优先使用 `plugins/<id>/spiders_v2.json`，避免整仓导入影响其他已配置插件。

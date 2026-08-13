@@ -25,7 +25,7 @@ sys.modules.setdefault("base", base_module)
 sys.modules.setdefault("base.spider", spider_module)
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口_v61.py"
+SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口.py"
 SPEC = importlib.util.spec_from_file_location("douban_tmdb_follow_v61_real", str(SOURCE))
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)

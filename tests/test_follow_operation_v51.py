@@ -24,8 +24,7 @@ sys.modules.setdefault("base", base_module)
 sys.modules.setdefault("base.spider", spider_module)
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSIONED_SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口_v70.py"
-SOURCE = VERSIONED_SOURCE if VERSIONED_SOURCE.exists() else ROOT / "py" / "豆瓣TMDB追更单入口.py"
+SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口.py"
 SPEC = importlib.util.spec_from_file_location("douban_tmdb_follow_v51", str(SOURCE))
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
@@ -475,8 +474,7 @@ class FollowOperationV51Test(unittest.TestCase):
         repository = json.loads((ROOT / "spiders_v2.json").read_text(encoding="utf-8"))
         entry = next(row for row in repository if row.get("id") == expected["id"])
         self.assertEqual(str(entry.get("version")), expected["version"])
-        expected_file = "py/豆瓣TMDB追更单入口_v70.py" if VERSIONED_SOURCE.exists() else "py/豆瓣TMDB追更单入口.py"
-        self.assertEqual(entry.get("file"), expected_file)
+        self.assertEqual(entry.get("file"), "py/豆瓣TMDB追更单入口.py")
         self.assertIs(entry.get("valid"), True)
 
     def _wait_follow_jobs(self, timeout=2):
