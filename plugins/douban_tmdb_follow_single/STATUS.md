@@ -6,19 +6,19 @@
 | --- | --- |
 | 仓库索引 | `spiders_v2.json` 已登记并启用 |
 | 插件 ID | `douban_tmdb_follow_single` |
-| 发布版本 | `64`（公开测试版） |
+| 发布版本 | `68`（公开测试版） |
 | 源码格式 | 明文 `.py` |
 | AList-TVBox 最低兼容基线 | `1.42.0` |
 | AList-TVBox 当前验证环境 | `1.44.0` |
-| 源码文件 | `py/豆瓣TMDB追更单入口_v64.py` |
-| 源码大小 | `606180` 字节 |
-| 源码 SHA256 | `B5EA91259D3E0004FC5CFC8D4EB3B22F293B26782332EA86B8C57914DBFB7A87` |
-| 自动化回归 | `269` 项通过（含 V64 History/预热/最近观看刷新回归） |
+| 源码文件 | `py/豆瓣TMDB追更单入口_v68.py` |
+| 源码大小 | `614228` 字节 |
+| 源码 SHA256 | `F25AB0774896F7EDB513A8BE2C3F71C7E97BD74E90A96A0736E8C84F7EC2AD3A` |
+| 自动化回归 | `282` 项通过（含 V68 完整线路优先、跨接口去重和缺集提示回归） |
 | ATVP 合同 | direct-play / upstream-1.25-raw 通过 |
 | 双运行时合同 | FongMi TV 5.6.1 模拟器运行链与 direct-PY 门禁通过 |
 | FongMi 分类合同 | TypeFragment、SiteApi、Chaquopy 与 Atvp 参数链通过 |
 | 广域网 History | 当前订阅 HTTPS 入口已实测登录、读取、写入、跨 LAN 可见和删除清理通过 |
-| 仓库部署 | V64 待真实模拟器联调后部署；V63 保留为回退版本 |
+| 仓库部署 | V68 待正式仓库导入与 Android 虚拟机联调；V67 保留为直接回退版本 |
 | 回退基线 | v57，源码 SHA256 `A992254BDC0A2AC4AFB32DD6A1C6A6ED5B78158848C539BAEC11356F0C68D077` |
 | 容器部署方式 | 仅通过仓库导入拉取，不在仓库保存容器凭据 |
 

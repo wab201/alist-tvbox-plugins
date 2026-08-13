@@ -24,7 +24,7 @@ sys.modules.setdefault("base", base_module)
 sys.modules.setdefault("base.spider", spider_module)
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSIONED_SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口_v67.py"
+VERSIONED_SOURCE = ROOT / "py" / "豆瓣TMDB追更单入口_v68.py"
 SOURCE = VERSIONED_SOURCE if VERSIONED_SOURCE.exists() else ROOT / "py" / "豆瓣TMDB追更单入口.py"
 SPEC = importlib.util.spec_from_file_location("douban_tmdb_follow_v51", str(SOURCE))
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -466,7 +466,7 @@ class FollowOperationV51Test(unittest.TestCase):
         expected = {
             "name": "豆瓣TMDB追更助手（AList-TVBox专用）",
             "id": "douban_tmdb_follow_single",
-            "version": "67",
+            "version": "68",
         }
         for field, value in expected.items():
             match = re.search(r"(?m)^\s*//@%s:(.+?)\s*$" % field, source)
@@ -475,7 +475,7 @@ class FollowOperationV51Test(unittest.TestCase):
         repository = json.loads((ROOT / "spiders_v2.json").read_text(encoding="utf-8"))
         entry = next(row for row in repository if row.get("id") == expected["id"])
         self.assertEqual(str(entry.get("version")), expected["version"])
-        expected_file = "py/豆瓣TMDB追更单入口_v67.py" if VERSIONED_SOURCE.exists() else "py/豆瓣TMDB追更单入口.py"
+        expected_file = "py/豆瓣TMDB追更单入口_v68.py" if VERSIONED_SOURCE.exists() else "py/豆瓣TMDB追更单入口.py"
         self.assertEqual(entry.get("file"), expected_file)
         self.assertIs(entry.get("valid"), True)
 
@@ -5080,6 +5080,96 @@ class FollowOperationV51Test(unittest.TestCase):
             {row["_resource_mode"] for row in candidates[:self.spider.RESOURCE_DETAIL_ATTEMPT_LIMIT]},
             {"vod1", "vod", "pansou", "telegram"},
         )
+
+    def test_candidate_order_interleaves_providers_inside_one_api(self):
+        item = {"title": "测试剧集", "year": "2026", "trackingSeason": 1}
+        rows = [
+            {
+                "vod_id": MODULE.quote("https://www.123pan.com/s/recent-%d" % index, safe=""),
+                "vod_name": "测试剧集 2026 第6集", "_resource_mode": "pansou",
+            }
+            for index in range(3)
+        ] + [{
+            "vod_id": MODULE.quote("https://pan.baidu.com/s/complete", safe=""),
+            "vod_name": "测试剧集 2026", "_resource_mode": "pansou",
+        }]
+
+        ordered = self.spider._resource_fair_candidate_order(
+            rows, item, modes=["pansou"],
+        )
+
+        self.assertIn("123pan", MODULE.unquote(ordered[0]["vod_id"]))
+        self.assertIn("baidu", MODULE.unquote(ordered[1]["vod_id"]))
+
+    def test_background_validation_continues_until_complete_target_exists(self):
+        self.spider.resource_limit = 1
+        item = {
+            "media_type": "tv", "title": "测试剧集", "trackingSeason": 1,
+            "latest_episode": "S01E06",
+        }
+        rows = [
+            {"vod_id": "recent", "_resource_mode": "pansou"},
+            {"vod_id": "complete", "_resource_mode": "pansou"},
+        ]
+        details = {
+            "recent": {"list": [{"vod_play_url": "S01E06$recent-6"}]},
+            "complete": {"list": [{"vod_play_url": "#".join(
+                "S01E%02d$complete-%d" % (episode, episode) for episode in range(1, 7)
+            )}]},
+        }
+        self.spider._resource_detail = Mock(
+            side_effect=lambda row, **_kwargs: details[row["vod_id"]],
+        )
+        self.spider._validated_playable_detail = Mock(
+            side_effect=lambda detail, *_args, **_kwargs: detail,
+        )
+        self.spider._store_validated_resource_detail = Mock(return_value=True)
+
+        playable = self.spider._playable_resource_rows(
+            rows, item, deadline=time.monotonic() + 5,
+        )
+
+        self.assertEqual(self.spider._resource_detail.call_count, 2)
+        self.assertEqual([row["vod_id"] for row in playable], ["recent", "complete"])
+
+    def test_merge_deduplicates_same_share_exposed_by_multiple_apis(self):
+        self.spider.resource_limit = 5
+        item = {
+            "media_type": "tv", "title": "测试剧集", "trackingSeason": 1,
+            "latest_episode": "S01E01",
+        }
+        share = "https://pan.baidu.com/s/shared"
+        vods = [
+            {
+                "vod_play_from": "盘搜百度", "vod_play_url": "S01E01$pansou-play",
+                "resource_id": share, "group_providers": ["baidu"],
+                "_resource_mode": "pansou",
+            },
+            {
+                "vod_play_from": "电报百度", "vod_play_url": "S01E01$telegram-play",
+                "resource_id": share + "?pwd=1234", "group_providers": ["baidu"],
+                "_resource_mode": "telegram",
+            },
+        ]
+
+        merged = self.spider._merge_resource_vods(
+            vods, item, "tmdb:tv:101", {"vod_name": "测试剧集"},
+        )
+
+        self.assertEqual(len(merged["vod_play_from"].split("$$$")), 1)
+
+    def test_incomplete_routes_report_missing_episode_range(self):
+        item = {
+            "media_type": "tv", "title": "择日飞升", "trackingSeason": 1,
+            "latest_episode": "S01E06",
+        }
+        merged = self.spider._merge_resource_vods([{
+            "vod_play_from": "近期更新", "vod_play_url": "S01E05$play-5#S01E06$play-6",
+            "resource_id": "recent-resource", "group_seasons": [1],
+            "group_providers": ["pan123"], "_resource_mode": "pansou",
+        }], item, "tmdb:tv:101", {"vod_name": "择日飞升"})
+
+        self.assertIn("线路均不完整 缺少 E01-E04", merged["vod_remarks"])
 
     def test_cross_api_duplicate_keeps_matching_password_bearing_row(self):
         item = {
