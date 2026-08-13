@@ -1,8 +1,8 @@
 [
   {
     "id": "douban_tmdb_follow_single",
-    "file": "py/豆瓣TMDB追更单入口_v64.py",
-    "version": 64,
+    "file": "py/豆瓣TMDB追更单入口_v65.py",
+    "version": 65,
     "valid": true
   },
   {
