@@ -1,3 +1,5 @@
 *.py -text
+*.pyinc -text
 *.json text eol=lf
 *.md text eol=lf
+tests/fixtures/v80_p4_douban_*.html text eol=lf

@@ -1,0 +1,2161 @@
+    def _category_tmdb_trending(self, page, ext):
+        media = self._value(ext, "media", "all")
+        if media not in ("all", "movie", "tv"):
+            media = "all"
+        window = self._value(ext, "window", "day")
+        if window not in ("day", "week"):
+            window = "day"
+        data = self._tmdb_api("/trending/%s/%s" % (media, window), {"page": page}, self.list_cache_ttl)
+        return self._tmdb_page(data, page, "", self._follow_action_mode(ext))
+
+    def _category_tmdb_discover(self, media_type, page, ext):
+        params = {
+            "page": page,
+            "include_adult": "false",
+            "sort_by": self._value(ext, "sort", "popularity.desc"),
+        }
+        genre = self._value(ext, "genre", "")
+        year = self._value(ext, "year", "")
+        country = self._value(ext, "country", "")
+        if genre:
+            params["with_genres"] = genre
+        if country:
+            params["with_origin_country"] = country
+        if year:
+            params["primary_release_year" if media_type == "movie" else "first_air_date_year"] = year
+        if params["sort_by"] == "vote_average.desc":
+            params["vote_count.gte"] = 100
+        if media_type == "movie":
+            params["region"] = self.tmdb_region
+        data = self._tmdb_api("/discover/" + media_type, params, self.list_cache_ttl)
+        return self._tmdb_page(data, page, media_type, self._follow_action_mode(ext))
+
+    def _category_tmdb_anime(self, page, ext):
+        media_type = self._value(ext, "kind", "tv")
+        if media_type not in ("movie", "tv"):
+            media_type = "tv"
+        params = {
+            "page": page,
+            "include_adult": "false",
+            "sort_by": self._value(ext, "sort", "popularity.desc"),
+            "with_genres": "16",
+        }
+        region = self._value(ext, "region", "")
+        year = self._value(ext, "year", "")
+        if region:
+            params["with_origin_country"] = region
+        if year:
+            params["primary_release_year" if media_type == "movie" else "first_air_date_year"] = year
+        data = self._tmdb_api("/discover/" + media_type, params, self.list_cache_ttl)
+        return self._tmdb_page(data, page, media_type, self._follow_action_mode(ext))
+
+    def _tmdb_page(self, data, page, forced_type, action_mode=""):
+        items = self._tmdb_cards(data.get("results"), forced_type, action_mode)
+        pagecount = min(500, self._positive_int(data.get("total_pages"), page))
+        total = self._positive_int(data.get("total_results"), len(items)) if items else int(data.get("total_results") or 0)
+        return self._page_result(items, page, max(page, pagecount), total, 20)
+
+    def _tmdb_cards(self, items, forced_type, action_mode=""):
+        result = []
+        followed = self._follow_memory.get("items") or {}
+        for raw in items or []:
+            if not isinstance(raw, dict):
+                continue
+            media_type = forced_type or str(raw.get("media_type") or "")
+            if media_type not in ("movie", "tv"):
+                continue
+            tmdb_id = self._positive_int(raw.get("id"), 0)
+            title = str(raw.get("title") or raw.get("name") or raw.get("original_title") or raw.get("original_name") or "").strip()
+            if not tmdb_id or not title:
+                continue
+            date = str(raw.get("release_date") or raw.get("first_air_date") or "")
+            score = self._score_text(raw.get("vote_average"))
+            remark = " · ".join([value for value in (date[:4], score) if value])
+            card = {
+                "vod_id": "tmdb:%s:%s" % (media_type, tmdb_id),
+                "vod_name": title,
+                "vod_pic": self._tmdb_image(raw.get("poster_path") or raw.get("backdrop_path")),
+                "vod_remarks": remark,
+            }
+            if media_type == "tv":
+                tracked = str(tmdb_id) in followed
+                state = "已追更" if tracked else "全局搜索"
+                card["vod_remarks"] = state + ((" · " + remark) if remark else "")
+            result.append(card)
+        return result
+
+    def _category_follow_candidates(self, page, ext=None):
+        mode = self._value(ext or {}, "mode", "view")
+        candidates, source_cards = self._native_follow_candidates()
+        pending = [candidate for candidate in candidates if not self._candidate_is_followed(candidate)]
+        start = (page - 1) * self.follow_page_size
+        selected = pending[start:start + self.follow_page_size]
+        cards = [self._follow_candidate_card(candidate, mode=mode) for candidate in selected]
+        if page == 1:
+            cards = self._follow_state_cards() + source_cards + cards
+        if not pending and page == 1:
+            cards.append({
+                "vod_id": self.ERROR_PREFIX + quote("当前没有待确认追更", safe=""),
+                "vod_name": "暂无追更待选",
+                "vod_pic": "",
+                "vod_remarks": "本机收藏和播放记录中没有未追更剧集",
+            })
+        pagecount = max(1, int(math.ceil(float(len(pending)) / self.follow_page_size)))
+        return self._page_result(cards, page, pagecount, len(pending), self.follow_page_size)
+
+    def _native_follow_candidates(self):
+        merged = {}
+        status_cards = []
+        try:
+            keeps = self._native_keep_export_java(self.keep_follow_scan_limit)
+            if keeps is None:
+                raise RuntimeError("当前运行时未提供FongMi收藏读取桥")
+            for row in self._recent_follow_candidate_rows(keeps):
+                self._merge_follow_candidate(merged, row, "keep")
+        except Exception as exc:
+            status_cards.append(self._follow_candidate_source_card("收藏读取失败", exc))
+        try:
+            exported = self._native_history_export_java(self.keep_follow_scan_limit)
+            if exported is None:
+                raise RuntimeError("当前运行时未提供FongMi播放记录读取桥")
+            for row in self._recent_follow_candidate_rows(exported.get("rows")):
+                self._merge_follow_candidate(merged, row, "history")
+        except Exception as exc:
+            status_cards.append(self._follow_candidate_source_card("播放记录读取失败", exc))
+        candidates = list(merged.values())
+        candidates.sort(key=lambda row: (
+            self._positive_int(row.get("create_time"), 0),
+            str(row.get("title") or ""),
+        ), reverse=True)
+        return candidates[:self.keep_follow_scan_limit * 2], status_cards
+
+    def _recent_follow_candidate_rows(self, rows):
+        return heapq.nlargest(
+            self.keep_follow_scan_limit,
+            (row for row in (rows or []) if isinstance(row, dict)),
+            key=lambda row: self._positive_int(row.get("create_time") or row.get("createTime"), 0),
+        )
+
+    def _merge_follow_candidate(self, merged, row, source):
+        if not isinstance(row, dict):
+            return
+        raw_title = str(row.get("title") or row.get("vodName") or "").strip()[:256]
+        title, year, explicit_series = self._keep_search_profile(raw_title)
+        title = str(title or raw_title).strip()[:256]
+        title_identity = self._normalize_media_title(title)
+        if not title_identity:
+            return
+        identity = "%s|%s" % (title_identity, str(year or "")[:4])
+        candidate = merged.setdefault(identity, {
+            "title": title,
+            "match_title": raw_title,
+            "pic": "",
+            "create_time": 0,
+            "sources": [],
+            "keep_keys": [],
+            "history_keys": [],
+            "site_names": [],
+            "history_remark": "",
+        })
+        if explicit_series or not candidate.get("match_title"):
+            candidate["match_title"] = raw_title
+        pic = str(row.get("pic") or row.get("vodPic") or "").strip()[:1024]
+        if pic and not candidate.get("pic"):
+            candidate["pic"] = pic
+        created = self._positive_int(row.get("create_time") or row.get("createTime"), 0)
+        candidate["create_time"] = max(self._positive_int(candidate.get("create_time"), 0), created)
+        source_label = "收藏" if source == "keep" else "播放记录"
+        if source_label not in candidate["sources"]:
+            candidate["sources"].append(source_label)
+        source_key = str(row.get("key") or "").strip()[:256]
+        key_name = "keep_keys" if source == "keep" else "history_keys"
+        if source_key and source_key not in candidate[key_name] and len(candidate[key_name]) < 3:
+            candidate[key_name].append(source_key)
+        site_name = str(row.get("site_name") or row.get("siteName") or "").strip()[:128]
+        if site_name and site_name not in candidate["site_names"] and len(candidate["site_names"]) < 4:
+            candidate["site_names"].append(site_name)
+        if source == "history" and not candidate.get("history_remark"):
+            candidate["history_remark"] = str(row.get("vodRemarks") or "").strip()[:256]
+        if year and not candidate.get("year"):
+            candidate["year"] = year
+
+    def _candidate_is_followed(self, candidate):
+        keep_keys = set(str(value) for value in candidate.get("keep_keys") or [] if value)
+        history_keys = set(str(value) for value in candidate.get("history_keys") or [] if value)
+        candidate_title = self._normalize_media_title(candidate.get("title"))
+        candidate_year = str(candidate.get("year") or "")[:4]
+        for item in (self._follow_memory.get("items") or {}).values():
+            if not isinstance(item, dict):
+                continue
+            if keep_keys.intersection(str(value) for value in item.get("keep_keys") or [] if value):
+                return True
+            if history_keys.intersection(str(value) for value in item.get("history_keys") or [] if value):
+                return True
+            for alias in self._follow_title_alias_values(item):
+                clean_alias = self._keep_search_profile(alias)[0]
+                if candidate_title and candidate_title == self._normalize_media_title(clean_alias):
+                    item_year = str(
+                        item.get("year") or item.get("first_air_date") or item.get("release_date") or ""
+                    )[:4]
+                    if candidate_year and item_year and candidate_year != item_year:
+                        continue
+                    return True
+        return False
+
+    def _follow_candidate_card(self, candidate, mode="view"):
+        encoded = self._encode_follow_candidate(candidate)
+        clear_mode = str(mode or "view") == "clear"
+        action = (
+            self.FOLLOW_CANDIDATE_CLEAR_PREFIX if clear_mode
+            else self.FOLLOW_CANDIDATE_ADD_PREFIX
+        ) + encoded
+        sources = " + ".join(candidate.get("sources") or ["本机记录"])
+        year = str(candidate.get("year") or "")[:4]
+        prefix = "清理待选 · 仅清理播放记录" if clear_mode else "追更待选"
+        if clear_mode and candidate.get("keep_keys"):
+            prefix += " · 收藏保留"
+        remark = " · ".join(value for value in (prefix, year, sources) if value)
+        history_remark = str(candidate.get("history_remark") or "").strip()
+        if history_remark:
+            remark += " · " + history_remark
+        with self._follow_action_state_lock:
+            status = dict((self._follow_action_state or {}).get("last") or {})
+        if (
+                not clear_mode
+                and str(status.get("operation") or "") == "candidate"
+                and str(status.get("title") or "") == str(candidate.get("title") or "")):
+            state = str(status.get("state") or "")
+            if state == "running":
+                remark = "正在确认 · " + remark
+            elif state in ("done", "failed"):
+                remark = str(status.get("message") or remark)
+        return {
+            "vod_id": action,
+            "vod_name": str(candidate.get("title") or "待确认剧集"),
+            "vod_pic": str(candidate.get("pic") or ""),
+            "vod_remarks": remark,
+            "action": action,
+        }
+
+    def _follow_candidate_source_card(self, title, exc):
+        message = "%s：%s" % (title, self._short_error(exc))
+        return {
+            "vod_id": self.ERROR_PREFIX + quote(message, safe=""),
+            "vod_name": title,
+            "vod_pic": "",
+            "vod_remarks": message,
+        }
+
+    @staticmethod
+    def _encode_follow_candidate(candidate):
+        payload = {
+            "title": str(candidate.get("title") or "")[:256],
+            "match_title": str(candidate.get("match_title") or candidate.get("title") or "")[:256],
+            "pic": str(candidate.get("pic") or "")[:1024],
+            "sources": list(candidate.get("sources") or [])[:2],
+            "keep_keys": [str(value)[:256] for value in (candidate.get("keep_keys") or [])[:3]],
+            "history_keys": [str(value)[:256] for value in (candidate.get("history_keys") or [])[:3]],
+            "site_names": [str(value)[:128] for value in (candidate.get("site_names") or [])[:4]],
+            "year": str(candidate.get("year") or "")[:4],
+        }
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _decode_follow_candidate(value):
+        try:
+            encoded = str(value or "")
+            if not encoded or len(encoded) > 8192:
+                return None
+            raw = encoded + "=" * ((4 - len(encoded) % 4) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(raw.encode("ascii")).decode("utf-8"))
+            if not isinstance(payload, dict) or not str(payload.get("title") or "").strip():
+                return None
+            return payload
+        except Exception:
+            return None
+
+    def _start_follow_candidate_add(self, payload):
+        candidate = self._decode_follow_candidate(payload)
+        if not candidate:
+            result = json.dumps({"msg": "追更待选参数无效"}, ensure_ascii=False)
+            return self._remember_follow_action_result(result, "candidate")
+        title = str(candidate.get("title") or "").strip()
+        if self._candidate_is_followed(candidate):
+            result = json.dumps({"msg": "已在追更管理：" + title}, ensure_ascii=False)
+            return self._remember_follow_action_result(result, "candidate", title)
+        identity = "|".join((
+            self._normalize_media_title(title),
+            str(candidate.get("year") or "")[:4],
+            self._normalize_media_title(candidate.get("match_title")),
+        ))
+        with self._cache_lock:
+            generation = self._cache_generation
+        job_key = "candidate:%s:%s" % (
+            generation, hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16],
+        )
+        job_owner = object()
+        with self._follow_enrich_lock:
+            if job_key in self._follow_enrich_jobs:
+                return json.dumps({"msg": "正在确认追更：" + title}, ensure_ascii=False)
+            self._follow_enrich_jobs[job_key] = job_owner
+            self._set_follow_action_status("running", "正在确认追更：" + title, "candidate", title)
+        self._refresh_follow_categories()
+
+        def worker():
+            result = None
+            try:
+                item, reason = self._resolve_follow_candidate(candidate)
+                if not isinstance(item, dict):
+                    labels = {
+                        "empty_title": "标题为空",
+                        "no_confident_tv": "未找到可信剧集",
+                        "ambiguous_tv": "存在多个同名剧集",
+                        "movie_conflict": "匹配结果更可能是电影",
+                    }
+                    raise RuntimeError(labels.get(str(reason or ""), str(reason or "无法确认剧集")))
+                key = str(self._positive_int(item.get("tmdb_id"), 0))
+                if not key or key == "0":
+                    raise RuntimeError("TMDB剧集编号无效")
+                with self._history_context_lock:
+                    self._require_history_generation(generation)
+                    with self._follow_enrich_lock:
+                        items = dict(self._follow_memory.get("items") or {})
+                        previous = items.get(key)
+                        output = dict(previous) if isinstance(previous, dict) else dict(item)
+                        for field in ("keep_keys", "history_keys", "site_names"):
+                            values = list(output.get(field) or [])
+                            for value in candidate.get(field) or []:
+                                text = str(value or "").strip()
+                                if text and text not in values:
+                                    values.append(text)
+                            if values:
+                                output[field] = values
+                        output.update({
+                            "follow_source": output.get("follow_source") or "fongmi_candidate",
+                            "candidate_last_confirmed": int(time.time()),
+                        })
+                        items[key] = output
+                        self._save_follow_state(items)
+                    message = ("已在追更管理：" if isinstance(previous, dict) else "已加入追更：") + str(output.get("title") or title)
+                    result = json.dumps({"msg": message}, ensure_ascii=False)
+            except _HistorySyncCancelled:
+                result = None
+            except Exception as exc:
+                result = json.dumps({"msg": "确认追更失败：%s" % self._short_error(exc)}, ensure_ascii=False)
+            finally:
+                self._finish_follow_candidate_job(job_key, job_owner, generation, result, title)
+
+        try:
+            self._tasks.start_thread(worker, name="follow-candidate")
+        except Exception as exc:
+            result = json.dumps({"msg": "确认追更启动失败：%s" % self._short_error(exc)}, ensure_ascii=False)
+            self._finish_follow_candidate_job(job_key, job_owner, generation, result, title)
+            return result
+        return json.dumps({"msg": "已开始确认追更：" + title}, ensure_ascii=False)
+
+    def _request_follow_candidate_clear(self, payload):
+        candidate = self._decode_follow_candidate(payload)
+        if not candidate:
+            result = json.dumps({"msg": "清理待选参数无效"}, ensure_ascii=False)
+            return self._remember_follow_action_result(result, "candidate-clear")
+        title = str(candidate.get("title") or "").strip()
+        history_keys = [
+            str(value or "").strip()[:256]
+            for value in candidate.get("history_keys") or []
+            if str(value or "").strip()
+        ][:3]
+        if not history_keys:
+            result = json.dumps({"msg": "该待选没有可清理的播放记录"}, ensure_ascii=False)
+            return self._remember_follow_action_result(result, "candidate-clear", title)
+        identity = hashlib.sha256("\n".join(history_keys).encode("utf-8")).hexdigest()[:16]
+        now = int(time.time())
+        with self._follow_action_state_lock:
+            pending = dict((self._follow_action_state or {}).get("pending") or {})
+        if (
+                str(pending.get("operation") or "") == "candidate-clear"
+                and str(pending.get("identity") or "") == identity
+                and now - self._positive_int(pending.get("requested_at"), 0)
+                <= self.FOLLOW_CONFIRM_TTL):
+            return self._execute_follow_candidate_clear(str(pending.get("nonce") or ""))
+        raw_nonce = "%s:%s:%s" % (identity, repr(time.time()), threading.get_ident())
+        pending = {
+            "nonce": hashlib.sha256(raw_nonce.encode("utf-8")).hexdigest()[:16],
+            "operation": "candidate-clear",
+            "identity": identity,
+            "title": title,
+            "history_keys": history_keys,
+            "payload": str(payload or "")[:8192],
+            "requested_at": now,
+        }
+        with self._follow_action_state_lock:
+            state = dict(self._follow_action_state or {})
+            state.update({"version": 1, "pending": pending})
+            state.setdefault("last", {})
+            self._follow_action_state = state
+        self._persist_follow_action_state()
+        self._set_follow_action_status(
+            "info", "再次点击确认清理播放记录：" + title,
+            "candidate-clear", title,
+        )
+        self._refresh_follow_categories()
+        return json.dumps({"msg": "待确认清理播放记录：%s；请再次点击" % title}, ensure_ascii=False)
+
+    def _execute_follow_candidate_clear(self, nonce):
+        with self._follow_action_state_lock:
+            pending = dict((self._follow_action_state or {}).get("pending") or {})
+        requested_at = self._positive_int(pending.get("requested_at"), 0)
+        valid = (
+            str(pending.get("operation") or "") == "candidate-clear"
+            and str(pending.get("nonce") or "") == str(nonce or "")
+            and requested_at > 0
+            and int(time.time()) - requested_at <= self.FOLLOW_CONFIRM_TTL
+        )
+        if not valid:
+            result = json.dumps({"msg": "清理确认已失效，请重新选择"}, ensure_ascii=False)
+            return self._remember_follow_action_result(result, "candidate-clear")
+        title = str(pending.get("title") or "待选记录")
+        history_keys = [
+            str(value or "").strip()
+            for value in pending.get("history_keys") or []
+            if str(value or "").strip()
+        ]
+        self._clear_follow_pending_confirmation()
+        try:
+            cloud_required = bool(self._alist_tvbox_plugin and self._ensure_atvp_connection())
+            if cloud_required and not self._history_write_enabled():
+                raise RuntimeError("未配置History写入账号，未删除本机记录")
+            local_deleted = self._native_history_delete_java(history_keys)
+            if local_deleted is None:
+                raise RuntimeError("当前运行时未提供FongMi单条History删除桥")
+            cloud_deleted = 0
+            if cloud_required:
+                for key in history_keys:
+                    self._atvp_history_delete(key)
+                    cloud_deleted += 1
+            with self._cache_lock:
+                self._cache.pop("atvp-history-snapshot", None)
+                self._persistent_cache.pop("atvp-history-snapshot", None)
+            message = "已清理播放记录：%s（本机 %d 条%s）" % (
+                title,
+                local_deleted,
+                "，云端 %d 条" % cloud_deleted if cloud_deleted else "",
+            )
+            result = json.dumps({"msg": message}, ensure_ascii=False)
+        except Exception as exc:
+            result = json.dumps({
+                "msg": "清理播放记录失败：%s" % self._short_error(exc),
+            }, ensure_ascii=False)
+        return self._remember_follow_action_result(result, "candidate-clear", title)
+
+    def _finish_follow_candidate_job(self, job_key, job_owner, generation, result, title):
+        should_refresh = False
+        with self._history_context_lock:
+            if not self._history_generation_active(generation):
+                with self._follow_enrich_lock:
+                    if self._follow_enrich_jobs.get(job_key) is job_owner:
+                        self._follow_enrich_jobs.pop(job_key, None)
+                self._follow_candidate_results.pop(generation, None)
+                return
+            with self._follow_enrich_lock:
+                if self._follow_enrich_jobs.get(job_key) is not job_owner:
+                    return
+                self._follow_enrich_jobs.pop(job_key, None)
+                if result is not None:
+                    self._follow_candidate_results.setdefault(generation, []).append((result, title))
+                prefix = "candidate:%s:" % generation
+                remaining = sum(
+                    1 for key in self._follow_enrich_jobs if str(key).startswith(prefix)
+                )
+                if remaining:
+                    self._set_follow_action_status(
+                        "running", "正在确认追更：剩余 %d 项" % remaining, "candidate",
+                    )
+                    should_refresh = True
+                else:
+                    completed = self._follow_candidate_results.pop(generation, [])
+                    if not completed:
+                        return
+                    messages = [self._follow_action_result_message(value) for value, _name in completed]
+                    failed = sum(self._follow_action_message_failed(message) for message in messages)
+                    if len(completed) == 1:
+                        message = messages[0]
+                        final_title = str(completed[0][1] or "")
+                    else:
+                        succeeded = len(completed) - failed
+                        message = "追更确认完成：成功 %d 项，失败 %d 项" % (succeeded, failed)
+                        if failed:
+                            failures = [
+                                value for value in messages if self._follow_action_message_failed(value)
+                            ]
+                            message += "；" + "；".join(failures[:3])
+                        final_title = ""
+                    self._set_follow_action_status(
+                        "failed" if failed else "done", message, "candidate", final_title,
+                    )
+                    should_refresh = True
+        if should_refresh:
+            self._refresh_follow_categories()
+
+    def _resolve_follow_candidate(self, candidate):
+        probe = {
+            "title": str(candidate.get("match_title") or candidate.get("title") or ""),
+            "pic": str(candidate.get("pic") or ""),
+        }
+        item, reason = self._resolve_keep_follow_item(probe)
+        if isinstance(item, dict):
+            item = dict(item)
+            item["follow_source"] = "fongmi_candidate"
+            if not item.get("pic"):
+                item["pic"] = probe["pic"]
+        return item, reason
+
+    def _category_follow_manage(self, page, ext):
+        mode = self._value(ext, "mode", "view")
+        followed = list((self._follow_memory.get("items") or {}).values())
+        followed.sort(key=lambda item: str(item.get("title") or ""))
+        histories = self._atvp_history_snapshot(nonblocking=True) if page == 1 or followed else []
+        prefix_cards = self._follow_state_cards(include_pending=True) if page == 1 else []
+        if page == 1 and mode == "view":
+            prefix_cards.extend(self._history_management_cards())
+        elif page == 1:
+            prefix_cards = self._history_alert_cards() + prefix_cards
+        if not followed:
+            if page > 1:
+                return self._page_result([], page, 1, 0, self.follow_page_size)
+            empty = {
+                "vod_id": self.ERROR_PREFIX + quote("当前没有已追更剧集", safe=""),
+                "vod_name": "暂无追更剧集",
+                "vod_pic": "",
+                "vod_remarks": "当前没有已追更剧集",
+            }
+            return self._page_result(prefix_cards + [empty], 1, 1, 0, self.follow_page_size)
+        start = (page - 1) * self.follow_page_size
+        self._reconcile_follow_histories(histories)
+        followed = list((self._follow_memory.get("items") or {}).values())
+        followed.sort(key=lambda item: str(item.get("title") or ""))
+        selected = followed[start:start + self.follow_page_size]
+        cards = []
+        for item in selected:
+            cards.append(self._follow_card(
+                item,
+                mode if mode in ("seen", "remove") else "",
+                self._atvp_history_for_item(item, histories),
+            ))
+        if page == 1:
+            cards = prefix_cards + cards
+        pagecount = max(1, int(math.ceil(float(len(followed)) / self.follow_page_size)))
+        return self._page_result(cards, page, pagecount, len(followed), self.follow_page_size)
+
+    def _category_follow_updates(self, page):
+        self._require_tmdb_credentials()
+        followed = list((self._follow_memory.get("items") or {}).values())
+        start = (page - 1) * self.follow_page_size
+        selected = followed[start:start + self.follow_page_size]
+        self._refresh_follow_page_async(selected)
+        histories = self._follow_history_snapshot()
+        self._reconcile_follow_histories(histories)
+        state_items = self._follow_memory.get("items") or {}
+        refreshed = [state_items.get(str(item.get("tmdb_id")), item) for item in selected]
+        paired = [(item, self._atvp_history_for_item(item, histories)) for item in refreshed]
+        paired.sort(key=lambda pair: (0 if self._has_follow_update(pair[0], pair[1]) else 1, str(pair[0].get("next_air_date") or "9999"), str(pair[0].get("title") or "")))
+        cards = [self._follow_card(item, "", history) for item, history in paired]
+        if page == 1:
+            cards = self._history_alert_cards() + self._follow_state_cards() + cards
+        pagecount = max(1, int(math.ceil(float(len(followed)) / self.follow_page_size)))
+        return self._page_result(cards, page, pagecount, len(followed), self.follow_page_size)
+
+    def _refresh_follow_page_async(self, items):
+        now = int(time.time())
+        due = [
+            dict(item) for item in items or []
+            if self._positive_int(item.get("tmdb_id"), 0)
+            and (
+                now - self._positive_int(item.get("last_checked"), 0) >= self.follow_check_ttl
+                or (
+                    not self._follow_title_alias_values(item, include_primary=False)
+                    and not self._positive_int(item.get("title_aliases_checked_at"), 0)
+                )
+            )
+        ]
+        if not due:
+            return False
+        with self._cache_lock:
+            generation = self._cache_generation
+        job_key = "refresh:%s:%s" % (
+            generation, ",".join(sorted(str(item.get("tmdb_id")) for item in due)),
+        )
+        job_owner = object()
+        with self._follow_enrich_lock:
+            if job_key in self._follow_enrich_jobs:
+                return False
+            self._follow_enrich_jobs[job_key] = job_owner
+
+        def worker():
+            updates = {}
+
+            def refresh_item(item):
+                if not self._follow_job_active(job_key, job_owner, generation):
+                    return None
+                return self._refresh_follow_item(item)
+
+            try:
+                if not self._follow_job_active(job_key, job_owner, generation):
+                    return
+                futures = {}
+                for item in due:
+                    if not self._follow_job_active(job_key, job_owner, generation):
+                        return
+                    futures[self._follow_refresh_executor.submit(refresh_item, item)] = item
+                try:
+                    for future in as_completed(futures):
+                        if not self._follow_job_active(job_key, job_owner, generation):
+                            return
+                        source = futures[future]
+                        key = str(source.get("tmdb_id"))
+                        try:
+                            updates[key] = future.result()
+                        except Exception as exc:
+                            failed = dict(source)
+                            failed["check_error"] = self._short_error(exc)
+                            failed["last_checked"] = int(time.time())
+                            updates[key] = failed
+                finally:
+                    for future in futures:
+                        if not future.done():
+                            future.cancel()
+                if updates:
+                    with self._history_context_lock:
+                        if not self._follow_generation_active(generation):
+                            return
+                        with self._follow_enrich_lock:
+                            if not self._follow_job_owner_active_locked(job_key, job_owner):
+                                return
+                            current = dict(self._follow_memory.get("items") or {})
+                            for key, item in updates.items():
+                                if key in current:
+                                    current[key] = item
+                            self._save_follow_state(current)
+                    self._refresh_follow_categories()
+            finally:
+                with self._follow_enrich_lock:
+                    if self._follow_enrich_jobs.get(job_key) is job_owner:
+                        self._follow_enrich_jobs.pop(job_key, None)
+
+        try:
+            self._tasks.start_thread(worker, name="follow-refresh")
+        except Exception:
+            with self._follow_enrich_lock:
+                if self._follow_enrich_jobs.get(job_key) is job_owner:
+                    self._follow_enrich_jobs.pop(job_key, None)
+            return False
+        return True
+
+    def _category_follow_sync(self, page):
+        # Keep the retired category ID usable for clients with a cached class list.
+        return self._category_follow_manage(page, {"mode": "view"})
+
+    def _load_history_share_policy(self):
+        current = dict(self._history_share_policy or {"follow": True, "watch": True})
+        getter = getattr(self, "getCache", None)
+        if not callable(getter):
+            with self._history_context_lock:
+                self._history_share_policy_loaded = False
+            return current
+        try:
+            value = getter(self.HISTORY_SHARE_POLICY_CACHE_KEY)
+        except Exception:
+            with self._history_context_lock:
+                self._history_share_policy_loaded = False
+            return current
+        if value is not None and not isinstance(value, dict):
+            with self._history_context_lock:
+                self._history_share_policy_loaded = False
+            return current
+        policy = {"follow": True, "watch": True} if value is None else current
+        if isinstance(value, dict):
+            source = value.get("policy") if isinstance(value.get("policy"), dict) else value
+            for kind in policy:
+                if kind in source:
+                    policy[kind] = self._bool_value(source.get(kind), policy[kind])
+        with self._history_context_lock:
+            self._history_share_policy = policy
+            self._history_share_policy_loaded = True
+        return dict(policy)
+
+    def _persist_history_share_policy(self, policy=None):
+        setter = getattr(self, "setCache", None)
+        if not callable(setter):
+            return False
+        candidate = dict(policy or self._history_share_policy or {})
+        payload = {
+            "version": 1,
+            "follow": self._bool_value(candidate.get("follow"), True),
+            "watch": self._bool_value(candidate.get("watch"), True),
+            "updated_at": int(time.time()),
+        }
+        try:
+            result = setter(self.HISTORY_SHARE_POLICY_CACHE_KEY, payload)
+            return result is not False and result != "failed"
+        except Exception:
+            return False
+
+    def _toggle_history_share_policy(self, kind):
+        kind = str(kind or "").strip().lower()
+        if kind not in ("follow", "watch"):
+            return json.dumps({"msg": "History 共享设置无效"}, ensure_ascii=False)
+        with self._history_context_lock:
+            current = dict(self._history_share_policy or {"follow": True, "watch": True})
+            if self._history_share_policy_loaded:
+                candidate = dict(current)
+                candidate[kind] = not bool(current.get(kind, True))
+            else:
+                candidate = {"follow": False, "watch": False}
+                candidate[kind] = True
+            if not self._persist_history_share_policy(candidate):
+                return json.dumps({"msg": "History 共享设置未能保存，本机状态未改变"}, ensure_ascii=False)
+            self._history_share_policy = {
+                "follow": bool(candidate.get("follow", True)),
+                "watch": bool(candidate.get("watch", True)),
+            }
+            self._history_share_policy_loaded = True
+            enabled = self._history_share_policy[kind]
+        label = "追更播放记录" if kind == "follow" else "观看记录"
+        state = "允许" if enabled else "禁止"
+        self._refresh_follow_categories()
+        return json.dumps({
+            "msg": "%s已%s异地同步；仅影响本机未来上传，不影响云端读取、合并和已有记录" % (label, state),
+        }, ensure_ascii=False)
+
+    def _history_share_uploads(self, rows):
+        if not self._history_share_policy_loaded:
+            return []
+        policy = dict(self._history_share_policy or {"follow": True, "watch": True})
+        output = []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            is_follow = self._history_has_followplay_reference(row)
+            if is_follow and not bool(policy.get("follow", True)):
+                continue
+            if not is_follow and not bool(policy.get("watch", True)):
+                continue
+            output.append(row)
+        return output
+
+    def _history_management_cards(self):
+        ready = bool(self.atvp_api and self.atvp_token and self._atvp_session is not None)
+        probe_remark = self._atvp_status_remark("probe")
+        sync_remark = self._atvp_status_remark("sync")
+        mode = self._history_sync_mode_label()
+        sync_card = {
+            "vod_id": self.ATVP_SYNC_ACTION,
+            "vod_name": "立即同步 History",
+            "vod_pic": "",
+            "vod_remarks": "%s · %s" % (
+                mode,
+                sync_remark or ("后台同步已启用" if ready else "等待识别 AList-TVBox 地址"),
+            ),
+            "action": self.ATVP_SYNC_ACTION,
+        }
+        policy = dict(self._history_share_policy or {"follow": True, "watch": True})
+        policy_loaded = bool(self._history_share_policy_loaded)
+        cards = [sync_card]
+        for kind, label in (("follow", "追更播放记录"), ("watch", "观看记录")):
+            enabled = bool(policy.get(kind, True))
+            cards.append({
+                "vod_id": self.HISTORY_SHARE_ACTION_PREFIX + kind,
+                "vod_name": "%s：%s" % (
+                    label,
+                    ("允许异地同步" if enabled else "禁止异地同步") if policy_loaded else "暂缓异地同步",
+                ),
+                "vod_pic": "",
+                "vod_remarks": (
+                    "本机设置暂未读取，已暂停上传；点击可明确设置"
+                    if not policy_loaded else
+                    "点击切换 · 仅影响本机未来上传，不影响云端读取、合并和已有记录"
+                ),
+                "action": self.HISTORY_SHARE_ACTION_PREFIX + kind,
+            })
+        cards.append(self._atvp_probe_card(probe_remark))
+        return cards
+
+    def _history_alert_cards(self):
+        status = self._atvp_status.get("sync") if isinstance(self._atvp_status, dict) else None
+        if not isinstance(status, dict) or status.get("state") not in ("running", "failed"):
+            return []
+        state = str(status.get("state") or "")
+        message = str(status.get("message") or "").strip()
+        updated_at = self._positive_int(status.get("updated_at"), 0)
+        timestamp = time.strftime("%m-%d %H:%M", time.localtime(updated_at)) if updated_at else ""
+        return [{
+            "vod_id": self.ATVP_SYNC_ACTION,
+            "vod_name": "History 正在同步" if state == "running" else "History 同步失败",
+            "vod_pic": "",
+            "vod_remarks": message + ((" · " + timestamp) if timestamp else ""),
+            "action": self.ATVP_SYNC_ACTION,
+        }]
+
+    def _request_follow_confirmation(self, operation, raw_id):
+        operation = str(operation or "").strip().lower()
+        tmdb_id = self._positive_int(raw_id, 0)
+        if operation not in ("seen", "remove") or not tmdb_id:
+            return json.dumps({"msg": "追更确认参数无效"}, ensure_ascii=False)
+        item = (self._follow_memory.get("items") or {}).get(str(tmdb_id))
+        if not isinstance(item, dict):
+            result = json.dumps({"msg": "该剧集尚未追更"}, ensure_ascii=False)
+            return self._remember_follow_action_result(result, operation)
+        title = str(item.get("title") or tmdb_id)
+        requested_at = int(time.time())
+        raw_nonce = "%s:%s:%s:%s" % (operation, tmdb_id, repr(time.time()), threading.get_ident())
+        pending = {
+            "nonce": hashlib.sha256(raw_nonce.encode("utf-8")).hexdigest()[:16],
+            "operation": operation,
+            "tmdb_id": tmdb_id,
+            "title": title,
+            "requested_at": requested_at,
+        }
+        with self._follow_action_state_lock:
+            state = dict(self._follow_action_state or {})
+            state.update({"version": 1, "pending": pending})
+            state.setdefault("last", {})
+            self._follow_action_state = state
+        self._persist_follow_action_state()
+        self._refresh_follow_categories()
+        label = "标记已看" if operation == "seen" else "取消追更"
+        return json.dumps({"msg": "待确认%s：%s" % (label, title)}, ensure_ascii=False)
+
+    def _execute_follow_confirmation(self, payload):
+        parts = str(payload or "").split(":", 2)
+        if len(parts) != 3:
+            result = json.dumps({"msg": "追更确认参数无效"}, ensure_ascii=False)
+            return self._remember_follow_action_result(result, "confirm")
+        nonce, operation, raw_id = parts
+        tmdb_id = self._positive_int(raw_id, 0)
+        with self._follow_action_state_lock:
+            pending = dict((self._follow_action_state or {}).get("pending") or {})
+        requested_at = self._positive_int(pending.get("requested_at"), 0)
+        same_pending = bool(nonce and nonce == str(pending.get("nonce") or ""))
+        valid = (
+            same_pending
+            and operation == str(pending.get("operation") or "")
+            and tmdb_id == self._positive_int(pending.get("tmdb_id"), 0)
+            and operation in ("seen", "remove")
+            and requested_at > 0
+            and int(time.time()) - requested_at <= self.FOLLOW_CONFIRM_TTL
+        )
+        if same_pending:
+            self._clear_follow_pending_confirmation()
+        if not valid:
+            result = json.dumps({"msg": "确认已失效，请重新选择剧集"}, ensure_ascii=False)
+            return self._remember_follow_action_result(result, operation or "confirm")
+        result = self._follow_action(operation, tmdb_id)
+        return self._remember_follow_action_result(result, operation, str(pending.get("title") or ""))
+
+    def _cancel_follow_confirmation(self, nonce):
+        with self._follow_action_state_lock:
+            pending = dict((self._follow_action_state or {}).get("pending") or {})
+        if not pending or str(pending.get("nonce") or "") != str(nonce or ""):
+            result = json.dumps({"msg": "确认已失效，无需取消"}, ensure_ascii=False)
+            return self._remember_follow_action_result(result, "confirm")
+        title = str(pending.get("title") or "")
+        operation = str(pending.get("operation") or "")
+        self._clear_follow_pending_confirmation()
+        label = "标记已看" if operation == "seen" else "取消追更"
+        message = "已放弃%s%s" % (label, ("：" + title) if title else "")
+        self._set_follow_action_status("info", message, operation, title)
+        self._refresh_follow_categories()
+        return json.dumps({"msg": message}, ensure_ascii=False)
+
+    def _clear_follow_pending_confirmation(self):
+        with self._follow_action_state_lock:
+            state = dict(self._follow_action_state or {})
+            state.update({"version": 1, "pending": {}})
+            state.setdefault("last", {})
+            self._follow_action_state = state
+        self._persist_follow_action_state()
+
+    def _ack_follow_action_status(self):
+        with self._follow_action_state_lock:
+            state = dict(self._follow_action_state or {})
+            state.update({"version": 1, "last": {}})
+            state.setdefault("pending", {})
+            self._follow_action_state = state
+        self._persist_follow_action_state()
+        self._refresh_follow_categories()
+        return json.dumps({"msg": "操作状态已清除"}, ensure_ascii=False)
+
+    def _load_follow_action_state(self):
+        getter = getattr(self, "getCache", None)
+        value = None
+        if callable(getter):
+            try:
+                value = getter(self.FOLLOW_ACTION_STATE_CACHE_KEY)
+            except Exception:
+                value = None
+        last = value.get("last") if isinstance(value, dict) else {}
+        pending = value.get("pending") if isinstance(value, dict) else {}
+        last = dict(last) if isinstance(last, dict) else {}
+        pending = dict(pending) if isinstance(pending, dict) else {}
+        interrupted = last.get("state") == "running"
+        if interrupted:
+            last.update({
+                "state": "failed",
+                "message": "上次确认追更被中断，请重新操作",
+                "updated_at": int(time.time()),
+            })
+        requested_at = self._positive_int(pending.get("requested_at"), 0)
+        if requested_at <= 0 or int(time.time()) - requested_at > self.FOLLOW_CONFIRM_TTL:
+            pending = {}
+        with self._follow_action_state_lock:
+            self._follow_action_state = {"version": 1, "last": last, "pending": pending}
+        if interrupted:
+            self._persist_follow_action_state()
+
+    def _persist_follow_action_state(self):
+        setter = getattr(self, "setCache", None)
+        if not callable(setter):
+            return False
+        with self._follow_action_state_persist_lock:
+            with self._follow_action_state_lock:
+                payload = {
+                    "version": 1,
+                    "last": dict((self._follow_action_state or {}).get("last") or {}),
+                    "pending": dict((self._follow_action_state or {}).get("pending") or {}),
+                }
+            try:
+                setter(self.FOLLOW_ACTION_STATE_CACHE_KEY, payload)
+                return True
+            except Exception:
+                return False
+
+    def _set_follow_action_status(self, state, message, operation="", title=""):
+        status = {
+            "state": str(state or "info"),
+            "message": str(message or "操作完成"),
+            "operation": str(operation or ""),
+            "title": str(title or ""),
+            "updated_at": int(time.time()),
+        }
+        with self._follow_action_state_lock:
+            value = dict(self._follow_action_state or {})
+            value.update({"version": 1, "last": status})
+            value.setdefault("pending", {})
+            self._follow_action_state = value
+        self._persist_follow_action_state()
+        return status
+
+    def _remember_follow_action_result(self, result, operation, title=""):
+        message = self._follow_action_result_message(result)
+        failed = self._follow_action_message_failed(message)
+        self._set_follow_action_status("failed" if failed else "done", message, operation, title)
+        self._refresh_follow_categories()
+        return result
+
+    @staticmethod
+    def _follow_action_result_message(result):
+        payload = result
+        if isinstance(result, str):
+            try:
+                payload = json.loads(result)
+            except Exception:
+                payload = {"msg": result}
+        return str(payload.get("msg") or "操作完成") if isinstance(payload, dict) else "操作完成"
+
+    @staticmethod
+    def _follow_action_message_failed(message):
+        return any(word in str(message or "") for word in (
+            "失败", "无效", "无法", "未配置", "不可用", "不存在", "超时", "错误", "尚未追更", "已失效",
+        ))
+
+    def _follow_state_cards(self, include_pending=False):
+        cards = []
+        with self._follow_action_state_lock:
+            state = dict(self._follow_action_state or {})
+            pending = dict(state.get("pending") or {})
+            last = dict(state.get("last") or {})
+        requested_at = self._positive_int(pending.get("requested_at"), 0)
+        if include_pending and pending and requested_at and int(time.time()) - requested_at <= self.FOLLOW_CONFIRM_TTL:
+            operation = str(pending.get("operation") or "")
+            tmdb_id = self._positive_int(pending.get("tmdb_id"), 0)
+            nonce = str(pending.get("nonce") or "")
+            title = str(pending.get("title") or tmdb_id)
+            if operation in ("seen", "remove") and tmdb_id and nonce:
+                label = "标记已看" if operation == "seen" else "取消追更"
+                execute = self.FOLLOW_EXECUTE_PREFIX + "%s:%s:%s" % (nonce, operation, tmdb_id)
+                cards.extend([
+                    {
+                        "vod_id": execute,
+                        "vod_name": "确认%s：%s" % (label, title),
+                        "vod_pic": "",
+                        "vod_remarks": "待确认 · %s分钟内有效" % max(1, self.FOLLOW_CONFIRM_TTL // 60),
+                        "action": execute,
+                    },
+                    {
+                        "vod_id": self.FOLLOW_CONFIRM_CANCEL_PREFIX + nonce,
+                        "vod_name": "放弃本次操作",
+                        "vod_pic": "",
+                        "vod_remarks": title,
+                        "action": self.FOLLOW_CONFIRM_CANCEL_PREFIX + nonce,
+                    },
+                ])
+        message = str(last.get("message") or "").strip()
+        if message:
+            state_name = str(last.get("state") or "info")
+            label = {"done": "操作成功", "failed": "操作失败", "running": "处理中"}.get(state_name, "操作状态")
+            updated_at = self._positive_int(last.get("updated_at"), 0)
+            timestamp = time.strftime("%m-%d %H:%M", time.localtime(updated_at)) if updated_at else ""
+            cards.append({
+                "vod_id": self.FOLLOW_STATUS_ACK_ACTION,
+                "vod_name": label,
+                "vod_pic": "",
+                "vod_remarks": message + ((" · " + timestamp) if timestamp else ""),
+                "action": self.FOLLOW_STATUS_ACK_ACTION,
+            })
+        return cards
+
+    def _follow_action(self, operation, raw_id, title=""):
+        tmdb_id = self._positive_int(raw_id, 0)
+        if not tmdb_id:
+            return json.dumps({"msg": "TMDB 剧集编号无效"}, ensure_ascii=False)
+        try:
+            self._require_tmdb_credentials()
+            key = str(tmdb_id)
+            if operation == "remove":
+                with self._follow_enrich_lock:
+                    items = dict(self._follow_memory.get("items") or {})
+                    if key not in items:
+                        return json.dumps({"msg": "该剧集尚未追更"}, ensure_ascii=False)
+                    title = str(items[key].get("title") or key)
+                    items.pop(key, None)
+                    self._save_follow_state(items)
+                return json.dumps({"msg": "已取消追更：" + title}, ensure_ascii=False)
+            if operation == "seen":
+                with self._follow_enrich_lock:
+                    if key not in (self._follow_memory.get("items") or {}):
+                        return json.dumps({"msg": "该剧集尚未追更"}, ensure_ascii=False)
+                data = self._tmdb_api("/tv/%s" % tmdb_id, {}, self.detail_cache_ttl, allow_stale=False)
+                with self._follow_enrich_lock:
+                    items = dict(self._follow_memory.get("items") or {})
+                    current = dict(items.get(key) or {})
+                    if not current:
+                        return json.dumps({"msg": "该剧集已取消追更"}, ensure_ascii=False)
+                    item = self._follow_item_from_tmdb(data, current)
+                    item["seen_episode"] = str(item.get("latest_episode") or item.get("seen_episode") or "")
+                    item["tracked_episode"] = str(item.get("latest_episode") or item.get("tracked_episode") or "")
+                    item["seen_source"] = "manual"
+                    message = "已标记看到 " + (item["seen_episode"] or "当前进度")
+                    items[key] = item
+                    self._save_follow_state(items)
+                return json.dumps({"msg": message}, ensure_ascii=False)
+            with self._follow_enrich_lock:
+                items = dict(self._follow_memory.get("items") or {})
+                existing = items.get(key)
+                if isinstance(existing, dict):
+                    existing_title = str(existing.get("title") or key)
+                    retry_enrichment = bool(existing.get("pending_metadata") or existing.get("enrich_error"))
+                else:
+                    item = {
+                        "tmdb_id": tmdb_id,
+                        "title": str(title or ("TMDB剧集 " + key)),
+                        "seen_episode": "",
+                        "tracked_episode": "",
+                        "seen_source": "",
+                        "pending_metadata": True,
+                        "last_checked": 0,
+                    }
+                    items[key] = item
+                    self._save_follow_state(items)
+                    existing_title = item["title"]
+                    retry_enrichment = True
+            if isinstance(existing, dict):
+                if retry_enrichment:
+                    self._start_follow_enrichment("tmdb", key, existing_title)
+                return json.dumps({"msg": "已经在追更列表：" + existing_title}, ensure_ascii=False)
+            self._start_follow_enrichment("tmdb", key, item["title"])
+            return json.dumps({"msg": "已加入追更，分集资料正在后台补全：" + item["title"]}, ensure_ascii=False)
+        except Exception as exc:
+            return json.dumps({"msg": "追更操作失败：%s" % self._short_error(exc)}, ensure_ascii=False)
+
+    def _follow_action_from_douban(self, raw_id, title=""):
+        subject_id = self._subject_id(raw_id)
+        if not subject_id:
+            return json.dumps({"msg": "豆瓣条目编号无效"}, ensure_ascii=False)
+        try:
+            self._require_tmdb_credentials()
+            with self._follow_enrich_lock:
+                items = dict(self._follow_memory.get("items") or {})
+                existing = next((item for item in items.values() if str(item.get("douban_id") or "") == subject_id), None)
+                if isinstance(existing, dict):
+                    existing_title = str(existing.get("title") or subject_id)
+                    retry_enrichment = bool(existing.get("pending_metadata") or existing.get("enrich_error"))
+                else:
+                    key = "douban:" + subject_id
+                    item = {
+                        "tmdb_id": 0,
+                        "douban_id": subject_id,
+                        "title": str(title or ("豆瓣剧集 " + subject_id)),
+                        "seen_episode": "",
+                        "tracked_episode": "",
+                        "seen_source": "",
+                        "pending_metadata": True,
+                        "last_checked": 0,
+                    }
+                    items[key] = item
+                    self._save_follow_state(items)
+            if isinstance(existing, dict):
+                if retry_enrichment:
+                    self._start_follow_enrichment("douban", subject_id, existing_title)
+                return json.dumps({"msg": "已经在追更列表：" + existing_title}, ensure_ascii=False)
+            self._start_follow_enrichment("douban", subject_id, item["title"])
+            return json.dumps({"msg": "已加入追更，豆瓣与TMDB正在后台映射：" + item["title"]}, ensure_ascii=False)
+        except Exception as exc:
+            return json.dumps({"msg": "豆瓣映射追更失败：%s" % self._short_error(exc)}, ensure_ascii=False)
+
+    def _start_follow_enrichment(self, source, item_id, title=""):
+        with self._cache_lock:
+            generation = self._cache_generation
+        job_key = "%s:%s:%s" % (source, generation, item_id)
+        job_owner = object()
+        with self._follow_enrich_lock:
+            if job_key in self._follow_enrich_jobs:
+                return False
+            self._follow_enrich_jobs[job_key] = job_owner
+
+        def worker():
+            try:
+                if not self._follow_job_active(job_key, job_owner, generation):
+                    return
+                if source == "tmdb":
+                    self._enrich_tmdb_follow(item_id, job_key, job_owner, generation)
+                else:
+                    self._enrich_douban_follow(item_id, title, job_key, job_owner, generation)
+            except Exception as exc:
+                self._mark_follow_enrichment_failed(
+                    source, item_id, exc, job_key, job_owner, generation,
+                )
+            finally:
+                refresh = False
+                with self._follow_enrich_lock:
+                    if self._follow_enrich_jobs.get(job_key) is job_owner:
+                        self._follow_enrich_jobs.pop(job_key, None)
+                        refresh = True
+                refresh = refresh and self._follow_generation_active(generation)
+                if refresh:
+                    self._refresh_follow_categories()
+
+        try:
+            self._tasks.start_thread(worker, name="follow-enrich")
+        except Exception:
+            with self._follow_enrich_lock:
+                if self._follow_enrich_jobs.get(job_key) is job_owner:
+                    self._follow_enrich_jobs.pop(job_key, None)
+            return False
+        return True
+
+    def _follow_generation_active(self, expected_generation):
+        with self._cache_lock:
+            return expected_generation == self._cache_generation
+
+    def _follow_job_active(self, job_key, job_owner, expected_generation):
+        if not self._follow_generation_active(expected_generation):
+            return False
+        with self._follow_enrich_lock:
+            return self._follow_enrich_jobs.get(job_key) is job_owner
+
+    def _follow_job_owner_active_locked(self, job_key, job_owner):
+        return self._follow_enrich_jobs.get(job_key) is job_owner
+
+    def _enrich_tmdb_follow(self, raw_id, job_key=None, job_owner=None, generation=None):
+        tmdb_id = self._positive_int(raw_id, 0)
+        key = str(tmdb_id)
+        if job_key is not None and not self._follow_job_active(job_key, job_owner, generation):
+            return
+        data = self._tmdb_api("/tv/%s" % tmdb_id, {}, self.detail_cache_ttl, allow_stale=False)
+        with self._follow_enrich_lock:
+            if job_key is not None and not self._follow_job_owner_active_locked(
+                    job_key, job_owner):
+                return
+            items = dict(self._follow_memory.get("items") or {})
+            previous = items.get(key)
+            if not isinstance(previous, dict):
+                return
+        item = self._follow_item_from_tmdb(data, previous)
+        item["pending_metadata"] = False
+        item.pop("enrich_error", None)
+        item = self._attach_tmdb_title_aliases(item, data)
+        try:
+            if job_key is not None and not self._follow_job_active(job_key, job_owner, generation):
+                return
+            item = self._attach_douban_to_tmdb_item(item, data)
+        except Exception as exc:
+            item["mapping_error"] = self._short_error(exc)
+        with self._history_context_lock:
+            if job_key is not None and not self._follow_generation_active(generation):
+                return
+            with self._follow_enrich_lock:
+                if job_key is not None and not self._follow_job_owner_active_locked(
+                        job_key, job_owner):
+                    return
+                items = dict(self._follow_memory.get("items") or {})
+                if key not in items:
+                    return
+                items[key] = item
+                self._save_follow_state(items)
+
+    def _enrich_douban_follow(
+            self, subject_id, title="", job_key=None, job_owner=None, generation=None):
+        pending_key = "douban:" + str(subject_id)
+        if job_key is not None and not self._follow_job_active(job_key, job_owner, generation):
+            return
+        douban = self._get_json(
+            self.API + "/subject/" + str(subject_id),
+            params={"for_mobile": 1},
+            ttl=self.detail_cache_ttl,
+        )
+        if job_key is not None and not self._follow_job_active(job_key, job_owner, generation):
+            return
+        matched = self._match_douban_tv_to_tmdb(douban)
+        tmdb_id = self._positive_int(matched.get("id"), 0)
+        if not tmdb_id:
+            raise RuntimeError("未找到可信的TMDB剧集匹配")
+        if job_key is not None and not self._follow_job_active(job_key, job_owner, generation):
+            return
+        detail = self._tmdb_api("/tv/%s" % tmdb_id, {}, self.detail_cache_ttl, allow_stale=False)
+        with self._follow_enrich_lock:
+            if job_key is not None and not self._follow_job_owner_active_locked(
+                    job_key, job_owner):
+                return
+            items = dict(self._follow_memory.get("items") or {})
+            pending = items.get(pending_key)
+            if not isinstance(pending, dict):
+                return
+            previous = items.get(str(tmdb_id)) or pending
+        item = self._follow_item_from_tmdb(detail, previous)
+        item.update({"douban_id": str(subject_id), "pending_metadata": False})
+        item = self._merge_follow_title_aliases(
+            item,
+            (douban.get("title"), douban.get("original_title")),
+        )
+        item = self._attach_tmdb_title_aliases(item, detail)
+        item.pop("enrich_error", None)
+        with self._history_context_lock:
+            if job_key is not None and not self._follow_generation_active(generation):
+                return
+            with self._follow_enrich_lock:
+                if job_key is not None and not self._follow_job_owner_active_locked(
+                        job_key, job_owner):
+                    return
+                items = dict(self._follow_memory.get("items") or {})
+                if pending_key not in items:
+                    return
+                items.pop(pending_key, None)
+                items[str(tmdb_id)] = item
+                self._save_follow_state(items)
+
+    def _mark_follow_enrichment_failed(
+            self, source, item_id, exc, job_key=None, job_owner=None, generation=None):
+        key = str(item_id) if source == "tmdb" else "douban:" + str(item_id)
+        with self._history_context_lock:
+            if job_key is not None and not self._follow_generation_active(generation):
+                return
+            with self._follow_enrich_lock:
+                if job_key is not None and not self._follow_job_owner_active_locked(
+                        job_key, job_owner):
+                    return
+                items = dict(self._follow_memory.get("items") or {})
+                item = items.get(key)
+                if not isinstance(item, dict):
+                    return
+                item = dict(item)
+                item["pending_metadata"] = False
+                item["enrich_error"] = self._short_error(exc)
+                item["last_checked"] = int(time.time())
+                items[key] = item
+                self._save_follow_state(items)
+
+    def _refresh_native_view(self, refresh_type):
+        refresh_type = str(refresh_type or "").strip().lower()
+        if refresh_type not in ("category", "detail"):
+            return False
+        origins = []
+        try:
+            origins.append(self._fongmi_local_origin())
+        except Exception:
+            pass
+        origins.extend("http://127.0.0.1:%s" % port for port in range(9978, 9999))
+        checked = set()
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            for origin in origins:
+                if origin in checked:
+                    continue
+                checked.add(origin)
+                try:
+                    response = session.get(
+                        origin + "/action",
+                        params={"do": "refresh", "type": refresh_type},
+                        timeout=1.0,
+                    )
+                    if response.status_code == 200:
+                        print("[follow-refresh] fongmi-http type=%s origin=loopback" % refresh_type)
+                        return True
+                except Exception:
+                    continue
+            return False
+        finally:
+            session.close()
+
+    def _refresh_native_category(self):
+        return self._refresh_native_view("category")
+
+    @staticmethod
+    def _refresh_native_history_views():
+        try:
+            from java import jclass
+            refresh = jclass("com.fongmi.android.tv.event.RefreshEvent")
+            refresh.history()
+            refresh.home()
+            return True
+        except Exception:
+            return False
+
+    def _invalidate_history_snapshot(self):
+        with self._history_context_lock:
+            self._history_snapshot_revision += 1
+            with self._cache_lock:
+                self._cache.pop("atvp-history-snapshot", None)
+                self._persistent_cache.pop("atvp-history-snapshot", None)
+            return self._history_snapshot_revision
+
+    def _refresh_local_follow_progress(self):
+        try:
+            histories = self._capture_native_history()
+            changed_items = []
+            self._reconcile_follow_histories(histories, changed_items)
+            if changed_items:
+                self._schedule_entry_resource_preheat(changed_items)
+            return True
+        except Exception as exc:
+            self._diagnostic_event("history_ui.local_refresh", "WARN", exc=exc)
+            return False
+
+    def _history_ui_refresh_active(self, token, generation):
+        with self._history_ui_refresh_lock:
+            if token != self._history_ui_refresh_token:
+                return False
+        return self._history_generation_active(generation) and not self._tasks.is_closed()
+
+    def _schedule_history_ui_refresh_step(self, delay, token, generation, phase, started_at):
+        if not self._history_ui_refresh_active(token, generation):
+            return False
+        try:
+            self._tasks.start_timer(
+                delay,
+                self._native_history_ui_refresh_step,
+                args=(token, generation, phase, started_at),
+                name="history-ui-refresh",
+            )
+            return True
+        except Exception:
+            return False
+
+    def _native_history_ui_refresh_step(self, token, generation, phase, started_at):
+        if not self._history_ui_refresh_active(token, generation):
+            return
+        if phase == "early":
+            self._refresh_native_history_views()
+            self._schedule_history_ui_refresh_step(
+                5.2, token, generation, "persisted", started_at,
+            )
+            return
+        if phase == "persisted":
+            # FongMi throttles normal History saves for five seconds.  By this
+            # point the selected episode can be read back from its database.
+            self._refresh_local_follow_progress()
+            self._refresh_native_history_views()
+            self._refresh_follow_categories()
+
+    def _schedule_native_history_ui_refresh(self):
+        # A new playback supersedes pending refreshes from the previous
+        # episode.  Timers are tracked by _TaskSupervisor and are cancelled on
+        # destroy; the token also prevents stale callbacks after re-init.
+        with self._history_context_lock:
+            generation = self._cache_generation
+        with self._history_ui_refresh_lock:
+            self._history_ui_refresh_token += 1
+            token = self._history_ui_refresh_token
+        self._invalidate_history_snapshot()
+        return self._schedule_history_ui_refresh_step(
+            1.2, token, generation, "early", time.monotonic(),
+        )
+
+    def _refresh_active_detail(self, item):
+        try:
+            activity = self._current_fongmi_activity()
+            if activity is None or not hasattr(activity, "getIntent"):
+                return False
+            intent = activity.getIntent()
+            current_key = str(intent.getStringExtra("key") or "").strip()
+            current_id = str(intent.getStringExtra("id") or "").strip()
+            site_key = str(getattr(self, "siteKey", "") or "").strip()
+            expected_id = str((item or {}).get("source_id") or "").strip()
+            if current_id.startswith("atvp_detail:"):
+                current_id = current_id[len("atvp_detail:"):]
+            if expected_id.startswith("atvp_detail:"):
+                expected_id = expected_id[len("atvp_detail:"):]
+            if not site_key or current_key != site_key or not expected_id or current_id != expected_id:
+                return False
+        except Exception:
+            return False
+        return self._refresh_native_view("detail")
+
+    def _schedule_active_detail_refresh(self, item):
+        try:
+            self._tasks.start_thread(
+                self._refresh_active_detail, args=(dict(item or {}),), name="detail-refresh",
+            )
+            return True
+        except Exception:
+            return False
+
+    def _refresh_follow_categories(self):
+        direct = self._queue_instantiated_follow_refresh()
+        if direct:
+            print("[follow-refresh] direct=true fallback=none")
+            return True
+        with self._follow_refresh_lock:
+            self._follow_refresh_generation += 1
+            generation = self._follow_refresh_generation
+        try:
+            self._tasks.start_thread(
+                self._refresh_follow_categories_worker, args=(generation,), name="category-refresh",
+            )
+        except Exception:
+            return False
+        print("[follow-refresh] direct=false fallback=scheduled")
+        return True
+
+    def _refresh_follow_categories_worker(self, generation):
+        time.sleep(1.0)
+        with self._follow_refresh_lock:
+            if generation != self._follow_refresh_generation:
+                return
+        if not self._refresh_visible_follow_category():
+            self._refresh_native_category()
+
+    def _queue_instantiated_follow_refresh(self):
+        try:
+            from java import dynamic_proxy, jclass
+            activity = self._current_fongmi_activity()
+            if activity is None or not hasattr(activity, "getSupportFragmentManager"):
+                return False
+            completed = threading.Event()
+            result = {"count": 0}
+            with self._fongmi_refresh_task_lock:
+                task_class = self._fongmi_refresh_task_class
+                if task_class is None:
+                    runnable = jclass("java.lang.Runnable")
+
+                    class RefreshTask(dynamic_proxy(runnable)):
+                        def __init__(task_self, owner, target_activity, target_result, target_event):
+                            super().__init__()
+                            task_self.owner = owner
+                            task_self.target_activity = target_activity
+                            task_self.target_result = target_result
+                            task_self.target_event = target_event
+
+                        def run(task_self):
+                            try:
+                                task_self.target_result["count"] = task_self.owner._refresh_instantiated_follow_fragments(task_self.target_activity)
+                            finally:
+                                task_self.target_event.set()
+
+                    task_class = self._fongmi_refresh_task_class = RefreshTask
+            task = task_class(self, activity, result, completed)
+            looper = jclass("android.os.Looper")
+            if looper.myLooper() == looper.getMainLooper():
+                task.run()
+            else:
+                handler = jclass("android.os.Handler")(looper.getMainLooper())
+                if not handler.post(task):
+                    return False
+                completed.wait(0.8)
+            return result["count"] > 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _current_fongmi_activity():
+        try:
+            from java import jclass
+            class_cls = jclass("java.lang.Class")
+            modifier_cls = jclass("java.lang.reflect.Modifier")
+            app_type = class_cls.forName("com.fongmi.android.tv.App")
+            activity_type = class_cls.forName("android.app.Activity")
+            app = None
+            for field in app_type.getDeclaredFields():
+                if not modifier_cls.isStatic(field.getModifiers()):
+                    continue
+                if not app_type.isAssignableFrom(field.getType()):
+                    continue
+                field.setAccessible(True)
+                app = field.get(None)
+                if app is not None:
+                    break
+            if app is None:
+                return Spider.ACTIVITY_PROBE_FAILED
+            current = app.getClass()
+            activity_field_found = False
+            while current is not None:
+                for field in current.getDeclaredFields():
+                    if modifier_cls.isStatic(field.getModifiers()):
+                        continue
+                    if not activity_type.isAssignableFrom(field.getType()):
+                        continue
+                    activity_field_found = True
+                    field.setAccessible(True)
+                    activity = field.get(app)
+                    if activity is not None:
+                        return activity
+                current = current.getSuperclass()
+            if not activity_field_found:
+                return Spider.ACTIVITY_PROBE_FAILED
+        except Exception:
+            return Spider.ACTIVITY_PROBE_FAILED
+        return None
+
+    @staticmethod
+    def _refresh_instantiated_follow_fragments(activity):
+        targets = {"follow_updates", "follow_candidates", "follow_sync", "follow_manage"}
+        try:
+            if hasattr(activity, "isFinishing") and activity.isFinishing():
+                return 0
+            if hasattr(activity, "isDestroyed") and activity.isDestroyed():
+                return 0
+            roots = activity.getSupportFragmentManager().getFragments()
+        except Exception:
+            return 0
+        queue = []
+        try:
+            queue.extend(roots)
+        except Exception:
+            try:
+                queue.extend(roots.get(index) for index in range(roots.size()))
+            except Exception:
+                return 0
+        refreshed = 0
+        # TypeFragment keeps typeId in its Bundle even when R8 renames its class and methods.
+        for fragment in queue:
+            if fragment is None:
+                continue
+            try:
+                arguments_getter = getattr(fragment, "getArguments", None)
+                arguments = arguments_getter() if callable(arguments_getter) else None
+                type_id = str(arguments.getString("typeId") or "") if arguments is not None else ""
+                if not type_id:
+                    type_getter = getattr(fragment, "getType", None)
+                    item = type_getter() if callable(type_getter) else None
+                    type_id = str(item.getTypeId() or "") if item is not None else ""
+                if type_id in targets and Spider._invoke_fragment_refresh_listener(fragment):
+                    refreshed += 1
+                children = fragment.getChildFragmentManager().getFragments()
+                try:
+                    queue.extend(children)
+                except Exception:
+                    queue.extend(children.get(index) for index in range(children.size()))
+            except Exception:
+                continue
+        return refreshed
+
+    @staticmethod
+    def _invoke_fragment_refresh_listener(fragment):
+        try:
+            if hasattr(fragment, "isAdded") and not fragment.isAdded():
+                return False
+            if hasattr(fragment, "getView") and fragment.getView() is None:
+                return False
+            candidates = []
+            interfaces_getter = getattr(fragment.getClass(), "getInterfaces", None)
+            if not callable(interfaces_getter):
+                return False
+            for interface in interfaces_getter():
+                for method in interface.getMethods():
+                    parameters = method.getParameterTypes()
+                    if len(parameters) == 0 and str(method.getReturnType().getName()) == "void":
+                        candidates.append(method)
+            if len(candidates) == 1:
+                method = candidates[0]
+                getattr(fragment, str(method.getName()))()
+                return True
+        except Exception:
+            pass
+        return Spider._invoke_fongmi_549_r8_refresh(fragment)
+
+    @staticmethod
+    def _invoke_fongmi_549_r8_refresh(fragment):
+        """Call TypeFragment.onRefresh after FongMi 5.4.9 R8 removes its interface method."""
+        try:
+            view = fragment.getView()
+            if view is None or str(view.getClass().getName()) != (
+                "androidx.swiperefreshlayout.widget.SwipeRefreshLayout"
+            ):
+                return False
+            methods = [
+                method for method in fragment.getClass().getDeclaredMethods()
+                if str(method.getName()) == "X"
+                and len(method.getParameterTypes()) == 0
+                and str(method.getReturnType().getName()) == "void"
+            ]
+            refresh = getattr(fragment, "X", None)
+            if len(methods) != 1 or not callable(refresh):
+                return False
+            refresh()
+            print("[follow-refresh] fongmi-5.4.9-r8 method=X")
+            return True
+        except Exception:
+            return False
+
+    def _refresh_visible_follow_category(self):
+        try:
+            from java import jclass
+            activity = self._current_fongmi_activity()
+            if activity is None or not hasattr(activity, "findViewById") or not hasattr(activity, "getIntent"):
+                return False
+            resource_ids = jclass("com.fongmi.android.tv.R$id")
+            pager = activity.findViewById(resource_ids.pager)
+            result = activity.getIntent().getParcelableExtra("result")
+            if pager is None or result is None:
+                return False
+            current = result.getTypes().get(pager.getCurrentItem())
+            type_id = str(current.getTypeId() or "") if current is not None else ""
+            if type_id not in ("follow_updates", "follow_candidates", "follow_sync", "follow_manage"):
+                return False
+            return self._refresh_native_category()
+        except Exception:
+            return False
+
+    def _match_douban_tv_to_tmdb(self, douban):
+        titles = []
+        for value in (douban.get("title"), douban.get("original_title")):
+            text = str(value or "").strip()
+            if text and text not in titles:
+                titles.append(text)
+        if not titles:
+            raise RuntimeError("豆瓣条目缺少标题")
+        aliases = {self._normalize_media_title(value) for value in titles} - {""}
+        year = self._positive_int(douban.get("year"), 0)
+        candidates = {}
+        for query in titles:
+            data = self._tmdb_api("/search/tv", {"query": query, "page": 1, "include_adult": "false"}, self.detail_cache_ttl)
+            for row in data.get("results") or []:
+                tmdb_id = self._positive_int(row.get("id"), 0)
+                if tmdb_id:
+                    candidates[tmdb_id] = row
+        ranked = []
+        for row in candidates.values():
+            names = {
+                self._normalize_media_title(row.get("name")),
+                self._normalize_media_title(row.get("original_name")),
+            } - {""}
+            if aliases.intersection(names):
+                score = 100
+            elif any(min(len(left), len(right)) >= 2 and (left in right or right in left) for left in aliases for right in names):
+                score = 55
+            else:
+                score = 0
+            tmdb_year = self._positive_int(str(row.get("first_air_date") or "")[:4], 0)
+            if year and tmdb_year:
+                difference = abs(year - tmdb_year)
+                score += 25 if difference == 0 else (10 if difference == 1 else -30)
+            ranked.append((score, float(row.get("popularity") or 0), row))
+        ranked.sort(key=lambda value: (value[0], value[1]), reverse=True)
+        if not ranked or ranked[0][0] < 90:
+            raise RuntimeError("未找到可信的TMDB剧集匹配")
+        if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
+            raise RuntimeError("存在多个同名TMDB剧集，请改用TMDB追更管理")
+        return ranked[0][2]
+
+    def _attach_douban_to_tmdb_item(self, item, tmdb):
+        if str(item.get("douban_id") or ""):
+            return item
+        try:
+            matched = self._match_tmdb_tv_to_douban(tmdb)
+            subject_id = self._subject_id(matched.get("id"))
+            if not subject_id:
+                return item
+            output = dict(item)
+            output["douban_id"] = subject_id
+            output["douban_title"] = str(matched.get("title") or "")
+            output = self._merge_follow_title_aliases(
+                output,
+                (matched.get("title"), matched.get("original_title")),
+            )
+            return output
+        except Exception:
+            return item
+
+    def _match_tmdb_tv_to_douban(self, tmdb):
+        titles = []
+        for value in (tmdb.get("name"), tmdb.get("original_name")):
+            text = str(value or "").strip()
+            if text and text not in titles:
+                titles.append(text)
+        if not titles:
+            raise RuntimeError("TMDB条目缺少标题")
+        aliases = {self._normalize_media_title(value) for value in titles} - {""}
+        year = self._positive_int(str(tmdb.get("first_air_date") or "")[:4], 0)
+        candidates = {}
+        for query in titles:
+            data = self._get_json(
+                self.API + "/search",
+                params={"q": query, "start": 0, "count": 20},
+                ttl=self.detail_cache_ttl,
+            )
+            subjects = data.get("subjects") if isinstance(data.get("subjects"), dict) else {}
+            for row in subjects.get("items") or []:
+                if str(row.get("target_type") or "") != "tv":
+                    continue
+                target = row.get("target") if isinstance(row.get("target"), dict) else {}
+                subject_id = self._subject_id(target.get("id") or row.get("target_id"))
+                if subject_id:
+                    candidate = dict(target)
+                    candidate["id"] = subject_id
+                    candidates[subject_id] = candidate
+        ranked = []
+        for row in candidates.values():
+            name = self._normalize_media_title(row.get("title"))
+            if name in aliases:
+                score = 100
+            elif name and any(min(len(name), len(alias)) >= 2 and (name in alias or alias in name) for alias in aliases):
+                score = 60
+            else:
+                score = 0
+            douban_year = self._positive_int(row.get("year"), 0)
+            if year and douban_year:
+                difference = abs(year - douban_year)
+                score += 25 if difference == 0 else (10 if difference == 1 else -30)
+            ranked.append((score, row))
+        ranked.sort(key=lambda value: value[0], reverse=True)
+        if not ranked or ranked[0][0] < 85:
+            raise RuntimeError("未找到可信的豆瓣剧集匹配")
+        if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
+            raise RuntimeError("存在多个同名豆瓣剧集")
+        return ranked[0][1]
+
+    def _load_follow_state(self, force=False):
+        with self._follow_state_load_lock:
+            return self._load_follow_state_locked(force)
+
+    def _load_follow_state_locked(self, force=False):
+        if self._follow_state_loaded and not force:
+            return True
+        getter = getattr(self, "getCache", None)
+        if not callable(getter):
+            return bool(self._follow_state_loaded)
+        with self._follow_enrich_lock:
+            self._follow_state_loaded = False
+        state = None
+        cache_known = False
+        persisted = False
+        if callable(getter):
+            try:
+                value = getter(self.FOLLOW_CACHE_KEY)
+                if value is None:
+                    cache_known = True
+                elif self._valid_follow_state_payload(value):
+                    state = value
+                    cache_known = True
+                    persisted = True
+            except Exception:
+                cache_known = False
+        if not cache_known:
+            loopback_state, loopback_origin = self._load_follow_state_from_loopback()
+            if loopback_state is not None:
+                state = loopback_state
+                cache_known = True
+                persisted = True
+                if loopback_origin != self._follow_cache_origin:
+                    print("[follow-cache] loopback=%s items=%s" % (
+                        loopback_origin.rsplit(":", 1)[-1], len(loopback_state.get("items") or {}),
+                    ))
+                self._follow_cache_origin = loopback_origin
+        if not cache_known:
+            return False
+        if state is None:
+            state = {"version": self.FOLLOW_STATE_VERSION, "items": {}}
+        state_version = self._positive_int(state.get("version"), 1)
+        items = dict(state.get("items") or {})
+        migrated = persisted and state_version < self.FOLLOW_STATE_VERSION
+        if migrated:
+            for key, value in list(items.items()):
+                if not isinstance(value, dict):
+                    continue
+                item = dict(value)
+                seen = str(item.get("seen_episode") or "")
+                latest = str(item.get("latest_episode") or "")
+                if "tracked_episode" not in item:
+                    item["tracked_episode"] = latest or seen
+                item["seen_episode"] = ""
+                item["seen_source"] = ""
+                items[key] = item
+        for key, value in list(items.items()):
+            if not isinstance(value, dict):
+                continue
+            item = self._sanitize_follow_persisted_item(
+                self._compact_follow_title_aliases(value)
+            )
+            if item != value:
+                items[key] = item
+                migrated = True
+        for tmdb_id in self.follow_tv_ids:
+            key = str(tmdb_id)
+            items.setdefault(key, {"tmdb_id": tmdb_id, "title": "TMDB剧集 " + key, "seen_episode": "", "tracked_episode": ""})
+        with self._follow_enrich_lock:
+            self._follow_memory = {
+                "version": self.FOLLOW_STATE_VERSION,
+                "updated_at": int(time.time()),
+                "items": items,
+            }
+            self._follow_state_loaded = True
+        if migrated:
+            self._persist_follow_state(self._follow_memory)
+        return True
+
+    def _valid_follow_state_payload(self, value):
+        if not isinstance(value, dict) or not isinstance(value.get("items"), dict):
+            return False
+        items = value.get("items") or {}
+        if len(items) > self.FOLLOW_STATE_ITEM_LIMIT:
+            return False
+        try:
+            if _history_utf8_size(json.dumps(value, ensure_ascii=False, separators=(",", ":"))) > self.FOLLOW_STATE_MAX_BYTES:
+                return False
+        except Exception:
+            return False
+        for item in items.values():
+            if not isinstance(item, dict):
+                continue
+            try:
+                if _history_utf8_size(json.dumps(item, ensure_ascii=False, separators=(",", ":"))) > self.FOLLOW_STATE_ITEM_MAX_BYTES:
+                    return False
+            except Exception:
+                return False
+        return True
+
+    def _load_follow_state_from_loopback(self):
+        origins = []
+        if self._follow_cache_origin:
+            origins.append(self._follow_cache_origin)
+        try:
+            origins.append(self._fongmi_local_origin())
+        except Exception:
+            pass
+        session = requests.Session()
+        session.trust_env = False
+        checked = set()
+        try:
+            for origin in origins:
+                if origin in checked:
+                    continue
+                checked.add(origin)
+                try:
+                    response = session.get(
+                        origin + "/cache",
+                        params={"do": "get", "key": self.FOLLOW_CACHE_KEY},
+                        timeout=0.15,
+                        stream=True,
+                    )
+                    if response.status_code != 200:
+                        response.close()
+                        continue
+                    value = _read_bounded_json_shared(
+                        response, "FongMi 追更缓存", self.FOLLOW_STATE_MAX_BYTES,
+                    )
+                    if not self._valid_follow_state_payload(value):
+                        continue
+                    return value, origin
+                except Exception:
+                    continue
+        finally:
+            session.close()
+        return (None, "")
+
+    def _persist_follow_state(self, state):
+        return self._follow_repository.persist(state)
+
+    def _save_follow_state(self, items):
+        sanitized_items = {}
+        for key, value in dict(items or {}).items():
+            if isinstance(value, dict):
+                sanitized_items[str(key)] = self._sanitize_follow_persisted_item(value)
+        state = {
+            "version": self.FOLLOW_STATE_VERSION,
+            "updated_at": int(time.time()),
+            "items": sanitized_items,
+        }
+        with self._follow_enrich_lock:
+            if not self._follow_state_loaded:
+                raise RuntimeError("追更状态尚未成功读取，已暂停修改")
+            if not self._persist_follow_state(state):
+                raise RuntimeError("追更状态未能持久保存")
+            self._follow_memory = state
+            self._follow_state_loaded = True
+        return True
+
+    def _refresh_follow_item(self, item):
+        tmdb_id = self._positive_int(item.get("tmdb_id"), 0)
+        if not tmdb_id:
+            return item
+        data = self._tmdb_api("/tv/%s" % tmdb_id, {}, self.follow_check_ttl, allow_stale=False)
+        refreshed = self._follow_item_from_tmdb(data, item)
+        if not self._follow_title_alias_values(refreshed, include_primary=False):
+            refreshed = self._attach_tmdb_title_aliases(refreshed, data)
+        return refreshed
+
+    def _follow_item_from_tmdb(self, data, previous=None):
+        previous = previous or {}
+        latest = self._aired_episode(data.get("last_episode_to_air"))
+        upcoming = data.get("next_episode_to_air") if isinstance(data.get("next_episode_to_air"), dict) else {}
+        title = str(data.get("name") or data.get("original_name") or previous.get("title") or "")
+        item = dict(previous)
+        item.update({
+            "tmdb_id": self._positive_int(data.get("id"), self._positive_int(previous.get("tmdb_id"), 0)),
+            "title": title,
+            "original_title": str(data.get("original_name") or ""),
+            "pic": self._tmdb_image(data.get("poster_path") or data.get("backdrop_path")) or str(previous.get("pic") or ""),
+            "year": str(data.get("first_air_date") or "")[:4],
+            "status": str(data.get("status") or ""),
+            "season_count": self._positive_int(
+                data.get("number_of_seasons"), self._positive_int(previous.get("season_count"), 0),
+            ),
+            "latest_episode": self._episode_key(latest),
+            "latest_air_date": str(latest.get("air_date") or ""),
+            "latest_episode_name": str(latest.get("name") or ""),
+            "next_episode": self._episode_key(upcoming),
+            "next_air_date": str(upcoming.get("air_date") or ""),
+            "last_checked": int(time.time()),
+        })
+        if "seen_episode" not in item:
+            item["seen_episode"] = ""
+        if "tracked_episode" not in item or (previous.get("pending_metadata") and not item.get("tracked_episode")):
+            item["tracked_episode"] = item["latest_episode"]
+        return item
+
+    @staticmethod
+    def _follow_title_alias_values(item, include_primary=True):
+        if not isinstance(item, dict):
+            return []
+        values = []
+        if include_primary:
+            values.append(item.get("title"))
+        aliases = item.get("title_aliases")
+        if isinstance(aliases, (list, tuple, set)):
+            values.extend(aliases)
+        elif aliases:
+            values.extend(str(aliases).split("\n"))
+        if include_primary:
+            values.append(item.get("original_title"))
+        output = []
+        seen = set()
+        for value in values:
+            text = str(value or "").strip()
+            normalized = Spider._normalize_media_title(text)
+            if text and normalized and normalized not in seen:
+                seen.add(normalized)
+                output.append(text)
+        return output
+
+    @staticmethod
+    def _compact_follow_title_aliases(item):
+        output = dict(item or {})
+        aliases = Spider._follow_title_alias_values(output, include_primary=False)
+        if not aliases:
+            return output
+        chinese = [value for value in aliases if re.search(r"[\u3400-\u9fff]", value)]
+        compact = [
+            _history_clip_text(value, 1024)
+            for value in (chinese if chinese else aliases)[:6 if chinese else 4]
+        ]
+        if compact:
+            output["title_aliases"] = compact
+        else:
+            output.pop("title_aliases", None)
+        return output
+
+    def _sanitize_follow_persisted_item(self, item):
+        output = dict(item or {})
+        for key, limit in self.FOLLOW_STATE_TEXT_FIELD_LIMITS.items():
+            if key in output and output.get(key) is not None:
+                output[key] = _history_clip_text(output.get(key), limit)
+        resource_id = str(output.get("alist_vod_id") or "").strip()
+        binding_mode = str(output.get("alist_resource_mode") or "vod").strip().lower() or "vod"
+        if resource_id and (
+                binding_mode not in self.RESOURCE_SEARCH_MODES
+                or not self._resource_id_persistable(resource_id, binding_mode)):
+            output.pop("alist_vod_id", None)
+            output.pop("alist_resource_mode", None)
+            output.pop("alist_resource_provider", None)
+            output.pop("binding_updated_at", None)
+            resource_id = ""
+        binding_provider = self._resource_provider_key(output.get("alist_resource_provider")) if resource_id else ""
+        if binding_provider:
+            output["alist_resource_provider"] = binding_provider
+        else:
+            output.pop("alist_resource_provider", None)
+
+        route = output.get("last_play_route")
+        if not isinstance(route, dict):
+            output.pop("last_play_route", None)
+            return output
+        resource_mode = str(route.get("resourceMode") or "vod").strip().lower() or "vod"
+        if resource_mode not in self.RESOURCE_SEARCH_MODES:
+            resource_mode = ""
+        route_resource_id = str(route.get("resourceId") or "").strip()
+        if route_resource_id and (
+                not self._resource_id_persistable(route_resource_id, resource_mode)):
+            route_resource_id = ""
+        play_id = str(route.get("playId") or "").strip()
+        decoded_play_id = self._unquote_limited(play_id)
+        if (
+                len(play_id) > self.FOLLOWPLAY_ROUTE_FIELD_MAX_LENGTH
+                or not re.match(r"^(?:\d+@[^\s?#]+|\d+-\d+|\d+)$", play_id)
+                or self._contains_url_reference(decoded_play_id.split("@", 1)[-1])):
+            play_id = ""
+        route_name = str(route.get("name") or "").strip()[:256]
+        if self._contains_url_reference(route_name):
+            route_name = ""
+        if not play_id and not route_resource_id:
+            output.pop("last_play_route", None)
+            return output
+        quality = route.get("quality") if isinstance(route.get("quality"), dict) else {}
+        route_provider = self._resource_provider_key(route.get("resourceProvider"))
+        sanitized_route = {
+            "version": 1,
+            "backend": str(route.get("backend") or "")[:64],
+            "resourceId": route_resource_id,
+            "resourceMode": resource_mode,
+            "playId": play_id,
+            "season": self._positive_int(route.get("season"), 0),
+            "episode": self._positive_int(route.get("episode"), 0),
+            "name": route_name,
+            "quality": {
+                "height": self._positive_int(quality.get("height"), 0),
+                "codec": str(quality.get("codec") or "")[:16],
+                "subtitle": quality.get("subtitle") if isinstance(quality.get("subtitle"), bool) else None,
+                "startupMs": self._positive_int(quality.get("startupMs"), 0),
+            },
+            "updatedAt": self._positive_int(route.get("updatedAt"), 0),
+        }
+        if route_provider:
+            sanitized_route["resourceProvider"] = route_provider
+        output["last_play_route"] = sanitized_route
+        return output
+
+    def _merge_follow_title_aliases(self, item, values):
+        output = dict(item or {})
+        merged = self._follow_title_alias_values(output, include_primary=False)
+        merged.extend(values or [])
+        aliases = []
+        primary = {
+            self._normalize_media_title(output.get("title")),
+            self._normalize_media_title(output.get("original_title")),
+        } - {""}
+        seen = set(primary)
+        for value in merged:
+            text = str(value or "").strip()
+            normalized = self._normalize_media_title(text)
+            if text and normalized and normalized not in seen:
+                seen.add(normalized)
+                aliases.append(text)
+        if aliases:
+            output["title_aliases"] = aliases[:12]
+        return output
+
+    def _attach_tmdb_title_aliases(self, item, tmdb=None):
+        tmdb_id = self._positive_int((tmdb or {}).get("id"), self._positive_int(item.get("tmdb_id"), 0))
+        if not tmdb_id:
+            return item
+        output = dict(item or {})
+        try:
+            payload = self._tmdb_api(
+                "/tv/%s/alternative_titles" % tmdb_id,
+                {},
+                self.detail_cache_ttl,
+            )
+        except Exception:
+            output["title_aliases_checked_at"] = int(time.time())
+            return output
+        preferred_regions = {"CN", "HK", "TW", "SG"}
+        preferred = []
+        fallback = []
+        for row in payload.get("results") or []:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title") or "").strip()
+            title_type = str(row.get("type") or "").strip().lower()
+            if not title or title_type not in ("", "alternative title", "working title"):
+                continue
+            target = preferred if str(row.get("iso_3166_1") or "").upper() in preferred_regions else fallback
+            target.append(title)
+        output = self._merge_follow_title_aliases(output, preferred if preferred else fallback[:4])
+        output = self._compact_follow_title_aliases(output)
+        output["title_aliases_checked_at"] = int(time.time())
+        return output
+
+    def _follow_card(self, item, action_mode="", history=None):
+        tmdb_id = self._positive_int(item.get("tmdb_id"), 0)
+        title = str(item.get("title") or ("TMDB剧集 %s" % tmdb_id))
+        vod_id = "tmdb:tv:%s" % tmdb_id if tmdb_id else str(
+            item.get("douban_id") or self.ERROR_PREFIX + quote(title, safe="")
+        )
+        card = {
+            "vod_id": vod_id,
+            "vod_name": title,
+            "vod_pic": str(item.get("pic") or ""),
+            "vod_remarks": self._follow_remark(item, history),
+        }
+        if action_mode == "seen" and tmdb_id:
+            card["action"] = self.FOLLOW_SEEN_PREFIX + str(tmdb_id)
+            card["vod_remarks"] = "待确认标记已看 · " + card["vod_remarks"]
+        elif action_mode == "remove" and tmdb_id:
+            card["action"] = self.FOLLOW_REMOVE_PREFIX + str(tmdb_id)
+            card["vod_remarks"] = "待确认取消追更 · " + card["vod_remarks"]
+        return card
+
+    def _follow_remark(self, item, history=None):
+        if item.get("pending_metadata"):
+            return "已加入追更 · 分集资料后台更新中"
+        if item.get("enrich_error"):
+            return "已加入追更 · 资料更新失败：" + str(item.get("enrich_error") or "未知错误")
+        error = str(item.get("check_error") or "")
+        if error:
+            remark = "检查失败 · " + error
+            return self._append_follow_progress(remark, item, history)
+        latest = str(item.get("latest_episode") or "")
+        seen = self._history_effective_seen(item, history)
+        if self._has_follow_update(item, history):
+            latest_rank = self._episode_rank(latest)
+            baseline = self._follow_update_baseline(item, history)
+            baseline_rank = self._episode_rank(baseline)
+            if latest[:3] == baseline[:3] and latest_rank > baseline_rank:
+                remark = "有 %s 集更新 · 当前更新至 %s" % (latest_rank - baseline_rank, latest)
+                return self._append_follow_progress(remark, item, history)
+            return self._append_follow_progress("有新季/新集 · 当前更新至 " + latest, item, history)
+        next_date = str(item.get("next_air_date") or "")
+        if seen and next_date:
+            remark = "已看到 %s · 下一级更新时间 %s" % (seen, next_date)
+            return self._append_follow_progress(remark, item, history)
+        if not seen and latest:
+            remark = "已追更 · 当前更新至 %s%s" % (
+                latest,
+                (" · 下一级更新时间 " + next_date) if next_date else "",
+            )
+            return self._append_follow_progress(remark, item, history)
+        status = str(item.get("status") or "")
+        remark = ("已看到 " + seen) if seen else "已追更"
+        if status:
+            remark += " · " + status
+        return self._append_follow_progress(remark, item, history)
+

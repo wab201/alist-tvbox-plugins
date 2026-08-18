@@ -1,0 +1,94 @@
+{
+  "identity": {
+    "raw_id": "tmdb:tv:101",
+    "base_vod": {
+      "sourceId": "base-id",
+      "vod_name": "Base Title",
+      "original_title": "Original Base",
+      "titleAliases": "[\"Base Alias\", \"Shared Alias\"]",
+      "vod_year": "2026"
+    },
+    "follow_item": {
+      "source_id": "follow-id",
+      "mediaType": "tv",
+      "tmdbId": "101",
+      "title": "Follow Title",
+      "originalTitle": "Original Follow",
+      "title_aliases": ["Follow Alias", "Shared Alias"],
+      "year": "2025"
+    }
+  },
+  "payloads": {
+    "vod1": {
+      "list": [
+        {"vod_id": "v1-a", "vod_name": "Alpha", "vod_year": "2026", "provider": "夸克", "source": "catalog-a"},
+        {"id": "v1-b", "title": "Beta", "type_name": "百度", "channel": "catalog-b"}
+      ]
+    },
+    "vod": {
+      "data": {
+        "items": [
+          {"vod_id": "https://media.invalid/vod/a", "name": "Gamma", "year": "2024", "provider": "unknown"},
+          {"id": "opaque-vod-b", "show_name": "Delta", "work_title": "Delta Work", "type": "123"}
+        ]
+      }
+    },
+    "pansou": {
+      "results": [
+        {
+          "work_title": "Parent One",
+          "source": "search-a",
+          "links": [
+            {"url": "https://pan.quark.cn/s/alpha", "title": "Alpha Link", "datetime": "2026-08-10T01:00:00Z"},
+            {"url": "https://pan.baidu.com/s/beta", "note": "Beta Link"}
+          ]
+        },
+        {
+          "title": "Parent Two",
+          "links": [
+            {"share_url": "https://pan.baidu.com/s/beta?pwd=1234", "name": "Duplicate Beta"},
+            {"link": "https://123pan.com/s/gamma", "content": "Gamma Link"}
+          ]
+        }
+      ],
+      "merged_by_type": {
+        "阿里": [
+          {"target": "https://alipan.com/s/delta", "work_title": "Delta Link"},
+          {"url": "https://pan.quark.cn/s/alpha", "title": "Duplicate Alpha"}
+        ]
+      }
+    },
+    "telegram": {
+      "data": {
+        "results": [
+          {"work_title": "TG One", "url": "https://pan.xunlei.com/s/one", "type": "迅雷"},
+          {"note": "TG Two", "share_url": "https://115.com/s/two", "provider": "115"}
+        ],
+        "merged_by_type": {
+          "uc": [
+            {"link": "https://drive.uc.cn/s/three", "note": "TG Three"},
+            {"link": "https://115.com/s/two?password=test-password", "note": "Duplicate Two"}
+          ]
+        }
+      }
+    }
+  },
+  "details": {
+    "vod1": [
+      {"resource_id": "v1-a", "vod_play_from": "夸克", "vod_play_url": "S01E01$play-a1#S01E02$play-a2", "group_seasons": [1], "group_providers": ["quark"]},
+      {"resource_id": "v1-b", "vod_play_from": "百度", "vod_play_url": "第2季第3集$play-b3", "group_seasons": [2], "group_providers": ["baidu"]}
+    ],
+    "vod": [
+      {"resource_id": "opaque-vod", "vod_play_from": "线路A$$$线路B", "vod_play_url": "01.4K.mkv$play-1#02.mkv$play-2$$$S03E04$play-4", "group_seasons": [1, 3], "group_providers": ["quark", "pan123"]},
+      {"resource_id": "fallback-vod", "vod_play_from": "未知", "vod_play_url": "Special$play-special"}
+    ],
+    "pansou": [
+      {"resource_id": "https://pan.quark.cn/s/alpha", "vod_play_from": "盘搜夸克", "vod_play_url": "S01E05$pan-5#S01E06$pan-6", "group_seasons": [1], "group_providers": ["quark"]},
+      {"resource_id": "https://pan.baidu.com/s/beta", "vod_play_from": "盘搜百度", "vod_play_url": "第1季第7集$pan-7"}
+    ],
+    "telegram": [
+      {"resource_id": "https://pan.xunlei.com/s/one", "vod_play_from": "电报迅雷", "vod_play_url": "S02E01$tg-1", "group_seasons": [2], "group_providers": ["xunlei"]},
+      {"resource_id": "https://115.com/s/two", "vod_play_from": "电报115$$$电报UC", "vod_play_url": "01$tg-115$$$S01E02$tg-uc", "group_seasons": [1, 1], "group_providers": ["pan115", "uc"]}
+    ]
+  }
+}

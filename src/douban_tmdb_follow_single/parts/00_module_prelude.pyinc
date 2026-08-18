@@ -1,0 +1,244 @@
+# -*- coding: utf-8 -*-
+"""
+//@name:豆瓣TMDB追更助手（AList-TVBox专用）
+//@id:douban_tmdb_follow_single
+//@version:70
+
+AList-TVBox raw Python plugin for Douban/TMDB browsing and follow-up playback.
+
+Deploy this source through AList-TVBox plugin management and load the generated
+subscription in FongMi/TvBox. The plugin Extend/data must contain
+``atvp_plugin_mode=alist-tvbox-raw`` for follow, History, and cloud-resource
+features. With an empty ext the same source remains a direct FongMi metadata
+site with category/search/detail and direct-URL player compatibility. The same
+source also exports ``Filter`` for AList-TVBox detail/player filter reuse.
+"""
+
+import base64
+import datetime
+import heapq
+import hashlib
+import http.client
+import ipaddress
+import json
+import math
+import re
+import socket
+import ssl
+import threading
+import time
+import traceback
+import unicodedata
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
+from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse
+
+import requests
+from lxml import html
+from requests.adapters import HTTPAdapter
+
+from base.spider import Spider as BaseSpider
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, host, connect_host, port=None, **kwargs):
+        self._connect_host = str(connect_host)
+        super().__init__(host, port=port, **kwargs)
+
+    def connect(self):
+        self.sock = socket.create_connection(
+            (self._connect_host, self.port), self.timeout, self.source_address,
+        )
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host, connect_host, port=None, **kwargs):
+        self._connect_host = str(connect_host)
+        super().__init__(host, port=port, **kwargs)
+
+    def connect(self):
+        raw_socket = socket.create_connection(
+            (self._connect_host, self.port), self.timeout, self.source_address,
+        )
+        try:
+            self.sock = self._context.wrap_socket(raw_socket, server_hostname=self.host)
+        except Exception:
+            raw_socket.close()
+            raise
+
+
+_DNS_EXECUTOR = ThreadPoolExecutor(max_workers=4)
+_DNS_SLOTS = threading.BoundedSemaphore(4)
+_MEDIA_PROBE_EXECUTOR = ThreadPoolExecutor(max_workers=4)
+_MEDIA_PROBE_SLOTS = threading.BoundedSemaphore(4)
+
+
+FILTER_CONFIG_SCHEMA = {
+    "source": "declared",
+    "description": "跨站追更选集过滤器，可配置标题统一、自动选集和播放位置注入；独立备选线路不共享直链",
+    "allowAdditional": True,
+    "example": {"history_cache_ttl": 30, "timeout": 8, "verify_tls": True},
+    "fields": [
+        {"key": "history_cache_ttl", "label": "History缓存秒数", "type": "number", "required": False, "defaultValue": 30},
+        {"key": "timeout", "label": "请求超时秒数", "type": "number", "required": False, "defaultValue": 8},
+        {"key": "verify_tls", "label": "校验HTTPS证书", "type": "boolean", "required": False, "defaultValue": True},
+        {"key": "canonicalize_title", "label": "统一续播标题", "type": "boolean", "required": False, "defaultValue": True},
+        {"key": "auto_select_episode", "label": "自动选中续播集", "type": "boolean", "required": False, "defaultValue": True},
+        {"key": "inject_position", "label": "注入播放位置", "type": "boolean", "required": False, "defaultValue": True},
+    ],
+}
+
+FOLLOWPLAY_PREFIX = "followplay_"
+FOLLOWPLAY_LEGACY_PREFIX = "followplay://"
+FOLLOWPLAY_PREFIXES = (FOLLOWPLAY_PREFIX, FOLLOWPLAY_LEGACY_PREFIX)
+
+HISTORY_RESPONSE_MAX_BYTES = 4 * 1024 * 1024
+HISTORY_ROW_MAX_BYTES = 128 * 1024
+HISTORY_CONFIG_MAX_BYTES = 128 * 1024
+HISTORY_ROW_LIMIT = 2048
+HISTORY_FIELD_MAX_LENGTH = 65536
+HISTORY_FIELDS = (
+    "key", "vodPic", "vodName", "vodFlag", "vodRemarks", "episodeUrl",
+    "revSort", "revPlay", "createTime", "opening", "ending", "position",
+    "duration", "speed", "scale", "cid", "episode", "uid",
+)
+HISTORY_INTEGER_FIELDS = frozenset((
+    "revSort", "revPlay", "createTime", "opening", "ending", "position",
+    "duration", "cid", "episode", "uid",
+))
+HISTORY_FIELD_LIMITS = {
+    "key": 2048,
+    "vodPic": 8192,
+    "vodName": 1024,
+    "vodFlag": 1024,
+    "vodRemarks": 4096,
+    "episodeUrl": HISTORY_FIELD_MAX_LENGTH,
+    "speed": 64,
+    "scale": 64,
+}
+
+HISTORY_CLOCK_SKEW_MS = 5 * 60 * 1000
+PLAY_GROUP_SCAN_LIMIT = 64
+EPISODE_SCAN_LIMIT = 256
+
+
+def _split_bounded_shared(value, separator, limit):
+    text = str(value or "")
+    limit = max(0, int(limit))
+    if not text or limit <= 0:
+        return [], bool(text)
+    separator = str(separator or "")
+    if not separator:
+        return [text], False
+    parts = []
+    start = 0
+    for _index in range(limit):
+        found = text.find(separator, start)
+        if found < 0:
+            parts.append(text[start:])
+            return parts, False
+        parts.append(text[start:found])
+        start = found + len(separator)
+    return parts, True
+
+
+def _history_utf8_size(value):
+    return len(str(value or "").encode("utf-8", errors="ignore"))
+
+
+def _history_clip_text(value, limit):
+    text = str(value or "")
+    encoded = text.encode("utf-8", errors="ignore")
+    if len(encoded) <= limit:
+        return text
+    return encoded[:limit].decode("utf-8", errors="ignore")
+
+
+def _normalize_history_row_shared(row):
+    if not isinstance(row, dict):
+        return None
+    output = {}
+    for key in HISTORY_FIELDS:
+        if key not in row or row.get(key) is None:
+            continue
+        value = row.get(key)
+        if key in HISTORY_INTEGER_FIELDS:
+            try:
+                output[key] = int(value)
+            except Exception:
+                try:
+                    output[key] = int(float(value))
+                except Exception:
+                    output[key] = 0
+            continue
+        if isinstance(value, (dict, list, tuple, set)):
+            continue
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            output[key] = value
+            continue
+        output[key] = _history_clip_text(
+            value, HISTORY_FIELD_LIMITS.get(key, HISTORY_FIELD_MAX_LENGTH),
+        )
+    if not str(output.get("key") or "").strip():
+        return None
+    try:
+        size = _history_utf8_size(json.dumps(output, ensure_ascii=False, separators=(",", ":")))
+    except Exception:
+        return None
+    return output if size <= HISTORY_ROW_MAX_BYTES else None
+
+
+def _normalize_history_rows_shared(rows):
+    output = []
+    total_bytes = 2
+    for input_index, row in enumerate(rows if isinstance(rows, (list, tuple)) else []):
+        if input_index >= HISTORY_ROW_LIMIT:
+            break
+        normalized = _normalize_history_row_shared(row)
+        if not normalized:
+            continue
+        try:
+            row_bytes = _history_utf8_size(json.dumps(normalized, ensure_ascii=False, separators=(",", ":")))
+        except Exception:
+            continue
+        separator_bytes = 1 if output else 0
+        if total_bytes + separator_bytes + row_bytes > HISTORY_RESPONSE_MAX_BYTES:
+            break
+        output.append(normalized)
+        total_bytes += separator_bytes + row_bytes
+        if len(output) >= HISTORY_ROW_LIMIT:
+            break
+    return output
+
+
+def _read_bounded_json_shared(response, label, max_bytes, deadline=None):
+    try:
+        try:
+            content_length = int((getattr(response, "headers", {}) or {}).get("Content-Length") or 0)
+        except Exception:
+            content_length = 0
+        if content_length > max_bytes:
+            raise RuntimeError("%s 响应过大" % label)
+        chunks = []
+        received = 0
+        iterator = getattr(response, "iter_content", None)
+        parts = iterator(chunk_size=65536) if callable(iterator) else [getattr(response, "content", b"")]
+        for chunk in parts:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise RuntimeError("%s 响应超过总时限" % label)
+            if not chunk:
+                continue
+            received += len(chunk)
+            if received > max_bytes:
+                raise RuntimeError("%s 响应过大" % label)
+            chunks.append(chunk)
+        try:
+            return json.loads(b"".join(chunks))
+        except Exception:
+            raise RuntimeError("%s 返回无效 JSON" % label)
+    finally:
+        closer = getattr(response, "close", None)
+        if callable(closer):
+            closer()
+
+

@@ -1,0 +1,101 @@
+{
+  "schema": "v80-p4-douban-html-response-fixtures/1",
+  "encoding": "utf-8",
+  "line_endings": "lf",
+  "fixtures": [
+    {
+      "id": "top250",
+      "filename": "v80_p4_douban_top250.html",
+      "sha256": "DFAA0D6244244B7DA039D2503FBBF420BC3D346721925802D6AF576F3E736938",
+      "utf8_bytes": 1927,
+      "page_size": 25,
+      "shell_bytes": 558,
+      "largest_valid_item_bytes": 468,
+      "projected_parser_page_bytes": 12258,
+      "expected_page": {
+        "page": 1,
+        "pagecount": 10,
+        "limit": 25,
+        "total": 250
+      },
+      "expected_cards": [
+        {
+          "vod_id": "100001",
+          "vod_name": "评分条目",
+          "vod_pic": "https://img.example.invalid/top250-1.jpg",
+          "vod_remarks": "9.7分"
+        },
+        {
+          "vod_id": "100002",
+          "vod_name": "无评分条目",
+          "vod_pic": "https://img.example.invalid/top250-2.jpg",
+          "vod_remarks": "Top250"
+        }
+      ]
+    },
+    {
+      "id": "wishlist",
+      "filename": "v80_p4_douban_wishlist.html",
+      "sha256": "D33EE5094C9F4E9F68CFEA0EE68FB08F6456A3AE51ECB1B28D198633E1F2EEDA",
+      "utf8_bytes": 2504,
+      "page_size": 15,
+      "shell_bytes": 540,
+      "largest_valid_item_bytes": 546,
+      "projected_parser_page_bytes": 8730,
+      "expected_page": {
+        "page": 1,
+        "pagecount": 3,
+        "limit": 15,
+        "total": 31
+      },
+      "expected_cards": [
+        {
+          "vod_id": "200001",
+          "vod_name": "日期条目",
+          "vod_pic": "https://img.example.invalid/wishlist-1.jpg",
+          "vod_remarks": "2026-08-01"
+        },
+        {
+          "vod_id": "200002",
+          "vod_name": "图片标题回退条目",
+          "vod_pic": "https://img.example.invalid/wishlist-2.jpg",
+          "vod_remarks": "这是用于验证简介回退路径的稳定文本，超过二十四个"
+        },
+        {
+          "vod_id": "200003",
+          "vod_name": "默认文案条目",
+          "vod_pic": "https://img.example.invalid/wishlist-3.jpg",
+          "vod_remarks": "想看"
+        }
+      ]
+    }
+  ],
+  "response_limit": {
+    "status": "selected_from_complete_observed_envelopes",
+    "formula": "round_up_64KiB(max(16*P,4*O))",
+    "maximum_parser_projection_bytes": 12258,
+    "observed_decompressed_bodies": {
+      "top250": 64547,
+      "wishlist": 57197
+    },
+    "wishlist_observation": {
+      "provenance": "authorized_single_request_redacted",
+      "observed_on": "2026-08-16",
+      "request_count": 1,
+      "status_code": 200,
+      "redirect": false,
+      "content_type": "text/html",
+      "charset": "utf-8",
+      "sha256": "AA28F4570F11493F8B9EBB19E6176E2A12368817F0371804CC6E2C442EADB0C9",
+      "grid_view_items": 15,
+      "valid_movie_subject_links": 15,
+      "full_15_item_page": true
+    },
+    "computed_bytes": 262144,
+    "selected_bytes": 262144,
+    "must_not_copy": [
+      "P4-5 TMDB 2 MiB",
+      "P4-7 Douban JSON 512 KiB"
+    ]
+  }
+}

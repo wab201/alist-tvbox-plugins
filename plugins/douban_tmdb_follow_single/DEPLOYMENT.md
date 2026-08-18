@@ -12,7 +12,48 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/spiders_v2.j
 https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMDB追更单入口.py
 ```
 
+## V80 当前状态（2026-08-18）
+
+V80 的 P1-P5 本地工程链已经完成，项目级安全复核又关闭了固定 Douban
+JSON/HTML、TMDB、想看动作和用户 ID owner 的自动重定向/无界读取缺口。当前隔离候选为
+`862377` bytes、SHA256
+`C1ACAB802121E3F69ADEA0EBF1AB271C14015124AA28D2D1F8F58F97C8481B7D`；三个 P4
+聚焦文件 `66 passed`，46 个维护单元中文别名覆盖为 `46/46`。最终增量 closure 固定写入
+`work/v80-p5-5f-redirect-boundary-alias-closure-r6-20260818.json`。该报告、候选 Git
+提交、私有灰度、真实环境验证、回退演练和人工批准关闭前，本页部署步骤继续只适用于公开
+V70，禁止覆盖公开源码或把根 `spiders_v2.json` 切换到 V80。
+
+## V80 历史封板记录
+
 本插件用于豆瓣/TMDB 浏览、剧集追更、AList-TVBox 资源搜索、线路评分和 History 续播。当前发布版本为 V70 公开测试版；最低兼容基线为 AList-TVBox 1.42.0，当前已在 1.44.0 验证。插件由 AList-TVBox 生成订阅后交给 FongMi/TvBox 使用。同一源码空 EXT 直载时保留 FongMi 元数据分类、搜索、详情和直链播放合同，但追更、History 与网盘资源功能必须使用 AList-TVBox 生成的订阅。
+
+V80-P1 与 P2 已于 2026-08-14 完成本地验收，P3 的九个隔离工作包已于 2026-08-15 完成本地工程封板：History 同步、结构化 Reliability、Retry/Backoff、Provider Reliability、History 客户端事件队列、Cache Health、Background Bulkhead、Chaos/Recovery 和 TimeoutBudget/生命周期硬取消。TimeoutBudget 为公开前台入口建立有限根 scope，Douban、TMDB、Provider、播放、History 与重认证子阶段继承同一绝对 deadline；生命周期代次切换会取消旧 scope、阻止下一传输阶段，并恰好一次关闭仍被跟踪的响应。定向测试为 `148 passed`，P3 全域为 `379 passed / 986 deselected`；完整门禁为 `18/18 passed`、pytest `1365 passed`，Golden、Macro A/B、Chaos、ATVP、FongMi 双运行时/分类参数和 AList-TVBox `1.45.1` 上游合同通过。候选为 `808647` bytes、SHA256 `9DF8697F950068A56E42BFC4331A5E0ED1520FE91F7C156B30BEF8B2C58187B9`，封板报告为 `work/v80-p3-1451-timeout-budget-stage-gate-sealed-20260815.json`。公开 V70 仍为 `616699` bytes、SHA256 `233C73CAE1048210B34872D4A10EA6023662300F70A8657DB82EA65C342182D4`，根 `spiders_v2.json` 继续登记 `version: 70`；V70 的实际部署与 History 联调证据仍对应 AList-TVBox `1.44.0`。P3 没有执行生产写入、部署、公开入口覆盖或冻结 parts 修改；P4 统一安全边界、P5 可观测性与发布晋升、私有联调和人工发布批准仍未完成，因此 V80 仍不属于部署目标。本页所有部署步骤继续只适用于 V70。路线图见 [V80_REFACTOR_PLAN.md](../../docs/V80_REFACTOR_PLAN.md)。
+
+P4-1 Security Policy 已于 2026-08-15 完成本地封板。它只把三类网络区域、精确内部 origin、外部全局地址、逐跳重定向复验、HTTPS 降级拒绝和跨域请求头白名单冻结为纯决策合同，不执行 DNS、网络请求、缓存、日志、retry、TimeoutBudget 分配或运行时拦截。模块为 `13919` bytes、SHA256 `8BB1DF6C481E6EC6FDA2A0DEE2B2EE52D562C9430F2C6FD049E06758C14D26B8`，P4-1 隔离候选为 `822566` bytes、SHA256 `A1C922715DDA59168D9EB12D0D820A345341840BA9DCF0856F7238CF1C8B8F76`；完整门禁 `18/18 passed`、pytest `1412 passed`，封板报告为 `work/v80-p4-1-security-policy-stage-gate-sealed-20260815.json`。该候选现作为 P4-2 overlay 的固定输入；V80 仍不是部署目标，本页后续步骤仍只适用于公开 V70。
+
+P4-2 已把该策略仅接入隔离 V80 的媒体线路探测。它复用已有 DNS、固定 IP 连接、Host/SNI、重定向、响应探测、TimeoutBudget 和 route executor，增加外部全局地址、逐跳重解析、外部到内部拒绝、HTTPS 降级拒绝和跨域头白名单判定；没有新增 retry、transport、DNS cache、executor 或 timeout owner，也没有接管 Provider、History、TMDB 或通用 requests session。最终隔离候选为 `823561` bytes、SHA256 `D8B2E08B80DCD24CF55205ABA8CE441136587FEBE2BCA216D90A29EEC9520D2F`，封板报告路径为 `work/v80-p4-2-route-security-stage-gate-sealed-20260815.json`。P4 仍未完成，V80 仍不是部署目标，本页后续步骤继续只适用于公开 V70。
+
+P4-3 已把解析后 JSON 的结构限制冻结为独立叶合同：容器深度 `64`、值节点 `131072`、单集合 `8192` 项，只接受精确 JSON 类型并拒绝 NaN/Infinity，错误不包含被拒绝值。该模块不读取网络响应、不解析 JSON、不限制响应字节或字段长度，也不接管任何运行时调用族；模块为 `2383` bytes、SHA256 `91AAD2A2417D226C87DD750D7C2C825E01D176A7BE699857B9239C5EBFCF3EAF`，隔离候选为 `825944` bytes、SHA256 `8FB4EEDAB97057412D622881A074BDA6D04F76617B81CA6802B6D34525FB70F0`。该合同由随后 P4-4 的稳定完整门禁统一封板。
+
+P4-4 仅在 TMDB `_request_tmdb()` 的成功 `200` 返回处调用结构策略；原非 `200` 判断、JSON 解析、缓存、响应关闭、requests session 和 TimeoutBudget 所有权均未改变。非 `200` payload 不进入 shape validation，解析前响应字节和字段长度也尚未受本包限制。最终隔离候选为 `825969` bytes、SHA256 `4746D9EB74B6351EFBF8764985BA295F6936914A7F0A47CFACD6AC52257E86C7`，封板报告为 `work/v80-p4-4-tmdb-json-shape-stage-gate-sealed-20260815.json`。P4-5 才收口 TMDB 响应读取边界；V80 仍不是部署目标。
+
+随后完成的 P3 第三个 Retry/Backoff 工作包仍只属于隔离开发链：它复用现有 urllib3 GET transport retry，Provider 仅为最坏 `0.8s` backoff 预留 deadline，不增加第二层请求循环，也不改变 V70 的公开输出。候选为 `727368` bytes、SHA256 `3BF3D5C02A4ED67F48F852A78614528B123DE53D4C4B055D1FC588EF66C5A0AE`；`278 passed / 7 skipped`，两组 50,000 例宏差分均零差异、零错误。该包不接管状态码重试、重定向、端到端硬取消、Circuit Breaker、Bulkhead、Health、Chaos、History/TMDB 或通用网络层，也没有部署或覆盖公开入口。
+
+P4-5 已在隔离 V80 中为同一 TMDB 调用族增加解析前 `2 MiB` 响应上限、`1024` UTF-8 bytes object key 上限和 `128 KiB` string value 上限。它复用现有 `_read_bounded_json_shared()`、当前 TimeoutBudget deadline 与外层 `close_tracked()`，另外两个 `_json_response(response)` 调用保持原 `response.json()` 路径；固定 `401/403/429` 错误优先，其他非 `200` 的无效或超大 body 保持通用 HTTP 错误，成功 body 先验证 JSON shape 再验证字段长度。该包未修改公开 V70、根索引、十个冻结 parts、Douban/Provider/History/播放或通用 session，也未新增 retry/cache/transport/timeout/close owner。候选为 `829040` bytes、SHA256 `60B083C7F3DF4DCD368CA92F39296C8F3885A36B1491A8D5507169A474DBFEE4`；封板报告写入 `work/v80-p4-5-tmdb-response-boundary-stage-gate-sealed-20260815.json`。V80 仍不是部署目标，本页后续部署步骤继续只适用于公开 V70。
+
+P4-6 Diagnostic Redaction Policy 已在隔离 V80 完成封板：运行时 `_short_error()`、`_diagnostic_event()` 与 stage-gate 报告统一复用同一有界脱敏核心，不新增网络、I/O、retry、cache、TimeoutBudget 或 response-close owner。候选为 `837931` bytes、SHA256 `AF00837D15B2168BE9B211D64594A70A889DE87EEEE7BAC21607F430BB7756E3`，报告为 `work/v80-p4-6-diagnostic-redaction-stage-gate-sealed-20260815.json`。
+
+P4-7 Douban JSON Response Boundary 已完成本地封板。它把 `_DoubanClient.request_json` 与想看动作 POST 接入固定 `512 KiB` 有界读取和既有 JSON shape policy，同时保持非 `200`/登录消息顺序、Douban cache/stale/backoff、session/retry/TimeoutBudget 与外层 `close_tracked()` 所有权。封板候选为 `839093` bytes、SHA256 `B1F980E71AC95CF9C6F143C568CA0B724917E0D8F98B43F09FDBD1B1A6284145`，报告为 `work/v80-p4-7-alist-tvbox-1461-stage-gate-sealed-r2-20260816.json`。
+
+P4-8 Douban HTML Response Boundary 已把 `_DoubanClient.request_text` 作为唯一运行时 owner 封板，固定解压响应上限 `256 KiB`，复用现有 Requests 解码、TimeoutBudget deadline 和 `close_tracked()`。候选为 `840543` bytes、SHA256 `749F16F38DE178756C48AE4A857F30B509F16ACFFAF5E28FF421474852E4892A`；完整门禁 `18/18 passed`、pytest `1680 passed`，报告为 `work/v80-p4-8-douban-html-response-boundary-stage-gate-final-r2-20260816.json`。P4 至此完成本地封板。
+
+P5-1 仅在隔离构建链追加 `2138` bytes 的纯 Observability Schema/Error Code policy，候选为 `842681` bytes、SHA256 `19A5FFA67ADA386585DA663AD1C7FD91FEC04322903EE207602FE2A4CC082A73`。它不接入运行时、不改变公开返回、play ID、网络、I/O 或时钟 owner；本地封板报告 `work/v80-p5-1-observability-policy-stage-gate-final-r2-20260816.json` 记录 `18/18 passed`、pytest `1711 passed`、Macro A/B 各 `50000/0/0`、Chaos `12/12`、敏感扫描 `146/0` 和 `admit=true`。
+
+P5-2 运行时关联字段覆盖层只存在于隔离 V80 开发构建。它通过 6 个固定 insertion 复用 `_diagnostic_event()`、P4 `_short_error()` 和 P3 TimeoutBudget/lifecycle owner，候选为 `848247` bytes、SHA256 `510D4CFEC01457AB6A264A7AF35204E87F6A2814F0A8028A9C2B9437317AB873`；定向 overlay 为 `29 passed`，构建与 stage-gate 关键链为 `26 passed`，完整门禁为 `18/18 passed`、pytest `1764 passed`、Macro A/B 各 `50000/0/0`、Chaos `12/12`、敏感扫描 `149/0` 和 `admit=true`。最终受管文档 closure 报告为 `work/v80-p5-2-runtime-correlation-closure-final-20260816.json`。P4-7、P4-8、P5-1 与 P5-2 均未部署、未修改公开 V70、根 `spiders_v2.json` 或十个冻结 parts；Diagnostics Snapshot、私有灰度和人工发布批准仍未开始，因此本页后续部署步骤仍只适用于公开 V70。
+
+P5-3 诊断快照覆盖层只存在于隔离 V80 开发构建，已完成本地完整工程门禁但未部署。它保留 `_diagnostic_snapshot()` 单 owner，以 `v80-diagnostics-snapshot/1` 的 `schema/count/events` 包装最多 256 个已在 P4 入站脱敏的事件；不增加公共端点、上传、持久化、时钟、缓存、线程或第二次脱敏。审计修复由原 P5-2 event owner 返回 `dict(payload)`，使调用方不能回写内部 buffer；历史 P5-2 封板产物仍为 `848247 / 510D4CFE...`，P5-3 加固中间态为 `848253 / 5B9C10F2...964C`，最终候选为 `848431 / 30EBACE80D845AA5E743EDC5AACB7DDD11A7D314A006A32F5A8B45CD8B87A409`。完整门禁 `18/18 passed`、pytest `1784 passed`、Macro A/B 各 `50000/0/0`、Chaos `12/12`、敏感扫描 `152/0`、稳定实现树 `154 / 221363D7...CC25`、`admit=true`，无生产写入或部署；证据为 `work/v80-p5-3-diagnostics-snapshot-closure-20260816.json`，最终受管文档 closure 路径为 `work/v80-p5-3-diagnostics-snapshot-closure-final-20260816.json`。续跑只接受带受信 SHA256 pin 的旧报告；后续部署步骤继续只适用于公开 V70。
+
+P5-5 已把上游源码合同推进到 AList-TVBox `1.48.0`，但仍未部署或切换公开入口。新合同报告 `work/v80-upstream-1480-source-contract-20260816.json` 记录 `24/24` 源码检查通过，固定 7 commits / 34 files、关键 ATVP/History/Playback blobs 与新 `spring.jar`/`classes.dex` 身份。requirements 指纹修复后的绿色 baseline 为 `work/v80-p5-5-upstream-1480-fingerprinted-baseline-20260816.json`：`18/18 passed`、pytest `1811 passed`、敏感扫描 `158/0`、稳定树 `160 / FE835719...149C`、`admit=true`、V70 source lock 通过，且 `production_writes=false`、`deployment_attempted=false`。该报告 SHA256 `14AA4142678A71B0B64B1B9F86EE2BA6A6C9666AC1942997172B8A762476FFFD` 只作为后续内容寻址 closure 的受信 pin。弹幕和快手变化没有服务器、MuMu、FongMi 或实机运行证据，因此不得据此部署、宣传或修改本页公开 V70 步骤。
 
 完整功能不要把 `.py` 文件直接添加为普通 FongMi 站点，也不要手工填写外层 `api`、`token`、`secret`、`loader`、`source` 或 `raw`。
 
@@ -23,7 +64,7 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMD
 1. 可从 AList-TVBox 访问的本仓库 `spiders_v2.json` 地址。
 2. TMDB API Read Access Token，用于 TMDB 数据和完整追更功能。
 
-广域网双向 History 默认复用当前订阅地址，不需要额外配置协议转换。只要公网 HTTPS 反代同时转发 `/api/accounts/login`、`/history/{token}` 和 `Authorization` 请求头，插件即可直接登录、读取和写入。只有订阅入口不能承载 History、且另有客户端可访问的 History 入口时，才配置 `history_api`。广域网登录不要使用开放公网 HTTP；服务端仅有内网 HTTP 时，应在服务端反代层提供 HTTPS，或通过受保护的 VPN/内网穿透访问。
+以下广域网 History 部署说明属于当前公开 V70 与已实测的 AList-TVBox `1.44.0` 合同。广域网双向 History 默认复用当前订阅地址，不需要额外配置协议转换。只要公网 HTTPS 反代同时转发 `/api/accounts/login`、`/history/{token}` 和 `Authorization` 请求头，插件即可直接登录、读取和写入。只有订阅入口不能承载 History、且另有客户端可访问的 History 入口时，才配置 `history_api`。广域网登录不要使用开放公网 HTTP；服务端仅有内网 HTTP 时，应在服务端反代层提供 HTTPS，或通过受保护的 VPN/内网穿透访问。AList-TVBox `1.45.x` 的 V80 开发合同使用 `/api/playback/*`，不能把下面的 V70 路由说明直接套用到 V80。
 
 TMDB Token 获取方法：
 
@@ -134,6 +175,8 @@ py/
 
 ## History 说明
 
+本节描述公开 V70 在 AList-TVBox `1.44.0` 上的已验证行为。V80 P3 的 `1.45.1` 隔离实现使用 `/api/playback/*`，尚未进入公开部署链。
+
 - History 会在进入追更、资源详情等需要记录的页面时后台刷新，不需要日常手动操作。
 - 播放成功不会立即同步；播放超过 8 分钟后进入待同步状态。收到退出回调时立即触发同步，没有回调时约 5 秒检测一次；播放器仍在运行或同步暂不可用时继续按 5 秒间隔重试。
 - 插件 History 快照默认缓存 60 秒，详情读取过期快照时只启动一个后台刷新任务；过滤器自己的 History 缓存默认 30 秒。
@@ -196,7 +239,7 @@ py/
 
 确认 `history_username` 和 `history_password` 同时填写，且该账号能登录当前 AList-TVBox。`USER` 和 `ADMIN` 都允许。修改后保存配置并刷新插件。
 
-如果订阅能加载但 History 通讯检测失败，确认公网 HTTPS 反代同时开放 `/api/accounts/login` 和 `/history/{token}`，并保留 `Authorization` 请求头。只有 History 使用另一入口时才填写 `history_api`，不要因为容器内网监听 HTTP 就把客户端地址改成不可达的内网 HTTP。
+如果公开 V70 订阅能加载但 History 通讯检测失败，确认公网 HTTPS 反代同时开放 `/api/accounts/login` 和 `/history/{token}`，并保留 `Authorization` 请求头。只有 History 使用另一入口时才填写 `history_api`，不要因为容器内网监听 HTTP 就把客户端地址改成不可达的内网 HTTP。该排障项不适用于 V80 的 AList-TVBox `1.45.1` `/api/playback/*` 开发路径。
 
 ### 过滤器没有生效
 
@@ -209,6 +252,59 @@ py/
 ### 播放提示 bad http status
 
 先确认主插件和同源过滤器都已刷新到 V70。v55 会丢弃各网盘直链所需的播放头，夸克 Cookie 缺失时会表现为详情有线路但候选返回 `bad http status`；v56 起按白名单保留 AList-TVBox 返回的标准播放头，v57 进一步阻止跨域失败回退敏感头和签名媒体直链进入长期状态，v60 重构后台任务与缓存生命周期，v61 修复首次详情 History/线路和追更确认反馈，v63 将动态页 History 刷新改为云端快照路径，v64 修复集数感知预热和同步后即时刷新，V70 修复残缺绑定线路在预热期间阻止完整线路搜索的问题。
+
+## V80-P5-5A 生命周期证据边界
+
+- P5-5A **重复生命周期静止态覆盖层** 仍是隔离开发候选，不属于可部署版本，也没有修改本页的 V70 部署步骤。
+- 当前候选为 `848540` bytes，SHA256 `A14571DF5C8EECBC5C7B8A09C4385978F5C244D806F9FA8228C2CEEDE5D15280`；32 轮 `init({}) -> destroy()` 本地静止态报告为 `work/v80-p5-lifecycle-stability-r7-20260817.json`。
+- 最终本地 stage-gate closure 为 `18/18 passed`、pytest `1873 passed`，但 `production_writes=false`、`deployment_attempted=false`，不能据此刷新插件仓库、过滤器、订阅或容器。
+- runner 只绑定当前受管 candidate，不是通用 Python sandbox；零网络观察不等于任意源码无法绕过，也不等于服务器、MuMu、FongMi 或真实设备通过。
+- P5-5B 缓存性能和 P5-5C 长时间运行资源增长均已完成独立本地证据；并发调用族、私有灰度、公开 V80 晋升和回退演练完成前，继续保留公开 V70 和根 `spiders_v2.json` 的 `version: 70`。
+
+## V80-P5-5B 缓存性能证据边界
+
+- P5-5B **冷/热缓存性能基线** 仍是隔离开发证据，不属于可部署版本，也没有修改本页的 V70 部署步骤。
+- 当前候选保持 `848540` bytes、SHA256 `A14571DF5C8EECBC5C7B8A09C4385978F5C244D806F9FA8228C2CEEDE5D15280`；正式报告 `work/v80-p5-cache-performance-r1-20260817.json` 为 `96/96 passed`，SHA256 `63CEA0A99F2114385896D216166681C8C964328E86E5D848A1BEC661E03C8379`。
+- 内容寻址 stage closure 为 `work/v80-p5-5b-cache-performance-closure-r1-20260817.json`：`18/18 passed`、`7 executed / 11 reused`、pytest `1916 passed`、稳定实现树 `165 / 92BE658F0135B2A972F053ECAD599346F24A4D050AED00758D3799446527ACA3`，耗时 `1299.442s`；output admission 与 V70 source lock 通过，且 `production_writes=false`、`deployment_attempted=false`。
+- 三场景只覆盖合成 `cold_miss`、`fresh_hot_hit` 和 `stale_background_refresh`；host timing 是本机观测值，不是发布 SLO，也不能推导服务器、网络、MuMu、FongMi 或真实设备时延。
+- runner 观察到受管 requests/socket、凭据、持久化、真实线程和 candidate sleep 尝试均为零；其边界不是通用 Python sandbox，且不覆盖并发搜索/播放/History 或长时间运行。
+- P5-5C 已封板，但后续并发工作包、私有灰度、人工批准和完整回退演练关闭前，禁止上传、替换公开入口或把根索引切换到 V80。
+
+## V80-P5-5C 长时间运行资源增长证据边界
+
+- P5-5C **长时间运行资源增长基线** 仍是隔离开发证据，不属于可部署版本，也没有修改本页的 V70 部署步骤。
+- 当前候选保持 `848540` bytes、SHA256 `A14571DF5C8EECBC5C7B8A09C4385978F5C244D806F9FA8228C2CEEDE5D15280`；正式报告 `work/v80-p5-long-run-resource-growth-r4-20260817.json` 为 `32/32 passed`，SHA256 `9BC19054029595EC6647C2C026C98DE04E71A2D14C6466C6231ABE98921B507D`。
+- 内容寻址 stage closure 为 `work/v80-p5-5c-long-run-resource-growth-closure-r2-20260817.json`：`18/18 passed`、`6 executed / 12 reused`、pytest `1966 passed`、稳定实现树 `167 / C7CE536D18F6C869951E4D50A0FAD69D83241D768BC043767491C11E87B6A026`，SHA256 `7977DDC3FC4EB0B9136A6B419BDDE136E703EF549365F0FAFC601EA76A3C76E7`；output admission 与 V70 source lock 通过，且 `production_writes=false`、`deployment_attempted=false`。
+- tracemalloc 只观察候选文件的 Python allocation，`12464` bytes delta 不是发布阈值，也不覆盖 native memory、RSS 或 wall-clock endurance；零网络/线程/持久化观察只约束受管表面，不是通用 Python sandbox。
+- 后续搜索、播放和 History 并发基线必须按调用族独立建立；在私有灰度、人工批准和完整回退演练关闭前，不得部署 V80 或切换公开索引。
+
+## V80-P5-5D 搜索调用族并发与隔离证据边界
+
+- P5-5D **搜索调用族并发与隔离基线** 仍是隔离开发证据，不属于可部署版本；固定 overlay 的中文别名为“搜索并发所有权覆盖层”，以 24 个显式唯一替换收口搜索 owner 和生命周期，不修改本页 V70 部署步骤。
+- 当前候选为 `854833` bytes、SHA256 `3C734E2840ABB50A31CC9A15F241DAC1A0B0E77EC638A882D85CB911DE619766`，P5-5A `848540 / A14571DF5C8EECBC5C7B8A09C4385978F5C244D806F9FA8228C2CEEDE5D15280` 继续作为中间输入合同。
+- 正式专项报告 `work/v80-p5-search-concurrency-runtime-owner-final-r3-20260817.json` 为 schema `/3`、`7/7 passed`，SHA256 `A26D93477EF9E7798EBE023F2ECE110E10C32D6E862640F609FC21C9999CA0EE`；覆盖前台容量、排队取消、job owner、旧代写回、响应单次关闭、资源补全舱壁隔离和 live init/destroy 竞争。
+- cleanup 证据为 18 个 Session 单次关闭、6 个 executor 清理，live init 六 executor/四 slot 换代，search job、refresh key、reference、bulkhead 和 timeout 状态归零；runtime ownership `43 passed`、共享播放边界 `6 passed`、runner `15 passed`、stage-gate 单测 `242 passed`，三路复审 `findings=0`。
+- 首次完整 closure 只读保留为失败诊断：9 个旧测试/runner 仍假设 admission 标量、旧函数签名或四 executor，并错误沿用 `1.46.1` upstream 根。最小修正后从其可信 SHA 内容寻址续跑，`work/v80-p5-5d-search-concurrency-runtime-owner-resume-closure-r2-20260817.json` 为 `18/18 passed`、`8 executed / 10 reused`、pytest `2044 passed`、稳定树 `171 / D24ECF6C92C16A1687CB331B81977D71642ADE629501C786BE5946D267C48050`、敏感扫描 `165/0`、`admit=true`，且未写入生产或部署。
+- DNS/media executor 是搜索可播放性验证与播放探测共享依赖，本包仅迁移 owner/slot 生命周期；共享播放探测算法保持不变，不能替代 P5-5E 播放并发。runner 使用受控 session 和禁止网络表面，结论不能推导真实网络、服务器、MuMu、FongMi 或实机时延。
+- P5-5E 播放调用族和随后 History 调用族仍须分别建立证据；私有灰度、人工批准和完整回退演练关闭前，禁止上传、替换公开入口或把根索引切换到 V80。
+
+## V80-P5-5E 播放调用族并发与隔离证据边界
+
+- P5-5E **播放调用族并发与隔离基线** 仍是隔离开发证据，不属于可部署版本；固定 overlay 的中文别名为“播放并发所有权覆盖层”，以 7 个显式唯一替换收口播放 owner 和生命周期，不修改本页 V70 部署步骤。
+- 当前候选为 `857088` bytes、SHA256 `3DAB5769B4D2A413BC876A478EC690E2E2B4808916773B9D570CA4A244E3299F`，P5-5D `854833 / 3C734E2840ABB50A31CC9A15F241DAC1A0B0E77EC638A882D85CB911DE619766` 继续作为中间输入合同。
+- 正式专项报告 `work/v80-p5-playback-concurrency-r2-20260817.json` 为 schema `/1`、`8/8 passed`，SHA256 `ABFB274DD4C98C282FDBB13F8329DF32BC1AA58DE77AA3C5CB302904EADC36E0`；覆盖 player 隔离、旧 ATVP session、单次关闭、slot 恢复、前后台隔离、live init、陈旧副作用拒绝和 destroy 清理。
+- runner 固定让 8 场景从启动时已哈希的同一候选字节编译，加载后恢复 `base/base.spider`；live-init 场景明确绑定 `cancelled` 结果，避免异常退出或运行中替换候选产生假通过。定向 `31 passed`，三路最终复审 `findings=0`。
+- 技术 closure `work/v80-p5-5e-playback-concurrency-closure-r1-20260817.json` 为 `18/18 passed`、pytest `2079 passed`、稳定树 `176 / F59312A671B1B2E275A74F93E96478AF9C3EEA47CE12A89B2F50E8A85B99BADA`、敏感扫描 `170/0`、`admit=true`，SHA256 `1E0D3ACB2B7C3041917E75E386C935BEE895AA47C10BDA09A5E06775AD5246AA`；`production_writes=false`、`deployment_attempted=false`。
+- 该证据不覆盖 History 自身并发、真实网络、服务器、MuMu、FongMi 或实机时延。P5-5F History 并发、私有灰度、人工批准和完整回退演练关闭前，禁止上传、替换公开入口或把根索引切换到 V80。
+
+## V80-P5-5F History 调用族并发与隔离证据边界
+
+- P5-5F **History 调用族并发与隔离基线** 仍是隔离开发证据，不属于可部署版本；固定 overlay 的中文别名为“History 并发所有权覆盖层”，以 13 个显式唯一替换收口 History job/background/manual/replacement owner、generation/category refresh 和持久化临界区，不修改 `_history_sync_lock`、History 事件队列或本页 V70 部署步骤。
+- 当前候选为 `859732` bytes、SHA256 `B42B37C097AA989F0FE82EF380A71865A4FDA02F6606A295E120FD79DA610700`，P5-5E `857088 / 3DAB5769B4D2A413BC876A478EC690E2E2B4808916773B9D570CA4A244E3299F` 继续作为中间输入合同。
+- 正式专项报告 `work/v80-p5-history-concurrency-r3-20260817.json` 为 schema `/1`、`8/8 passed`，SHA256 `9B00F4A4FCDBF4556CC764D706E67BC73EA0E4A5A6660D595BBB043050BC5E9C`；定向与消费者回归分别为 `34`、`4`、`12`、`7` 和 `53 passed`，三路最终复审 `findings=0`。
+- closure r1 只因 pytest 在 `2400s`、约 `75%` 超时；closure r2 只暴露 53 个历史测试消费者没有禁用更晚 History overlay。两份失败报告均只读保留，恢复时只修复已复现消费者并按依赖图续跑，没有重跑独立完整 baseline。
+- 技术 closure `work/v80-p5-5f-history-concurrency-closure-r3-20260817.json` 为 `18/18 passed`、`7 executed / 11 reused`、pytest `2117 passed`、稳定树 `180 / FE0ADBCF7628CFCE1E10D55FAF3B0780394CEFE1518755BBD388BDCDC5F87609`，SHA256 `77E0FF352DA25FAE2D76311584F70D1585CBB4E68274BD2CFCD505023F8D8648`；`production_writes=false`、`deployment_attempted=false`。
+- 该证据不覆盖真实网络、服务器、MuMu、FongMi 或实机。私有灰度、真实环境验证、完整回退演练、人工发布批准和生产晋升完成前，继续禁止上传、替换公开入口或把根索引切换到 V80。
 
 ## 文件说明
 

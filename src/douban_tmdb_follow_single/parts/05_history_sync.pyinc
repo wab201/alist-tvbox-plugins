@@ -1,0 +1,1984 @@
+    def _atvp_history_snapshot(self, nonblocking=False):
+        if not self._ensure_atvp_connection():
+            return []
+        cache_key = "atvp-history-snapshot"
+        cached = self._cache_get(cache_key, self.atvp_history_ttl)
+        if isinstance(cached, list):
+            return cached
+        stale = self._cache_get(cache_key, self.atvp_history_ttl, allow_expired=True)
+        if nonblocking:
+            # Dynamic/update pages only need the cloud snapshot.  Do not run
+            # the full local export/merge/import cycle here; that path is
+            # reserved for the explicit "立即同步 History" action.
+            self._schedule_atvp_history_refresh(cache_key, lightweight=True)
+            return stale if isinstance(stale, list) else []
+        try:
+            histories = self._atvp_fetch_history()
+            self._cache_set(cache_key, histories)
+            return histories
+        except Exception:
+            return stale if isinstance(stale, list) else []
+
+    def _follow_history_snapshot(self):
+        """Merge fresh FongMi progress into the nonblocking cloud snapshot."""
+        histories = list(self._atvp_history_snapshot(nonblocking=True))
+        try:
+            native = self._native_history_export_java(limit=self.HISTORY_ROW_LIMIT)
+            local_rows = self._normalize_history_rows(
+                native.get("rows") or [] if isinstance(native, dict) else [],
+            )
+        except Exception as exc:
+            self._diagnostic_event("history_snapshot.local", "WARN", exc=exc)
+            local_rows = []
+        if not local_rows:
+            return histories
+        merged = {}
+        anonymous = 0
+        for row in self._normalize_history_rows(histories) + local_rows:
+            identity = self._history_identity(row)
+            if identity:
+                key = ("identity",) + identity
+            else:
+                anonymous += 1
+                key = ("anonymous", anonymous)
+            previous = merged.get(key)
+            if previous is None or self._follow_history_rank(row) > self._follow_history_rank(previous):
+                merged[key] = row
+        return sorted(
+            merged.values(), key=self._follow_history_rank, reverse=True,
+        )[:self.HISTORY_ROW_LIMIT]
+
+    def _follow_history_rank(self, row):
+        identity = self._history_identity(row)
+        if identity and identity[0] in self._sync_site_keys():
+            return (1,) + self._history_semantic_rank(row)
+        return self._history_merge_rank(row)
+
+    def _trigger_history_sync_now(self):
+        if not self._alist_tvbox_plugin or not self._ensure_atvp_connection():
+            return False
+        cache_key = "atvp-history-snapshot"
+        self._invalidate_history_snapshot()
+        return self._schedule_atvp_history_refresh(cache_key)
+
+    def _playback_sync_key(self, parsed):
+        if not isinstance(parsed, dict):
+            return ""
+        identity = str(parsed.get("tmdbId") or parsed.get("sourceId") or "").strip()
+        resource_id = str(parsed.get("resourceId") or "").strip()
+        season = self._positive_int(parsed.get("season"), 0)
+        episode = self._positive_int(parsed.get("episode"), 0)
+        if not identity or not resource_id or season <= 0 or episode <= 0:
+            return ""
+        raw = "%s|%s|%s|%s|%s" % (
+            identity, resource_id, str(parsed.get("resourceMode") or "vod"), season, episode,
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _register_playback_sync_window(self, parsed):
+        """Delay History sync until a meaningful playback window has elapsed."""
+        if not self._alist_tvbox_plugin or not isinstance(parsed, dict):
+            return False
+        key = self._playback_sync_key(parsed)
+        if not key:
+            return False
+        marker = {
+            "owner": object(),
+            "started_at": time.time(),
+            "tmdb_id": self._positive_int(parsed.get("tmdbId"), 0),
+            "source_id": str(parsed.get("sourceId") or "").strip(),
+            "title": str(parsed.get("name") or "").strip(),
+            "resource_id": str(parsed.get("resourceId") or "").strip(),
+            "season": self._positive_int(parsed.get("season"), 0),
+            "episode": self._positive_int(parsed.get("episode"), 0),
+        }
+        with self._playback_sync_lock:
+            old = self._playback_sync_pending.get(key)
+            if old and float(old.get("started_at") or 0) >= marker["started_at"] - 5:
+                return False
+            self._playback_sync_pending[key] = marker
+        owner = marker["owner"]
+        if not self._schedule_playback_sync_check(
+                key, self.PLAYBACK_SYNC_MIN_SECONDS, expected_owner=owner):
+            with self._playback_sync_lock:
+                current = self._playback_sync_pending.get(key)
+                if isinstance(current, dict) and current.get("owner") is owner:
+                    self._playback_sync_pending.pop(key, None)
+            return False
+        return True
+
+    def _schedule_playback_sync_check(self, key, delay, expected_owner=None):
+        try:
+            wait = max(1.0, float(delay))
+        except Exception:
+            wait = float(self.PLAYBACK_SYNC_RETRY_SECONDS)
+        token = object()
+        timer = threading.Timer(wait, self._playback_sync_check, args=(key, token))
+        timer.daemon = True
+        try:
+            self._tasks.track_timer(timer)
+        except Exception:
+            return False
+        with self._playback_sync_lock:
+            if expected_owner is not None:
+                current = self._playback_sync_pending.get(key)
+                if not isinstance(current, dict) or current.get("owner") is not expected_owner:
+                    self._tasks.forget_timer(timer)
+                    return False
+            previous = self._playback_sync_timers.get(key)
+            if previous is not None:
+                try:
+                    previous.cancel()
+                except Exception:
+                    pass
+                self._tasks.forget_timer(previous)
+            self._playback_sync_timers[key] = timer
+            self._playback_sync_tokens[key] = token
+        try:
+            timer.start()
+        except Exception:
+            self._tasks.forget_timer(timer)
+            with self._playback_sync_lock:
+                if self._playback_sync_timers.get(key) is timer:
+                    self._playback_sync_timers.pop(key, None)
+                    self._playback_sync_tokens.pop(key, None)
+            return False
+        return True
+
+    def _playback_activity_active(self):
+        try:
+            activity = self._current_fongmi_activity()
+            if activity is self.ACTIVITY_PROBE_FAILED:
+                return True
+            if activity is None:
+                return False
+            name = str(activity.getClass().getName() or "").lower()
+            return any(marker in name for marker in (
+                "player", "videoactivity", "playbackactivity", "videoplay", "vodplay", "playactivity",
+            ))
+        except Exception:
+            # A failed activity probe must not cause a sync while playback may
+            # still be active; retry after the short exit window instead.
+            return True
+
+    def _playback_sync_marker_current(self, key, marker):
+        owner = marker.get("owner") if isinstance(marker, dict) else None
+        with self._playback_sync_lock:
+            current = self._playback_sync_pending.get(key)
+            return bool(owner is not None and isinstance(current, dict) and current.get("owner") is owner)
+
+    def _playback_sync_check(self, key, token=None):
+        self._diagnostic_event("playback_sync.check", key=key, token=token)
+        with self._playback_sync_lock:
+            if key in self._playback_sync_inflight:
+                return False
+            current_token = self._playback_sync_tokens.get(key)
+            if token is not None and current_token is not token:
+                return False
+            marker = dict(self._playback_sync_pending.get(key) or {})
+            completed_timer = self._playback_sync_timers.pop(key, None)
+            self._playback_sync_tokens.pop(key, None)
+            if marker:
+                self._playback_sync_inflight[key] = marker.get("owner")
+            inflight_owner = marker.get("owner") if marker else None
+        self._tasks.forget_timer(completed_timer)
+        if not marker:
+            return False
+        try:
+            return self._playback_sync_check_owned(key, marker)
+        except Exception as exc:
+            self._diagnostic_event("playback_sync.error", "ERROR", exc=exc, key=key)
+            raise
+        finally:
+            with self._playback_sync_lock:
+                if self._playback_sync_inflight.get(key) is inflight_owner:
+                    self._playback_sync_inflight.pop(key, None)
+
+    def _playback_sync_check_owned(self, key, marker):
+        if not self._playback_sync_marker_current(key, marker):
+            return False
+        elapsed = time.time() - float(marker.get("started_at") or 0)
+        if elapsed < self.PLAYBACK_SYNC_MIN_SECONDS:
+            return self._schedule_playback_sync_check(
+                key, self.PLAYBACK_SYNC_MIN_SECONDS - elapsed, expected_owner=marker.get("owner"),
+            )
+        if self._playback_activity_active():
+            return self._schedule_playback_sync_check(
+                key, self.PLAYBACK_SYNC_RETRY_SECONDS, expected_owner=marker.get("owner"),
+            )
+        try:
+            rows = self._capture_native_history()
+            item = {
+                "tmdb_id": marker.get("tmdb_id"),
+                "source_id": marker.get("source_id"),
+                "title": marker.get("title"),
+                "trackingSeason": marker.get("season"),
+                "alist_vod_id": marker.get("resource_id"),
+            }
+            history = self._atvp_history_for_item(item, rows)
+            position = self._positive_int((history or {}).get("position"), 0)
+            if not history or position < self.PLAYBACK_SYNC_MIN_SECONDS * 1000:
+                return self._schedule_playback_sync_check(
+                    key, self.PLAYBACK_SYNC_RETRY_SECONDS, expected_owner=marker.get("owner"),
+                )
+        except Exception:
+            return self._schedule_playback_sync_check(
+                key, self.PLAYBACK_SYNC_RETRY_SECONDS, expected_owner=marker.get("owner"),
+            )
+        # Linearize the final ownership check with dispatch. A new playback
+        # window cannot be installed between validation and the History trigger.
+        with self._playback_sync_lock:
+            current = self._playback_sync_pending.get(key)
+            if not isinstance(current, dict) or current.get("owner") is not marker.get("owner"):
+                return False
+            if self._playback_activity_active():
+                return self._schedule_playback_sync_check(
+                    key, self.PLAYBACK_SYNC_RETRY_SECONDS, expected_owner=marker.get("owner"),
+                )
+            triggered = self._trigger_history_sync_now()
+            if triggered:
+                current = self._playback_sync_pending.get(key)
+                if isinstance(current, dict) and current.get("owner") is marker.get("owner"):
+                    self._playback_sync_pending.pop(key, None)
+                return True
+            current = self._playback_sync_pending.get(key)
+            if isinstance(current, dict) and current.get("owner") is marker.get("owner"):
+                return self._schedule_playback_sync_check(
+                    key, self.PLAYBACK_SYNC_RETRY_SECONDS, expected_owner=marker.get("owner"),
+                )
+            return False
+
+    def _flush_playback_sync_on_navigation(self):
+        with self._playback_sync_lock:
+            entries = []
+            for key in list(self._playback_sync_pending):
+                if key in self._playback_sync_inflight:
+                    continue
+                timer = self._playback_sync_timers.get(key)
+                token = self._playback_sync_tokens.get(key)
+                if timer is not None:
+                    try:
+                        timer.cancel()
+                    except Exception:
+                        pass
+                entries.append((key, token))
+        for key, token in entries:
+            try:
+                self._tasks.start_thread(
+                    self._playback_sync_check, args=(key, token), name="playback-sync-flush",
+                )
+            except Exception:
+                continue
+
+    def _schedule_atvp_history_refresh(self, cache_key, lightweight=False):
+        lightweight = bool(lightweight)
+        job_kind = "snapshot-background" if lightweight else "sync-background"
+        job_owner = object()
+        with self._atvp_job_lock:
+            if "sync" in self._atvp_jobs or "sync-background" in self._atvp_jobs:
+                return False
+            if job_kind in self._atvp_jobs:
+                return False
+            self._atvp_jobs.add(job_kind)
+        with self._cache_lock:
+            if cache_key in self._refreshing_cache_keys:
+                with self._atvp_job_lock:
+                    self._atvp_jobs.discard(job_kind)
+                return False
+            self._refreshing_cache_keys[cache_key] = job_owner
+            generation = self._cache_generation
+        if not lightweight:
+            self._set_atvp_status(
+                "sync", "running", "History 后台同步中 · %s" % self._history_sync_mode_label(),
+                persist=False,
+            )
+
+        def worker():
+            try:
+                with self._history_context_lock:
+                    self._require_history_generation(generation)
+                    request_revision = self._history_snapshot_revision
+                    if not lightweight:
+                        self._persist_atvp_status()
+                if lightweight:
+                    started_at = time.monotonic()
+                    self._diagnostic_event("history_snapshot.start")
+                    histories = self._atvp_fetch_history()
+                    with self._history_sync_lock:
+                        with self._history_context_lock:
+                            self._require_history_generation(generation)
+                            if request_revision != self._history_snapshot_revision:
+                                raise _HistorySyncCancelled(
+                                    "History 轻量快照已被更新发布失效"
+                                )
+                            with self._atvp_job_lock:
+                                if "sync" in self._atvp_jobs or "sync-background" in self._atvp_jobs:
+                                    raise _HistorySyncCancelled(
+                                        "History 轻量快照已让位于完整同步"
+                                    )
+                            self._cache_set(cache_key, histories)
+                            self._clear_cached_failure(cache_key)
+                            changed_items = []
+                            progress = self._reconcile_follow_histories(histories, changed_items)
+                            self._require_history_generation(generation)
+                            if changed_items:
+                                self._schedule_entry_resource_preheat(changed_items)
+                    self._diagnostic_event(
+                        "history_snapshot.finish",
+                        count=len(histories),
+                        progress=progress,
+                        preheat=len(changed_items),
+                        duration_ms=int((time.monotonic() - started_at) * 1000),
+                    )
+                    self._refresh_follow_categories()
+                else:
+                    with self._history_sync_lock:
+                        result = self._history_coordinator.sync_once(expected_generation=generation)
+                    with self._history_context_lock:
+                        self._require_history_generation(generation)
+                        self._history_snapshot_revision += 1
+                        self._apply_history_sync_result(cache_key, result)
+                        self._clear_cached_failure(cache_key)
+                        state = "failed" if result["errors"] else "done"
+                        self._set_atvp_status(state=state, kind="sync", message=self._history_sync_message(result))
+                        self._refresh_follow_categories()
+            except _HistorySyncCancelled as exc:
+                self._diagnostic_event(
+                    "history_snapshot.cancelled" if lightweight else "history_sync.cancelled",
+                    "INFO", reason=self._short_error(exc),
+                )
+            except Exception as exc:
+                with self._history_context_lock:
+                    if self._history_generation_active(generation):
+                        self._remember_failure(cache_key, exc)
+                        if lightweight:
+                            self._diagnostic_event("history_snapshot.error", "WARN", exc=exc)
+                        else:
+                            self._set_atvp_status(
+                                "sync", "failed", "History 后台同步失败：%s" % self._short_error(exc),
+                            )
+                        self._refresh_follow_categories()
+            finally:
+                with self._cache_lock:
+                    if self._refreshing_cache_keys.get(cache_key) is job_owner:
+                        self._refreshing_cache_keys.pop(cache_key, None)
+                with self._atvp_job_lock:
+                    self._atvp_jobs.discard(job_kind)
+
+        try:
+            self._tasks.start_thread(worker, name="history-sync")
+        except Exception as exc:
+            with self._cache_lock:
+                if self._refreshing_cache_keys.get(cache_key) is job_owner:
+                    self._refreshing_cache_keys.pop(cache_key, None)
+            with self._atvp_job_lock:
+                self._atvp_jobs.discard(job_kind)
+            if not lightweight:
+                self._set_atvp_status(
+                    "sync", "failed", "History 后台同步启动失败：%s" % self._short_error(exc),
+                )
+            return False
+        return True
+
+    @staticmethod
+    def _utf8_size(value):
+        return _history_utf8_size(value)
+
+    @classmethod
+    def _normalize_history_rows(cls, rows):
+        return _normalize_history_rows_shared(rows)
+
+    def _atvp_fetch_history(self):
+        return self._history_coordinator.fetch()
+
+    def _history_write_enabled(self):
+        return bool(self.history_username and self.history_password)
+
+    def _history_generation_active(self, expected_generation):
+        if expected_generation is None:
+            return True
+        with self._cache_lock:
+            return expected_generation == self._cache_generation
+
+    def _require_history_generation(self, expected_generation):
+        if not self._history_generation_active(expected_generation):
+            raise _HistorySyncCancelled("History 同步已因配置更新而取消")
+
+    def _history_sync_mode_label(self):
+        if self._history_write_enabled():
+            return "双向"
+        if bool(self.history_username) != bool(self.history_password):
+            return "只读（写入账号不完整）"
+        return "只读"
+
+    def _sync_history_once(self, expected_generation=None):
+        started_at = time.monotonic()
+        self._diagnostic_event("history_sync.start", generation=expected_generation)
+        errors = []
+        try:
+            with self._history_context_lock:
+                self._require_history_generation(expected_generation)
+                self._diagnostic_event("history_sync.local_start")
+                local_rows = self._capture_native_history()
+                self._diagnostic_event("history_sync.local_finish", count=len(local_rows))
+        except _HistorySyncCancelled:
+            raise
+        except Exception as exc:
+            local_rows = []
+            errors.append(("本机History读取", self._short_error(exc)))
+            self._diagnostic_event("history_sync.local_read", "WARN", exc=exc)
+        cloud_available = False
+        try:
+            with self._history_context_lock:
+                self._require_history_generation(expected_generation)
+                self._diagnostic_event("history_sync.cloud_start")
+                cloud_rows = self._atvp_fetch_history()
+                cloud_available = True
+                self._diagnostic_event("history_sync.cloud_finish", count=len(cloud_rows))
+        except _HistorySyncCancelled:
+            raise
+        except Exception as exc:
+            with self._history_context_lock:
+                self._require_history_generation(expected_generation)
+                stale = self._cache_get(
+                    "atvp-history-snapshot", self.atvp_history_ttl, allow_expired=True,
+                )
+            cloud_rows = stale if isinstance(stale, list) else []
+            errors.append(("云端History读取", self._short_error(exc)))
+            self._diagnostic_event("history_sync.cloud_read", "WARN", exc=exc)
+        merged, uploads = self._merge_native_history(local_rows, cloud_rows)
+        self._diagnostic_event(
+            "history_sync.merge_finish", merged=len(merged), uploads=len(uploads),
+        )
+        permitted_uploads = []
+        upload_blocked = 0
+        uploaded = 0
+        try:
+            # Keep policy selection and the outbound POST in one serial section.
+            # Once a toggle returns, no older policy snapshot can upload afterward.
+            with self._history_context_lock:
+                self._require_history_generation(expected_generation)
+                permitted_uploads = self._history_share_uploads(uploads)
+                upload_blocked = max(0, len(uploads) - len(permitted_uploads))
+                if cloud_available and permitted_uploads and self._history_write_enabled():
+                    self._diagnostic_event(
+                        "history_sync.upload_start", count=len(permitted_uploads),
+                    )
+                    self._atvp_history_push(permitted_uploads)
+                    uploaded = len(permitted_uploads)
+                    self._diagnostic_event("history_sync.upload_finish", count=uploaded)
+        except _HistorySyncCancelled:
+            raise
+        except Exception as exc:
+            errors.append(("云端History写入", self._short_error(exc)))
+            self._diagnostic_event("history_sync.cloud_write", "WARN", exc=exc)
+        # Avoid a second Java/HTTP History export when the cloud snapshot has
+        # no candidate rows to import.  Keep the race guard for the only case
+        # where it matters: a cloud row appears newer than the first local
+        # snapshot and could otherwise overwrite playback that just finished.
+        import_rows = self._history_import_rows(merged, local_rows)
+        if import_rows:
+            try:
+                latest_local_rows = self._capture_native_history()
+                import_rows = self._history_import_rows(merged, latest_local_rows)
+                self._diagnostic_event(
+                    "history_sync.local_reread", count=len(latest_local_rows),
+                )
+            except Exception as exc:
+                self._diagnostic_event("history_sync.local_reread", "WARN", exc=exc)
+            self._diagnostic_event(
+                "history_sync.import_delta", count=len(import_rows),
+            )
+        imported = 0
+        try:
+            with self._history_context_lock:
+                self._require_history_generation(expected_generation)
+                # FongMi's sync bridge is expensive and can rewrite the whole
+                # local table.  Skip it when the cloud snapshot has no newer
+                # rows for this device.
+                self._diagnostic_event(
+                    "history_sync.import_start", count=len(import_rows),
+                )
+                # Keep the legacy hook invocation contract with an empty list;
+                # _import_native_history returns before touching Java, so this
+                # remains cheap when there is no cloud delta.
+                imported = self._import_native_history(import_rows)
+                self._diagnostic_event("history_sync.import_finish", count=imported)
+        except _HistorySyncCancelled:
+            raise
+        except Exception as exc:
+            errors.append(("本机History导入", self._short_error(exc)))
+        result = {
+            "mode": self._history_sync_mode_label(),
+            "local": len(local_rows),
+            "cloud": len(cloud_rows),
+            "cloud_available": cloud_available,
+            "upload_candidates": len(uploads),
+            "upload_allowed": len(permitted_uploads),
+            "upload_blocked": upload_blocked,
+            "uploaded": uploaded,
+            "imported": imported,
+            # Keep the complete reconciliation snapshot separate from the
+            # smaller native-import delta.  An empty import delta must not
+            # erase progress already present in the cloud snapshot.
+            "merged": merged,
+            "import_rows": import_rows,
+            "progress": 0,
+            "errors": errors,
+        }
+        self._diagnostic_event(
+            "history_sync.finish",
+            "WARN" if result.get("errors") else "INFO",
+            duration_ms=int((time.monotonic() - started_at) * 1000),
+            errors=len(result.get("errors") or []),
+        )
+        return result
+
+    def _apply_history_sync_result(self, cache_key, result):
+        merged = result.get("merged") if isinstance(result, dict) else []
+        merged = merged if isinstance(merged, list) else []
+        self._cache_set(cache_key, merged)
+        try:
+            result["progress"] = self._reconcile_follow_histories(merged)
+        except Exception as exc:
+            result.setdefault("errors", []).append(("追更进度回写", self._short_error(exc)))
+        return result
+
+    @staticmethod
+    def _history_sync_message(result):
+        skipped = max(0, int(result.get("upload_allowed") or 0) - int(result.get("uploaded") or 0))
+        blocked = max(0, int(result.get("upload_blocked") or 0))
+        detail = "本机 %s，云端 %s，上传 %s，导入 %s，追更进度 %s" % (
+            result.get("local", 0), result.get("cloud", 0), result.get("uploaded", 0),
+            result.get("imported", 0), result.get("progress", 0),
+        )
+        if blocked:
+            detail += "，本机共享设置跳过上传 %s" % blocked
+        if skipped and str(result.get("mode") or "").startswith("只读"):
+            detail += "，只读跳过上传 %s" % skipped
+        errors = result.get("errors") if isinstance(result.get("errors"), list) else []
+        if errors:
+            failures = "；".join("%s：%s" % (stage, message) for stage, message in errors)
+            return "播放记录同步部分完成，存在失败：%s；%s；模式 %s" % (
+                failures, detail, result.get("mode") or "只读",
+            )
+        return "播放记录同步完成：%s；模式 %s" % (detail, result.get("mode") or "只读")
+
+    def _atvp_probe_card(self, status_remark=""):
+        ready = bool(self.atvp_api and self.atvp_token and self._atvp_session is not None)
+        return {
+            "vod_id": self.ATVP_PROBE_ACTION,
+            "vod_name": "检测通讯",
+            "vod_pic": "",
+            "vod_remarks": status_remark or ("点击验证客户端到 AList-TVBox 的通讯" if ready else "点击自动识别地址并检测通讯"),
+            "action": self.ATVP_PROBE_ACTION,
+        }
+
+    def _start_atvp_job(self, kind):
+        if kind not in ("probe", "sync"):
+            message = "收藏和播放记录请在追更确认中选择，确认后才会加入追更"
+            self._set_follow_action_status("info", message, "candidate")
+            self._refresh_follow_categories()
+            return json.dumps({"msg": message}, ensure_ascii=False)
+        labels = {
+            "probe": "通讯检测",
+            "sync": "播放记录同步",
+        }
+        label = labels.get(kind, "后台任务")
+        with self._cache_lock:
+            generation = self._cache_generation
+        with self._atvp_job_lock:
+            if kind == "sync" and "sync-background" in self._atvp_jobs:
+                return json.dumps({"msg": "History 后台同步正在进行，请稍后查看管理页状态"}, ensure_ascii=False)
+            if kind in self._atvp_jobs:
+                return json.dumps({"msg": "%s正在进行，请稍后查看卡片结果" % label}, ensure_ascii=False)
+            self._atvp_jobs.add(kind)
+            self._set_atvp_status(
+                kind, "running", "%s已开始，请稍后查看卡片结果" % label, persist=False,
+            )
+        try:
+            self._tasks.start_thread(
+                self._run_atvp_job, args=(kind, generation), name="atvp-%s" % kind,
+            )
+        except Exception as exc:
+            with self._atvp_job_lock:
+                self._atvp_jobs.discard(kind)
+            self._set_atvp_status(
+                kind, "failed", "%s启动失败：%s" % (label, self._short_error(exc)),
+            )
+            return json.dumps({"msg": "%s启动失败，请重试" % label}, ensure_ascii=False)
+        return json.dumps({"msg": "%s已开始，完成后本页会自动刷新" % label}, ensure_ascii=False)
+
+    def _run_atvp_job(self, kind, generation=None):
+        try:
+            with self._history_context_lock:
+                self._require_history_generation(generation)
+                self._persist_atvp_status()
+            if kind == "probe":
+                with self._history_context_lock:
+                    self._require_history_generation(generation)
+                    raw = self._atvp_probe_history()
+            else:
+                raw = self._atvp_sync_history(expected_generation=generation)
+            result = json.loads(raw) if isinstance(raw, str) else raw
+            message = str(result.get("msg") or "操作完成") if isinstance(result, dict) else "操作完成"
+            failed = bool(isinstance(result, dict) and result.get("ok") is False)
+            if not failed:
+                failed = any(word in message for word in (
+                    "失败", "未能", "无效", "超时", "不可用", "仅支持",
+                ))
+            with self._history_context_lock:
+                self._require_history_generation(generation)
+                self._set_atvp_status(kind, "failed" if failed else "done", message)
+        except _HistorySyncCancelled:
+            pass
+        except Exception as exc:
+            with self._history_context_lock:
+                if self._history_generation_active(generation):
+                    self._set_atvp_status(kind, "failed", "操作失败：%s" % self._short_error(exc))
+        finally:
+            with self._atvp_job_lock:
+                self._atvp_jobs.discard(kind)
+            if self._history_generation_active(generation):
+                self._refresh_current_category()
+
+    def _load_atvp_status(self):
+        getter = getattr(self, "getCache", None)
+        value = None
+        if callable(getter):
+            try:
+                value = getter(self.ATVP_STATUS_CACHE_KEY)
+            except Exception:
+                value = None
+        statuses = value.get("statuses") if isinstance(value, dict) else {}
+        self._atvp_status = statuses if isinstance(statuses, dict) else {}
+        for kind, status in list(self._atvp_status.items()):
+            if isinstance(status, dict) and status.get("state") == "running":
+                status = dict(status)
+                status.update({"state": "failed", "message": "上次任务被中断，请重新点击"})
+                self._atvp_status[kind] = status
+
+    def _set_atvp_status(self, kind, state, message, persist=True):
+        with self._atvp_job_lock:
+            self._atvp_status[kind] = {
+                "state": str(state or ""),
+                "message": str(message or ""),
+                "updated_at": int(time.time()),
+            }
+        if not persist:
+            return
+        self._persist_atvp_status()
+
+    def _persist_atvp_status(self):
+        setter = getattr(self, "setCache", None)
+        if callable(setter):
+            with self._atvp_status_persist_lock:
+                with self._atvp_job_lock:
+                    payload = {"version": 1, "statuses": dict(self._atvp_status)}
+                try:
+                    setter(self.ATVP_STATUS_CACHE_KEY, payload)
+                except Exception:
+                    pass
+
+    def _refresh_current_category(self):
+        return self._refresh_native_category()
+
+    def _atvp_status_remark(self, kind):
+        status = self._atvp_status.get(kind) if isinstance(self._atvp_status, dict) else None
+        if not isinstance(status, dict):
+            return ""
+        message = str(status.get("message") or "").strip()
+        if not message:
+            return ""
+        prefix = {"running": "进行中", "done": "已完成", "failed": "失败"}.get(status.get("state"), "状态")
+        updated_at = self._positive_int(status.get("updated_at"), 0)
+        timestamp = time.strftime("%m-%d %H:%M", time.localtime(updated_at)) if updated_at else ""
+        return "%s · %s%s" % (prefix, message, (" · " + timestamp) if timestamp else "")
+
+    def _atvp_sync_history(self, expected_generation=None):
+        with self._history_context_lock:
+            self._require_history_generation(expected_generation)
+            if not self._ensure_atvp_connection(force=True):
+                detail = ("：%s" % self._atvp_discovery_error) if self._atvp_discovery_error else ""
+                return json.dumps({
+                    "ok": False,
+                    "msg": "本插件仅支持通过 AList-TVBox 生成的 raw 插件订阅%s" % detail,
+                }, ensure_ascii=False)
+        try:
+            with self._history_sync_lock:
+                result = self._sync_history_once(expected_generation=expected_generation)
+                with self._history_context_lock:
+                    self._require_history_generation(expected_generation)
+                    self._history_snapshot_revision += 1
+                    self._apply_history_sync_result("atvp-history-snapshot", result)
+            return json.dumps({
+                "ok": not result["errors"],
+                "msg": self._history_sync_message(result),
+                "mode": result["mode"],
+                "local": result["local"],
+                "cloud": result["cloud"],
+                "uploaded": result["uploaded"],
+                "imported": result["imported"],
+                "progress": result["progress"],
+            }, ensure_ascii=False)
+        except _HistorySyncCancelled:
+            raise
+        except Exception as exc:
+            return json.dumps({
+                "ok": False,
+                "msg": "播放记录同步失败：%s" % self._short_error(exc),
+            }, ensure_ascii=False)
+
+    def _atvp_history_push(self, rows):
+        return self._history_coordinator.push(rows)
+
+    @classmethod
+    def _history_upload_payload(cls, rows):
+        # The server stores one logical row per History key, but callers may
+        # hand us duplicate local rows after a native export/import race.
+        # Collapse those duplicates before POST and keep the newest rows only;
+        # this bounds growth caused by this plugin without deleting records
+        # belonging to other devices.
+        by_key = OrderedDict()
+        for row in cls._normalize_history_rows(rows):
+            upload = dict(row)
+            for key in ("vodPic", "vod_pic"):
+                upload.pop(key, None)
+            key = str(upload.get("key") or "").strip()
+            if not key:
+                continue
+            previous = by_key.get(key)
+            if previous is None:
+                by_key[key] = upload
+                continue
+            def rank(value):
+                try:
+                    return (
+                        int(value.get("createTime") or 0),
+                        int(value.get("position") or 0),
+                        int(value.get("revPlay") or 0),
+                    )
+                except Exception:
+                    return (0, 0, 0)
+            if rank(upload) >= rank(previous):
+                by_key[key] = upload
+        payload = list(by_key.values())
+        payload.sort(key=lambda value: (
+            int(value.get("createTime") or 0),
+            int(value.get("revPlay") or 0),
+            int(value.get("position") or 0),
+        ), reverse=True)
+        return payload[:cls.HISTORY_ROW_LIMIT]
+
+    def _remember_history_api_origin(self, value):
+        origin = self._http_base(value, "")
+        parsed = urlparse(origin)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return ""
+        if not isinstance(getattr(self, "_history_api_origins", None), list):
+            self._history_api_origins = []
+        if origin not in self._history_api_origins:
+            self._history_api_origins.append(origin)
+        return origin
+
+    @staticmethod
+    def _history_private_origin_counterpart(origin):
+        parsed = urlparse(str(origin or "").strip())
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return ""
+        host = parsed.hostname.strip("[]").lower()
+        private = host == "localhost"
+        if not private:
+            try:
+                address = ipaddress.ip_address(host)
+                if address.is_loopback:
+                    private = True
+                elif not (
+                        address.is_unspecified
+                        or address.is_link_local
+                        or address.is_reserved
+                        or address.is_multicast):
+                    if address.version == 4:
+                        private = any(
+                            address in network for network in (
+                                ipaddress.ip_network("10.0.0.0/8"),
+                                ipaddress.ip_network("172.16.0.0/12"),
+                                ipaddress.ip_network("192.168.0.0/16"),
+                            )
+                        )
+                    else:
+                        private = address in ipaddress.ip_network("fc00::/7")
+            except Exception:
+                private = False
+        if not private:
+            return ""
+        scheme = "http" if parsed.scheme == "https" else "https"
+        return parsed._replace(scheme=scheme).geturl().rstrip("/")
+
+    def _history_origin_candidates(self):
+        values = []
+        for value in (
+                self._history_selected_origin,
+                self.history_api,
+                self.atvp_api,
+                self._history_primary_origin,
+                *(self._history_api_origins or []),
+        ):
+            origin = self._http_base(value, "")
+            if not origin or origin in values:
+                continue
+            values.append(origin)
+            counterpart = self._history_private_origin_counterpart(origin)
+            if counterpart and counterpart not in values:
+                values.append(counterpart)
+        return values
+
+    def _atvp_history_endpoint(self, origin, resource="history"):
+        base = self._http_base(origin, "")
+        if not base:
+            return self._atvp_endpoint(resource)
+        return "%s/%s/%s" % (
+            base.rstrip("/"),
+            str(resource or "").strip("/"),
+            quote(self.atvp_token, safe=""),
+        )
+
+    @staticmethod
+    def _history_retryable_transport_error(exc, method):
+        if method != "post":
+            return isinstance(exc, (
+                requests.exceptions.ConnectionError,
+                requests.exceptions.SSLError,
+                requests.exceptions.Timeout,
+            ))
+        text = str(exc or "").lower()
+        if isinstance(exc, requests.exceptions.SSLError):
+            return any(marker in text for marker in (
+                "wrong version number",
+                "unknown protocol",
+                "http request was sent to https port",
+            ))
+        if not isinstance(exc, requests.exceptions.ConnectionError):
+            return False
+        return any(marker in text for marker in (
+            "failed to establish a new connection",
+            "connection refused",
+            "name or service not known",
+            "nodename nor servname",
+            "network is unreachable",
+            "no route to host",
+        ))
+
+    def _atvp_history_request(self, method, **kwargs):
+        if not self._alist_tvbox_plugin:
+            raise RuntimeError("本插件仅支持 AList-TVBox raw 插件订阅")
+        method_name = str(method or "GET").strip().lower()
+        sender = getattr(self._atvp_session, method_name)
+        request_kwargs = {
+            "timeout": self.timeout,
+            "verify": self.verify_tls,
+        }
+        request_kwargs.update(kwargs)
+        request_kwargs.setdefault("stream", True)
+        if method_name == "get" and self._history_write_enabled() and not self._history_auth_token:
+            self._atvp_history_login(force=False)
+        if method_name == "post":
+            if not self._history_write_enabled():
+                raise RuntimeError("History 写入未启用：请同时配置用户名和密码")
+            if not self._history_auth_token:
+                self._atvp_history_login(force=True)
+        origins = self._history_origin_candidates() or [self.atvp_api]
+        response = None
+        selected_origin = ""
+        last_error = None
+        for origin in origins:
+            try:
+                response = sender(
+                    self._atvp_history_endpoint(origin),
+                    **request_kwargs
+                )
+                selected_origin = origin
+                self._history_selected_origin = origin
+                break
+            except Exception as exc:
+                last_error = exc
+                if not self._history_retryable_transport_error(exc, method_name):
+                    raise
+        if response is None:
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError("AList-TVBox History 没有可用地址")
+        if not self._atvp_history_needs_auth(response):
+            return response
+        try:
+            response.close()
+        except Exception:
+            pass
+        self._history_selected_origin = selected_origin
+        if not self._atvp_history_login(force=True):
+            return response
+        return sender(
+            self._atvp_history_endpoint(self._history_selected_origin or selected_origin),
+            **request_kwargs
+        )
+
+    def _atvp_history_delete(self, key):
+        history_key = str(key or "").strip()
+        if not history_key:
+            raise RuntimeError("History 删除键无效")
+        if not self._history_write_enabled():
+            raise RuntimeError("History 删除未启用：请同时配置用户名和密码")
+        if not self._history_auth_token:
+            self._atvp_history_login(force=False)
+        origins = self._history_origin_candidates() or [self.atvp_api]
+        last_error = None
+        for origin in origins:
+            try:
+                response = self._atvp_session.delete(
+                    self._atvp_history_endpoint(origin),
+                    params={"key": history_key},
+                    timeout=self.timeout,
+                    verify=self.verify_tls,
+                    stream=True,
+                )
+                self._history_selected_origin = origin
+                if response.status_code in (401, 403):
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+                    if not self._atvp_history_login(force=True):
+                        raise RuntimeError("AList-TVBox History 删除认证失败")
+                    response = self._atvp_session.delete(
+                        self._atvp_history_endpoint(self._history_selected_origin or origin),
+                        params={"key": history_key},
+                        timeout=self.timeout,
+                        verify=self.verify_tls,
+                        stream=True,
+                    )
+                if response.status_code >= 500:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+                    if self._atvp_history_delete_by_id(
+                            self._history_selected_origin or origin, history_key):
+                        return True
+                try:
+                    if response.status_code < 200 or response.status_code >= 300:
+                        raise RuntimeError(self._atvp_history_http_error(response, "删除"))
+                finally:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+                return True
+            except Exception as exc:
+                last_error = exc
+                if not self._history_retryable_transport_error(exc, "get"):
+                    raise
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("AList-TVBox History 没有可用删除地址")
+
+    def _atvp_history_delete_by_id(self, origin, history_key):
+        response = self._atvp_session.get(
+            self._atvp_history_endpoint(origin),
+            params={"key": history_key},
+            timeout=self.timeout,
+            verify=self.verify_tls,
+            stream=True,
+        )
+        if response.status_code < 200 or response.status_code >= 300:
+            try:
+                response.close()
+            except Exception:
+                pass
+            return False
+        row = self._read_bounded_json_response(
+            response,
+            "AList-TVBox History 删除回退查询",
+            max_bytes=self.HISTORY_ROW_MAX_BYTES,
+        )
+        if not isinstance(row, dict) or str(row.get("key") or "") != history_key:
+            return False
+        history_id = self._int_value(row.get("id"), 0)
+        if history_id <= 0:
+            return False
+        response = self._atvp_session.delete(
+            "%s/api/history/%s" % (
+                self._http_base(origin, "").rstrip("/"), history_id,
+            ),
+            timeout=self.timeout,
+            verify=self.verify_tls,
+            stream=True,
+        )
+        try:
+            if response.status_code < 200 or response.status_code >= 300:
+                return False
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
+        self._diagnostic_event(
+            "history.delete.fallback", "ok", origin=self._http_base(origin, ""),
+        )
+        return True
+
+    @classmethod
+    def _atvp_history_error_text(cls, response):
+        cached = getattr(response, "_atvp_bounded_error_text", None)
+        if isinstance(cached, str):
+            return cached
+        limit = cls.HISTORY_CONFIG_MAX_BYTES
+        text = ""
+        truncated = False
+        try:
+            try:
+                content_length = int((getattr(response, "headers", {}) or {}).get("Content-Length") or 0)
+            except Exception:
+                content_length = 0
+            if 0 < content_length <= limit:
+                iterator = getattr(response, "iter_content", None)
+                if callable(iterator):
+                    chunks = []
+                    received = 0
+                    for chunk in iterator(chunk_size=16384):
+                        if not chunk:
+                            continue
+                        received += len(chunk)
+                        if received > limit:
+                            chunks = []
+                            truncated = True
+                            break
+                        chunks.append(chunk)
+                    if chunks:
+                        text = b"".join(chunks).decode("utf-8", errors="replace")
+            elif content_length == 0:
+                iterator = getattr(response, "iter_content", None)
+                if callable(iterator):
+                    chunks = []
+                    received = 0
+                    try:
+                        for chunk in iterator(chunk_size=16384):
+                            if not chunk:
+                                continue
+                            received += len(chunk)
+                            if received > limit:
+                                chunks = []
+                                truncated = True
+                                break
+                            chunks.append(chunk)
+                    except TypeError:
+                        chunks = []
+                    if chunks:
+                        text = b"".join(chunks).decode("utf-8", errors="replace")
+                if not text and not truncated:
+                    text = _history_clip_text(getattr(response, "text", "") or "", limit)
+        except Exception:
+            text = ""
+        try:
+            setattr(response, "_atvp_bounded_error_text", text)
+        except Exception:
+            pass
+        try:
+            response.close()
+        except Exception:
+            pass
+        return text
+
+    @classmethod
+    def _atvp_history_needs_auth(cls, response):
+        if response.status_code in (401, 403):
+            return True
+        if response.status_code != 500:
+            return False
+        text = cls._atvp_history_error_text(response)
+        return "WebAuthenticationDetails" in text or "cannot be cast to class java.lang.Integer" in text
+
+    def _atvp_history_login(self, force=False):
+        if self._history_auth_token and not force:
+            self._atvp_session.headers["Authorization"] = self._history_auth_token
+            return True
+        if force:
+            self._history_auth_token = ""
+            self._atvp_session.headers.pop("Authorization", None)
+        if not (self.history_username and self.history_password):
+            return False
+        origins = self._history_origin_candidates() or [self.atvp_api]
+        response = None
+        selected_origin = ""
+        last_error = None
+        for origin in origins:
+            try:
+                response = self._atvp_session.post(
+                    self._http_base(origin, "").rstrip("/") + "/api/accounts/login",
+                    json={"username": self.history_username, "password": self.history_password},
+                    timeout=self.timeout,
+                    verify=self.verify_tls,
+                    stream=True,
+                )
+                selected_origin = origin
+                break
+            except Exception as exc:
+                last_error = exc
+                if not self._history_retryable_transport_error(exc, "post"):
+                    raise
+        if response is None:
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError("AList-TVBox History 没有可用登录地址")
+        if response.status_code < 200 or response.status_code >= 300:
+            try:
+                response.close()
+            except Exception:
+                pass
+            raise RuntimeError("AList-TVBox History 用户登录 HTTP %s" % response.status_code)
+        value = self._read_bounded_json_response(
+            response,
+            "AList-TVBox History 用户登录",
+            max_bytes=self.HISTORY_CONFIG_MAX_BYTES,
+        )
+        authorities = value.get("authorities") if isinstance(value, dict) else []
+        roles = set()
+        for authority in authorities or []:
+            if isinstance(authority, dict):
+                roles.add(str(authority.get("authority") or "").strip().upper())
+            else:
+                roles.add(str(authority or "").strip().upper())
+        if not roles.intersection(("USER", "ADMIN")):
+            raise RuntimeError("History 写入账号必须是 AList-TVBox USER 或 ADMIN 角色")
+        token = str(value.get("token") or "").strip() if isinstance(value, dict) else ""
+        if not token:
+            raise RuntimeError("AList-TVBox History 用户登录未返回令牌")
+        self._history_auth_token = token
+        self._history_selected_origin = selected_origin
+        self._atvp_session.headers["Authorization"] = token
+        return True
+
+    @classmethod
+    def _atvp_history_http_error(cls, response, operation):
+        text = cls._atvp_history_error_text(response)
+        if response.status_code == 500 and (
+            "WebAuthenticationDetails" in text
+            or "cannot be cast to class java.lang.Integer" in text
+        ):
+            return (
+                "AList-TVBox History匿名接口存在用户编号转换缺陷；"
+                "请升级到包含History订阅身份修复的服务端版本后重试"
+            )
+        return "AList-TVBox 历史%s HTTP %s" % (operation, response.status_code)
+
+    def _native_history_export(self):
+        native_error = ""
+        try:
+            native = self._native_history_export_java()
+            if native:
+                config_text = str(native.get("config") or "")
+                if self._utf8_size(config_text) > self.HISTORY_CONFIG_MAX_BYTES:
+                    raise RuntimeError("FongMi 当前影视订阅配置过大")
+                return {
+                    "config": config_text,
+                    "rows": self._normalize_history_rows(native.get("rows") or []),
+                }
+        except Exception as exc:
+            native_error = self._short_error(exc)
+            self._atvp_discovery_error = native_error
+        nonce = "%x%x" % (int(time.time() * 1000), threading.get_ident())
+        pending = {"captured": {}, "event": threading.Event()}
+        with self._native_export_lock:
+            self._native_exports[nonce] = pending
+        try:
+            device = {"ip": self._native_history_callback_url(nonce)}
+            self._post_local_action({
+                "do": "sync",
+                "mode": "2",
+                "type": "history",
+                "device": json.dumps(device, ensure_ascii=False),
+                "config": json.dumps({"type": 0}, separators=(",", ":")),
+            })
+            pending["event"].wait(min(12, max(4, self.timeout)))
+        finally:
+            with self._native_export_lock:
+                self._native_exports.pop(nonce, None)
+        if not pending["event"].is_set():
+            if native_error:
+                raise RuntimeError("FongMi 原生History读取失败：%s；本机HTTP导出超时" % native_error)
+            raise RuntimeError("FongMi 本机 History 导出超时")
+        captured = pending["captured"]
+        if captured.get("error"):
+            raise RuntimeError(str(captured.get("error")))
+        try:
+            rows = json.loads(captured.get("targets") or "[]")
+        except Exception:
+            raise RuntimeError("FongMi 本机 History 格式无效")
+        if not isinstance(rows, list):
+            raise RuntimeError("FongMi 本机 History 格式无效")
+        return {
+            "config": captured.get("config") or "",
+            "rows": self._normalize_history_rows(rows),
+        }
+
+    def _native_history_export_java(self, limit=None):
+        """Read FongMi's active VOD config and History through Chaquopy when available."""
+        try:
+            from java import jclass
+        except Exception:
+            return None
+        config_cls = jclass("com.fongmi.android.tv.bean.Config")
+        history_cls = jclass("com.fongmi.android.tv.bean.History")
+        config = config_cls.vod()
+        config_url = str(config.getUrl() or "").strip() if config is not None else ""
+        if not config_url:
+            raise RuntimeError("FongMi 当前没有活动的影视订阅")
+        # The no-argument method resolves VodConfig.getCid() inside FongMi.
+        # Config.vod().id can briefly lag behind the active runtime config.
+        rows = history_cls.get()
+        values = []
+        row_limit = max(0, self._int_value(limit, 0))
+        row_limit = min(row_limit or self.HISTORY_ROW_LIMIT, self.HISTORY_ROW_LIMIT)
+        if hasattr(rows, "size") and hasattr(rows, "get"):
+            count = int(rows.size())
+            count = min(count, row_limit)
+            source_rows = (rows.get(index) for index in range(count))
+        else:
+            source_rows = rows
+        for index, row in enumerate(source_rows):
+            if index >= row_limit:
+                break
+            if isinstance(row, dict):
+                value = row
+            else:
+                raw = str(row.toString() or "{}")
+                if self._utf8_size(raw) > self.HISTORY_ROW_MAX_BYTES:
+                    continue
+                value = json.loads(raw)
+            if isinstance(value, dict):
+                values.append(value)
+        config_text = str(config.toString() or "")
+        if self._utf8_size(config_text) > self.HISTORY_CONFIG_MAX_BYTES:
+            raise RuntimeError("FongMi 当前影视订阅配置过大")
+        return {
+            "config": config_text,
+            "rows": self._normalize_history_rows(values),
+        }
+
+    @staticmethod
+    def _native_history_delete_java(keys):
+        try:
+            from java import jclass
+        except Exception:
+            return None
+        history_cls = jclass("com.fongmi.android.tv.bean.History")
+        deleted = 0
+        for key in dict.fromkeys(str(value or "").strip() for value in keys or []):
+            if not key:
+                continue
+            row = history_cls.find(key)
+            if row is None:
+                continue
+            row.delete()
+            if history_cls.find(key) is None:
+                deleted += 1
+        return deleted
+
+    def _native_history_callback_url(self, nonce):
+        origin = self._fongmi_local_origin()
+        return "%s/proxy?do=py&follow_sync_callback=%s&suffix=" % (
+            origin,
+            quote(str(nonce or ""), safe=""),
+        )
+
+    def _capture_native_history(self):
+        exported = self._native_history_export()
+        if not self.atvp_api and exported.get("config"):
+            self._apply_native_subscription_config(exported.get("config"))
+        return self._normalize_history_rows(exported.get("rows") or [])
+
+    def _import_native_history(self, cloud_rows):
+        rows = []
+        for row in self._normalize_history_rows(cloud_rows):
+            normalized = self._history_for_local(row)
+            if normalized:
+                # FongMi's History model declares revSort/revPlay as booleans;
+                # cloud History may contain the legacy numeric 0/1 encoding.
+                for key in ("revSort", "revPlay"):
+                    if key in normalized:
+                        normalized[key] = bool(self._history_int(normalized.get(key), 0))
+                rows.append(normalized)
+        if not rows:
+            return 0
+        native_error = ""
+        try:
+            imported = self._native_history_import_java(rows)
+            if imported is not None:
+                return imported
+        except Exception as exc:
+            native_error = self._short_error(exc)
+        try:
+            self._post_local_action({
+                "do": "sync",
+                "mode": "1",
+                "type": "history",
+                "force": "false",
+                "config": self._subscription_config(),
+                "targets": json.dumps(rows, ensure_ascii=False, separators=(",", ":")),
+            })
+        except Exception as exc:
+            if native_error:
+                raise RuntimeError("原生History导入失败：%s；本机HTTP回退失败：%s" % (native_error, self._short_error(exc)))
+            raise
+        return len(rows)
+
+    def _history_import_rows(self, rows, local_rows):
+        candidates = self._normalize_history_rows(rows)
+        local = self._normalize_history_rows(local_rows)
+        by_title = {}
+        for row in local:
+            title = self._normalize_media_title(row.get("vodName"))
+            if not title:
+                continue
+            previous = by_title.get(title)
+            if previous is None or self._history_semantic_rank(row) > self._history_semantic_rank(previous):
+                by_title[title] = row
+        output = []
+        for row in candidates:
+            title = self._normalize_media_title(row.get("vodName"))
+            current = by_title.get(title) if title else None
+            if current is None or self._history_should_import(row, current):
+                output.append(row)
+        return output
+
+    def _history_semantic_rank(self, row):
+        text = " ".join(
+            str(row.get(key) or "")
+            for key in ("vodFlag", "vodRemarks", "episodeUrl", "vodName")
+        )
+        season, episode, explicit = self._episode_from_text_info(text, 1, 1)
+        episode_rank = season * 10000 + episode if explicit and season and episode else 0
+        position = self._history_int(row.get("position"), 0)
+        duration = self._history_int(row.get("duration"), 0)
+        completed = 1 if self._history_is_complete(row) else 0
+        return episode_rank, completed, position, duration, self._history_int(row.get("createTime"), 0)
+
+    def _history_should_import(self, candidate, local):
+        cloud_rank = self._history_semantic_rank(candidate)
+        local_rank = self._history_semantic_rank(local)
+        if cloud_rank[0] > local_rank[0]:
+            return True
+        if cloud_rank[0] < local_rank[0]:
+            return False
+        if cloud_rank[0] > 0:
+            if cloud_rank[1] > local_rank[1]:
+                return True
+            if cloud_rank[1] < local_rank[1]:
+                return False
+            if cloud_rank[2] > local_rank[2] + 30 * 1000:
+                return True
+            return False
+        if cloud_rank[2] > local_rank[2] + 30 * 1000:
+            return True
+        cloud_time = self._history_int(candidate.get("createTime"), 0)
+        local_time = self._history_int(local.get("createTime"), 0)
+        now_ms = int(time.time() * 1000)
+        if cloud_time > now_ms + HISTORY_CLOCK_SKEW_MS:
+            return False
+        return cloud_time > local_time
+
+    @staticmethod
+    def _native_history_import_java(rows):
+        """Import History through FongMi's Java model without using the loopback server."""
+        try:
+            from java import jclass
+        except Exception:
+            return None
+        history_cls = jclass("com.fongmi.android.tv.bean.History")
+        payload = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+        history_cls.sync(history_cls.arrayFrom(payload))
+        imported = 0
+        for row in rows:
+            key = str(row.get("key") or "")
+            if key and history_cls.find(key) is not None:
+                imported += 1
+        return imported
+
+    @staticmethod
+    def _native_keep_export_java(limit=None):
+        """Read FongMi VOD favorites without relying on obfuscated config classes."""
+        try:
+            from java import jclass
+        except Exception:
+            return None
+        keep_cls = jclass("com.fongmi.android.tv.bean.Keep")
+        rows = keep_cls.getVod()
+        try:
+            row_limit = max(0, int(limit or 0))
+        except Exception:
+            row_limit = 0
+        if hasattr(rows, "size") and hasattr(rows, "get"):
+            count = int(rows.size())
+            if row_limit:
+                count = min(count, row_limit)
+            source_rows = (rows.get(index) for index in range(count))
+        else:
+            source_rows = rows
+        values = []
+        for index, row in enumerate(source_rows):
+            if row_limit and index >= row_limit:
+                break
+            key = row.getKey()
+            title = row.getVodName()
+            if key is None or title is None:
+                continue
+            values.append({
+                "key": str(key),
+                "title": str(title),
+                "pic": "" if row.getVodPic() is None else str(row.getVodPic()),
+                "site_name": "" if row.getSiteName() is None else str(row.getSiteName()),
+                "create_time": int(row.getCreateTime()),
+                "cid": int(row.getCid()),
+                "type": int(row.getType()),
+            })
+        return values
+
+    def _sync_native_keeps_to_follow(self):
+        return json.dumps({
+            "msg": "本地收藏自动追更已停用，请在追更确认中逐项确认",
+        }, ensure_ascii=False)
+
+    def _resolve_keep_follow_item(self, keep):
+        match, reason = self._match_keep_to_tmdb(keep)
+        if not match:
+            return None, reason
+        tmdb_id = self._positive_int(match.get("id"), 0)
+        detail = self._tmdb_api("/tv/%s" % tmdb_id, {}, self.detail_cache_ttl, allow_stale=False)
+        item = self._follow_item_from_tmdb(detail, {
+            "tmdb_id": tmdb_id,
+            "title": str(detail.get("name") or match.get("name") or keep.get("title") or ""),
+            "seen_episode": "",
+            "tracked_episode": "",
+            "seen_source": "",
+        })
+        item.update({"pending_metadata": False, "follow_source": "fongmi_keep"})
+        try:
+            item = self._attach_douban_to_tmdb_item(item, detail)
+        except Exception:
+            pass
+        return item, ""
+
+    def _match_keep_to_tmdb(self, keep):
+        title, year, explicit_series = self._keep_search_profile(keep.get("title"))
+        normalized = self._normalize_media_title(title)
+        if not normalized:
+            return None, "empty_title"
+        params = {"query": title, "page": 1, "include_adult": "false"}
+        tv_rows = self._tmdb_api("/search/tv", params, self.detail_cache_ttl).get("results") or []
+        movie_rows = self._tmdb_api("/search/movie", params, self.detail_cache_ttl).get("results") or []
+        tv_ranked = self._rank_keep_candidates(tv_rows, normalized, year, True, explicit_series)
+        movie_ranked = self._rank_keep_candidates(movie_rows, normalized, year, False, False)
+        if not tv_ranked or tv_ranked[0][0] < 90:
+            return None, "no_confident_tv"
+        if len(tv_ranked) > 1 and tv_ranked[0][0] == tv_ranked[1][0]:
+            return None, "ambiguous_tv"
+        movie_score = movie_ranked[0][0] if movie_ranked else 0
+        if movie_score >= tv_ranked[0][0] and not explicit_series:
+            return None, "movie_conflict"
+        return tv_ranked[0][2], ""
+
+    def _rank_keep_candidates(self, rows, normalized, year, television, explicit_series):
+        ranked = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            names = (
+                (row.get("name"), row.get("original_name"))
+                if television else (row.get("title"), row.get("original_title"))
+            )
+            aliases = {self._normalize_media_title(value) for value in names} - {""}
+            if normalized in aliases:
+                score = 100
+            elif any(min(len(normalized), len(alias)) >= 4 and (normalized in alias or alias in normalized) for alias in aliases):
+                score = 55
+            else:
+                score = 0
+            date_key = "first_air_date" if television else "release_date"
+            candidate_year = self._positive_int(str(row.get(date_key) or "")[:4], 0)
+            if score and year and candidate_year:
+                difference = abs(year - candidate_year)
+                score += 25 if difference == 0 else (10 if difference == 1 else -30)
+            if score and television and explicit_series:
+                score += 30
+            ranked.append((score, float(row.get("popularity") or 0), row))
+        ranked.sort(key=lambda value: (value[0], value[1]), reverse=True)
+        return ranked
+
+    @staticmethod
+    def _keep_search_profile(value):
+        raw = unicodedata.normalize("NFKC", str(value or "")).strip()
+        year_match = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", raw)
+        year = int(year_match.group(1)) if year_match else 0
+        explicit_series = bool(re.search(
+            r"(?i)(?:\bS\s*0*\d{1,2}(?:\s*E\s*0*\d{1,3})?\b|第\s*[一二三四五六七八九十百零〇两\d]+\s*[季部集话期]|全\s*\d+\s*集|电视剧|连续剧|剧集|番剧)",
+            raw,
+        ))
+        text = re.sub(r"(?i)\.(?:mkv|mp4|avi|mov|wmv|flv|ts|m2ts|webm)\b.*$", " ", raw)
+        text = re.sub(r"[\(（\[【]\s*(?:19|20)\d{2}\s*[\)）\]】]", " ", text)
+        text = re.split(
+            r"(?i)\s*(?:[-_·|]+\s*)?(?:\bS\s*0*\d{1,2}(?:\s*E\s*0*\d{1,3})?\b|第\s*[一二三四五六七八九十百零〇两\d]+\s*[季部集话期])",
+            text,
+            maxsplit=1,
+        )[0]
+        text = re.sub(r"(?i)\b(?:2160p|1080p|720p|4k|web[- .]?dl|bluray|x26[45]|h26[45]|aac)\b.*$", " ", text)
+        text = text.strip(" -_·|[]【】()（）")
+        return (text or raw), year, explicit_series
+
+    def _post_local_action(self, data):
+        origin = self._fongmi_local_origin()
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            response = session.post(origin + "/action", data=data, timeout=min(15, max(5, self.timeout)))
+        finally:
+            session.close()
+        if response.status_code < 200 or response.status_code >= 300:
+            raise RuntimeError("FongMi 本机同步 HTTP %s" % response.status_code)
+
+    def _fongmi_local_origin(self):
+        getter = getattr(self, "getProxyUrl", None)
+        if not callable(getter):
+            raise RuntimeError("当前运行时未提供 FongMi 本机端口")
+        parsed = urlparse(str(getter(True) or ""))
+        if parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "localhost") or not parsed.port:
+            raise RuntimeError("FongMi 本机端口地址无效")
+        return "http://127.0.0.1:%s" % parsed.port
+
+    def _subscription_config(self):
+        url = "%s/sub/%s/0" % (self.atvp_api.rstrip("/"), quote(self.atvp_token, safe=""))
+        return json.dumps({"id": 1, "type": 0, "url": url}, ensure_ascii=False, separators=(",", ":"))
+
+    def _merge_native_history(self, local_rows, cloud_rows):
+        local_rows = self._normalize_history_rows(local_rows)
+        cloud_rows = self._normalize_history_rows(cloud_rows)
+        cloud_uid = next((self._history_int(row.get("uid"), 1) for row in cloud_rows if self._history_int(row.get("uid"), 0) > 0), 1)
+        merged = {}
+        for row in cloud_rows:
+            normalized = self._history_for_cloud(row, cloud_uid)
+            if normalized:
+                identity = self._history_identity(normalized)
+                previous = merged.get(identity)
+                if previous is None or self._history_merge_rank(normalized) > self._history_merge_rank(previous):
+                    merged[identity] = normalized
+        uploads = []
+        for row in local_rows:
+            normalized = self._history_for_cloud(row, cloud_uid)
+            if not normalized:
+                continue
+            identity = self._history_identity(normalized)
+            previous = merged.get(identity)
+            if previous is None or self._history_merge_rank(normalized) > self._history_merge_rank(previous):
+                merged[identity] = normalized
+                uploads.append(normalized)
+        result = sorted(merged.values(), key=lambda row: self._history_rank(row), reverse=True)
+        return result, uploads
+
+    def _history_for_cloud(self, row, uid):
+        identity = self._history_identity(row)
+        if not identity:
+            return None
+        output = {key: row.get(key) for key in self.HISTORY_FIELDS if key in row and key != "key"}
+        output["key"] = identity[1] if identity[0] == "csp_AList" else "@@@".join(identity)
+        output["uid"] = uid
+        output["cid"] = 0
+        return output
+
+    def _history_for_local(self, row):
+        identity = self._history_identity(row)
+        if not identity:
+            return None
+        output = {key: row.get(key) for key in self.HISTORY_FIELDS if key in row and key not in ("key", "uid")}
+        output["key"] = "%s@@@%s@@@1" % identity
+        output["cid"] = 1
+        return output
+
+    def _history_identity(self, row):
+        key = str(row.get("key") or "").strip() if isinstance(row, dict) else ""
+        if not key:
+            return None
+        parts = key.split("@@@")
+        if len(parts) >= 2 and parts[0] and parts[1]:
+            return parts[0], parts[1]
+        return "csp_AList", key
+
+    def _sync_site_keys(self):
+        keys = set(self.SYNC_SITE_KEYS)
+        runtime_key = str(getattr(self, "siteKey", "") or "").strip()
+        if runtime_key:
+            keys.add(runtime_key)
+        return keys
+
+    @staticmethod
+    def _history_int(value, default=0):
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    @staticmethod
+    def _history_rank(row):
+        return (
+            Spider._history_int(row.get("createTime")),
+            Spider._history_int(row.get("position")),
+            Spider._history_int(row.get("duration")),
+        )
+
+    def _history_merge_rank(self, row):
+        if self._history_has_followplay_reference(row):
+            return (1,) + self._history_semantic_rank(row)
+        return (0,) + self._history_rank(row)
+
+    def _atvp_probe_history(self):
+        stage = "配置桥"
+        if not self._ensure_atvp_connection(force=True):
+            detail = ("：%s" % self._atvp_discovery_error) if self._atvp_discovery_error else ""
+            return json.dumps({
+                "ok": False,
+                "msg": "本插件仅支持通过 AList-TVBox 生成的 raw 插件订阅%s" % detail,
+            }, ensure_ascii=False)
+        try:
+            stage = "本机History读取"
+            try:
+                local_rows = self._capture_native_history()
+                local_status = "本机History %s 条" % len(local_rows)
+            except Exception as exc:
+                local_rows = []
+                local_status = "本机History桥异常(%s)" % self._short_error(exc)
+            stage = "云端History读取"
+            histories = self._history_coordinator.fetch()
+            self._cache_set("atvp-history-snapshot", histories)
+            return json.dumps({
+                "ok": True,
+                "msg": "AList-TVBox 通讯正常：配置桥正常，地址和令牌已识别，%s，云端GET %s 条" % (
+                    local_status, len(histories),
+                )
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return json.dumps({
+                "ok": False,
+                "msg": "AList-TVBox 通讯失败[%s]：%s" % (stage, self._short_error(exc)),
+            }, ensure_ascii=False)
+
+    def _atvp_endpoint(self, resource):
+        if not self._alist_tvbox_plugin:
+            return ""
+        return "%s/%s/%s" % (
+            self.atvp_api.rstrip("/"),
+            str(resource or "").strip("/"),
+            quote(self.atvp_token, safe=""),
+        )
+
+    def _history_followplay_payload(self, history):
+        if not isinstance(history, dict):
+            return None
+        match = re.search(r"(?:followplay_|followplay://)[A-Za-z0-9_-]+", str(history.get("episodeUrl") or ""))
+        return self._parse_followplay(match.group(0)) if match else None
+
+    @staticmethod
+    def _history_has_followplay_reference(history):
+        if not isinstance(history, dict):
+            return False
+        return bool(re.search(
+            r"(?:^|[$#])(?:followplay_|followplay://)",
+            str(history.get("episodeUrl") or ""),
+        ))
+
+    def _atvp_history_for_item(self, item, histories):
+        if not isinstance(item, dict) or not isinstance(histories, list):
+            return None
+        tmdb_id = str(self._positive_int(item.get("tmdb_id"), 0))
+        source_id = str(item.get("source_id") or item.get("douban_id") or "").strip()
+        exact = []
+        for history in histories:
+            payload = self._history_followplay_payload(history)
+            if not payload:
+                continue
+            payload_tmdb = str(self._positive_int(payload.get("tmdbId"), 0))
+            payload_source = str(payload.get("sourceId") or "").strip()
+            if (tmdb_id and payload_tmdb == tmdb_id) or (source_id and payload_source == source_id):
+                exact.append(history)
+        if exact:
+            return max(exact, key=self._history_semantic_rank)
+
+        bound_id = str(self.follow_alist_bindings.get(tmdb_id) or item.get("alist_vod_id") or "").strip()
+        if bound_id:
+            matched = [
+                history for history in histories
+                if self._history_identity(history) and self._history_identity(history)[1] == bound_id
+            ]
+            return max(matched, key=self._history_semantic_rank) if matched else None
+
+        aliases = {
+            Filter._normalize_title(value)
+            for value in self._follow_title_alias_values(item)
+        } - {""}
+        if not aliases:
+            return None
+        target_season = self._tracking_season(item)
+        ranked = []
+        for history in histories:
+            history_title = Filter._normalize_title(history.get("vodName"))
+            title_score = max([Filter._title_score(history_title, alias) for alias in aliases] or [0])
+            if title_score <= 0:
+                continue
+            history_season = Filter._season(" ".join(
+                str(history.get(key) or "") for key in ("vodName", "vodFlag", "vodRemarks")
+            ))
+            season_score = 20 if history_season and history_season == target_season else 0
+            ranked.append((title_score + season_score, history))
+        if not ranked:
+            return None
+        best_score = max(score for score, _history in ranked)
+        best = [history for score, history in ranked if score == best_score]
+        return best[0] if len(best) == 1 else None
+
+    def _history_resume_fields(self, item, history):
+        episode = self._history_episode_key(item, history)
+        if not episode:
+            return {}
+        payload = self._history_followplay_payload(history) or {}
+        payload_resource_id = str(payload.get("resourceId") or "").strip()
+        payload_resource_mode = str(payload.get("resourceMode") or "vod").strip().lower() or "vod"
+        if not self._resource_id_persistable(payload_resource_id, payload_resource_mode):
+            payload_resource_id = ""
+        resource_id = payload_resource_id or str(item.get("alist_vod_id") or "").strip()
+        fields = {
+            "history_episode": episode,
+            "history_position": self._bounded_int(history.get("position"), 0, 0, 2147483647000),
+            "history_duration": self._bounded_int(history.get("duration"), 0, 0, 2147483647000),
+            "history_vod_name": str(history.get("vodName") or ""),
+            "history_updated_at": int(time.time()),
+        }
+        if resource_id:
+            fields["alist_vod_id"] = resource_id
+        if payload_resource_id:
+            resource_mode = payload_resource_mode
+            fields["alist_resource_mode"] = resource_mode
+            fields["alist_resource_provider"] = self._resource_provider_key(
+                payload.get("resourceProvider"), payload_resource_id,
+            )
+        return fields
+
+    def _reconcile_follow_histories(self, histories, changed_items=None):
+        if not isinstance(histories, list) or not histories:
+            return 0
+        with self._follow_enrich_lock:
+            items = dict(self._follow_memory.get("items") or {})
+            changed = 0
+            now = int(time.time())
+            for key, value in list(items.items()):
+                if not isinstance(value, dict):
+                    continue
+                history = self._atvp_history_for_item(value, histories)
+                resume_fields = self._history_resume_fields(value, history)
+                if not resume_fields:
+                    continue
+                episode = resume_fields["history_episode"]
+                current_episode = str(value.get("history_episode") or "")
+                candidate_rank = self._episode_rank(episode)
+                current_rank = self._episode_rank(current_episode)
+                if candidate_rank < current_rank:
+                    continue
+                if candidate_rank == current_rank and current_rank > 0:
+                    candidate_position = self._positive_int(resume_fields.get("history_position"), 0)
+                    current_position = self._positive_int(value.get("history_position"), 0)
+                    if candidate_position < current_position:
+                        continue
+                resource_id = str(resume_fields.get("alist_vod_id") or "")
+                item = dict(value)
+                previous_resource_id = str(item.get("alist_vod_id") or "")
+                history_changed = (
+                    str(item.get("history_episode") or "") != episode
+                    or self._positive_int(item.get("history_position"), 0) != resume_fields["history_position"]
+                    or self._positive_int(item.get("history_duration"), 0) != resume_fields["history_duration"]
+                    or str(item.get("history_vod_name") or "") != resume_fields["history_vod_name"]
+                    or (resource_id and str(item.get("alist_vod_id") or "") != resource_id)
+                    or (
+                        "alist_resource_mode" in resume_fields
+                        and str(item.get("alist_resource_mode") or "vod").strip().lower()
+                        != resume_fields["alist_resource_mode"]
+                    )
+                    or (
+                        "alist_resource_provider" in resume_fields
+                        and self._resource_provider_key(item.get("alist_resource_provider"))
+                        != resume_fields["alist_resource_provider"]
+                    )
+                )
+                if history_changed:
+                    resume_fields["history_updated_at"] = now
+                    item.update(resume_fields)
+                    if (
+                            "alist_resource_provider" in resume_fields
+                            and not resume_fields["alist_resource_provider"]):
+                        item.pop("alist_resource_provider", None)
+                    if resource_id and resource_id != previous_resource_id:
+                        route = item.get("last_play_route") if isinstance(item.get("last_play_route"), dict) else {}
+                        if str(route.get("resourceId") or "").strip() != resource_id:
+                            item.pop("last_play_route", None)
+                seen_changed = False
+                if self._history_is_complete(history):
+                    seen = str(item.get("seen_episode") or "")
+                    if self._episode_rank(episode) > self._episode_rank(seen):
+                        item["seen_episode"] = episode
+                        item["seen_source"] = "history"
+                        seen_changed = True
+                if history_changed or seen_changed:
+                    items[key] = item
+                    if isinstance(changed_items, list):
+                        changed_items.append(dict(item))
+                    changed += 1
+            if changed:
+                self._save_follow_state(items)
+            return changed
+
+    def _append_atvp_progress(self, remark, history):
+        progress = self._atvp_progress_text(history)
+        return str(remark or "") + ((" · " + progress) if progress else "")
+
+    def _append_follow_progress(self, remark, item, history):
+        episode = self._history_episode_key(item, history) if history else ""
+        if not episode and isinstance(item, dict):
+            episode = str(item.get("history_episode") or "")
+        if not episode:
+            base = self._append_atvp_progress(remark, history)
+        else:
+            progress = history if isinstance(history, dict) else item
+            position_key = "position" if isinstance(history, dict) else "history_position"
+            duration_key = "duration" if isinstance(history, dict) else "history_duration"
+            position = self._bounded_int(progress.get(position_key), 0, 0, 2147483647000)
+            duration = self._bounded_int(progress.get(duration_key), 0, 0, 2147483647000)
+            time_text = self._format_millis(position)
+            if time_text and duration > 0:
+                time_text += "/" + self._format_millis(duration)
+            completed = self._history_is_complete({"position": position, "duration": duration})
+            progress_parts = ["已观看 " + episode if completed else "观看到 " + episode]
+            if completed:
+                progress_parts.append("播放完成")
+            elif time_text:
+                progress_parts.append("播放进度 " + time_text)
+            base = str(remark or "") + " · " + " · ".join(progress_parts)
+
+        details = []
+        latest = str(item.get("latest_episode") or "") if isinstance(item, dict) else ""
+        if latest and latest not in str(remark or ""):
+            details.append("更新至 " + latest)
+        next_date = str(item.get("next_air_date") or "") if isinstance(item, dict) else ""
+        if next_date and next_date not in str(remark or ""):
+            details.append("下一级更新时间 " + next_date)
+        if details:
+            base += " · " + " · ".join(details)
+        return base
+
+    def _atvp_progress_text(self, history):
+        if not isinstance(history, dict):
+            return ""
+        label = str(history.get("vodRemarks") or "").strip()
+        if len(label) > 24:
+            label = label[:24]
+        episode = self._bounded_int(history.get("episode"), -1, -1, 100000)
+        if not label and episode >= 0:
+            label = "第%s项" % (episode + 1)
+        position = self._bounded_int(history.get("position"), 0, 0, 2147483647000)
+        duration = self._bounded_int(history.get("duration"), 0, 0, 2147483647000)
+        time_text = self._format_millis(position)
+        if time_text and duration > 0:
+            time_text += "/" + self._format_millis(duration)
+        parts = [value for value in (label, time_text) if value]
+        return ("AList进度 " + " ".join(parts)) if parts else ""
+
+    def _history_effective_seen(self, item, history):
+        explicit = str(item.get("seen_episode") or "") if isinstance(item, dict) else ""
+        played = self._history_episode_key(item, history)
+        if played and self._history_is_complete(history) and self._episode_rank(played) > self._episode_rank(explicit):
+            return played
+        return explicit
+
+    def _follow_update_baseline(self, item, history=None):
+        seen = self._history_effective_seen(item, history)
+        tracked = str(item.get("tracked_episode") or "") if isinstance(item, dict) else ""
+        return seen if self._episode_rank(seen) >= self._episode_rank(tracked) else tracked
+
+    def _history_episode_key(self, item, history):
+        if not isinstance(item, dict) or not isinstance(history, dict):
+            return ""
+        payload = self._history_followplay_payload(history)
+        if payload:
+            season = self._positive_int(payload.get("season"), 0)
+            episode = self._positive_int(payload.get("episode"), 0)
+            if season and episode:
+                return "S%02dE%02d" % (season, episode)
+        text = " ".join(str(history.get(key) or "") for key in ("vodFlag", "vodRemarks", "episodeUrl", "vodName"))
+        season, episode, _explicit = Filter._episode(text)
+        if season and episode:
+            return "S%02dE%02d" % (season, episode)
+        match = re.search(r"(?i)S0*(\d{1,2})\s*E(?:P)?0*(\d{1,3})", text)
+        if match:
+            return "S%02dE%02d" % (int(match.group(1)), int(match.group(2)))
+        match = re.search(r"第\s*(\d{1,2})\s*季.*?第\s*(\d{1,3})\s*[集话]", text)
+        if match:
+            return "S%02dE%02d" % (int(match.group(1)), int(match.group(2)))
+
+        season_match = re.search(r"(?i)(?:S0*|第\s*)(\d{1,2})(?:\s*季)?", str(history.get("vodFlag") or ""))
+        episode_match = re.search(r"(?i)(?:\bEP?\s*0*|第\s*)(\d{1,3})(?:\s*[集话])?", str(history.get("vodRemarks") or ""))
+        if not episode_match:
+            return ""
+        season = int(season_match.group(1)) if season_match else 0
+        latest_match = re.match(r"^S(\d{2})E\d{2,3}$", str(item.get("latest_episode") or ""))
+        latest_season = int(latest_match.group(1)) if latest_match else 0
+        if not season and latest_season == 1:
+            season = 1
+        return ("S%02dE%02d" % (season, int(episode_match.group(1)))) if season else ""
+
+    @staticmethod
+    def _history_is_complete(history):
+        if not isinstance(history, dict):
+            return False
+        try:
+            position = max(0, int(history.get("position") or 0))
+            duration = max(0, int(history.get("duration") or 0))
+        except Exception:
+            return False
+        return duration > 0 and position > 0 and (float(position) / duration >= 0.9 or duration - position <= 180000)
+
+    @staticmethod
+    def _history_can_resume(history):
+        if not isinstance(history, dict):
+            return False
+        try:
+            position = int(history.get("position") or 0)
+            duration = int(history.get("duration") or 0)
+        except Exception:
+            return False
+        return 0 < position < duration
+
+    @staticmethod
+    def _normalize_media_title(value):
+        text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+        return re.sub(r"[\W_]+", "", text, flags=re.UNICODE)
+
+    @staticmethod
+    def _format_millis(value):
+        try:
+            seconds = max(0, int(value) // 1000)
+        except Exception:
+            return ""
+        if seconds <= 0:
+            return ""
+        hours, remainder = divmod(seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours:
+            return "%d:%02d:%02d" % (hours, minutes, seconds)
+        return "%d:%02d" % (minutes, seconds)
+
+    def _has_follow_update(self, item, history=None):
+        return self._episode_rank(item.get("latest_episode")) > self._episode_rank(self._follow_update_baseline(item, history))
+

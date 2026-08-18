@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "contract": "v80_development",
+  "id": "douban_tmdb_follow_single",
+  "version": 70,
+  "output": "build/v80-dev/豆瓣TMDB追更单入口.py",
+  "writable": true,
+  "index_contract": "none",
+  "encoding": "utf-8",
+  "expected_size": 862377,
+  "expected_sha256": "C1ACAB802121E3F69ADEA0EBF1AB271C14015124AA28D2D1F8F58F97C8481B7D",
+  "chunks": [
+    "parts/00_module_prelude.pyinc",
+    "parts/01_runtime_components.pyinc",
+    "parts/02_filter.pyinc",
+    "parts/03_spider_runtime.pyinc",
+    "parts/04_follow_workflows.pyinc",
+    "parts/05_history_sync.pyinc",
+    "parts/06_resource_discovery.pyinc",
+    "parts/07_resource_ranking.pyinc",
+    "parts/08_playback_transport.pyinc",
+    "parts/09_metadata_and_utilities.pyinc"
+  ]
+}

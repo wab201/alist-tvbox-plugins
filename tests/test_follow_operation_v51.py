@@ -2986,7 +2986,7 @@ class FollowOperationV51Test(unittest.TestCase):
         captured = {}
         self.spider._resolved_media_target = Mock(return_value=(
             MODULE.urlparse("https://cdn.example/video.mp4?sig=ok"),
-            ("203.0.113.10",),
+            ("8.8.8.8",),
         ))
 
         def request(_parsed, _address, headers, _deadline):
@@ -3021,11 +3021,11 @@ class FollowOperationV51Test(unittest.TestCase):
         resolved = {
             "https://cdn.example/video.mp4": (
                 MODULE.urlparse("https://cdn.example/video.mp4"),
-                ("203.0.113.10",),
+                ("8.8.8.8",),
             ),
             "https://other.example/video.mp4": (
                 MODULE.urlparse("https://other.example/video.mp4"),
-                ("203.0.113.11",),
+                ("1.1.1.1",),
             ),
         }
         self.spider._resolved_media_target = Mock(side_effect=lambda value, deadline=None: resolved[value])
@@ -3088,10 +3088,10 @@ class FollowOperationV51Test(unittest.TestCase):
         self.spider._atvp_play = Mock(return_value=original)
         resolved = {
             "https://cdn.example/video.mp4": (
-                MODULE.urlparse("https://cdn.example/video.mp4"), ("203.0.113.10",),
+                MODULE.urlparse("https://cdn.example/video.mp4"), ("8.8.8.8",),
             ),
             "https://other.example/video.mp4": (
-                MODULE.urlparse("https://other.example/video.mp4"), ("203.0.113.11",),
+                MODULE.urlparse("https://other.example/video.mp4"), ("1.1.1.1",),
             ),
         }
         self.spider._resolved_media_target = Mock(side_effect=lambda value, deadline=None: resolved[value])
