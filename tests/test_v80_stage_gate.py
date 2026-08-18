@@ -135,6 +135,8 @@ EXPECTED_P3_MANAGED_FILES = {
     "tools/verify_alist_tvbox_1471_contract.py",
     "tools/verify_alist_tvbox_1480_contract.py",
     "tools/verify_alist_tvbox_1500_contract.py",
+    "tools/verify_alist_tvbox_1511_contract.py",
+    "work/v80-upstream-1511-github-evidence-20260818.json",
     "tests/test_v80_p3_history_event_queue.py",
     "tests/test_v80_p3_history_sync_v145.py",
     "tests/test_v80_p3_history_sync_overlay.py",
@@ -143,6 +145,7 @@ EXPECTED_P3_MANAGED_FILES = {
     "tests/test_alist_tvbox_1471_contract.py",
     "tests/test_alist_tvbox_1480_contract.py",
     "tests/test_alist_tvbox_1500_contract.py",
+    "tests/test_alist_tvbox_1511_contract.py",
     "src/douban_tmdb_follow_single/reliability_contract.py",
     "tools/build_v80_reliability_overlay.py",
     "tests/test_v80_p3_reliability_contract.py",
@@ -2603,6 +2606,13 @@ def test_command_builder_constructs_all_requested_commands(tmp_path):
     assert "upstream-1.25-raw" in by_name["atvp_compatibility"]
     assert "--fongmi-root" in by_name["dual_runtime"]
     assert "--atvp" in by_name["fongmi_category_contract"]
+    assert Path(by_name["upstream_contract"][1]).name == (
+        "verify_alist_tvbox_1511_contract.py"
+    )
+    evidence_index = by_name["upstream_contract"].index("--evidence")
+    assert by_name["upstream_contract"][evidence_index + 1] == str(
+        GATE.UPSTREAM_CONTRACT_EVIDENCE
+    )
 
 
 def _write_pytest_junit(command, tests=3, skipped=1, failures=0, errors=0):
@@ -2778,6 +2788,35 @@ def test_targeted_pytest_resume_records_legacy_explicit_closure(tmp_path):
     assert result["pytest_resume"]["failure_coverage"] == "legacy-explicit"
     assert result["pytest_resume"]["selected_nodeids"] == [nodeid]
     assert result["pytest_resume"]["unselected_source_evidence_reused"] is True
+
+
+def test_targeted_pytest_resume_accepts_explicit_changed_input_nodes(tmp_path):
+    nodeid = "tests/test_sample.py::test_changed_input"
+    resume_source = {
+        "sha256": "A" * 64,
+        "steps": {
+            "pytest": GATE._step(
+                "pytest", "passed",
+                pytest_selection={"failed_nodeids": []},
+            ),
+        },
+    }
+
+    def runner(command, **kwargs):
+        assert command[-1] == nodeid
+        _write_pytest_junit(command, tests=1, skipped=0)
+        _write_pytest_selection(kwargs["env"], collected=1, selected=1)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    result = GATE._run_pytest(
+        tmp_path, runner=runner, selected_nodeids=(nodeid,),
+        resume_source=resume_source,
+    )
+
+    assert result["status"] == "passed"
+    assert result["pytest_resume"]["failure_coverage"] == "changed-input-explicit"
+    assert result["pytest_resume"]["selection_basis"] == "changed_inputs"
+    assert result["pytest_resume"]["source_status"] == "passed"
 
 
 def test_targeted_pytest_resume_must_cover_recorded_source_failures(tmp_path):
@@ -4006,8 +4045,9 @@ def test_output_admission_input_scope_binds_private_release_artifacts():
     }
 
 
-def test_current_upstream_contract_is_1500_leaf_with_explicit_base_chain():
-    assert GATE.UPSTREAM_CONTRACT_SCRIPT.name == "verify_alist_tvbox_1500_contract.py"
+def test_current_upstream_contract_is_1511_leaf_with_explicit_base_chain():
+    assert GATE.UPSTREAM_CONTRACT_SCRIPT.name == "verify_alist_tvbox_1511_contract.py"
+    assert GATE.STEP_GATE_CONTRACTS["upstream_contract"] == "2"
 
     args = _args(upstream_root=Path("upstream"))
     scopes = GATE._step_input_scopes(
@@ -4024,7 +4064,15 @@ def test_current_upstream_contract_is_1500_leaf_with_explicit_base_chain():
         "tools/verify_alist_tvbox_1471_contract.py",
         "tools/verify_alist_tvbox_1480_contract.py",
         "tools/verify_alist_tvbox_1500_contract.py",
+        "tools/verify_alist_tvbox_1511_contract.py",
     }
+    evidence_scope = next(
+        scope for scope in scopes if scope.get("name") == "upstream_release_evidence"
+    )
+    assert evidence_scope["valid"] is True
+    assert evidence_scope["paths"] == [
+        "work/v80-upstream-1511-github-evidence-20260818.json"
+    ]
 
 
 def test_parser_accepts_resume_from():

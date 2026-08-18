@@ -97,7 +97,10 @@ PRIVATE_RELEASE_SOURCE = PRIVATE_RELEASE_ROOT / "staging" / "豆瓣TMDB追更单
 CONTROLLED_SWITCH_EVIDENCE = (
     REPO_ROOT / "work" / "v80-p2-controlled-output-switch-evidence-20260818.json"
 )
-UPSTREAM_CONTRACT_SCRIPT = REPO_ROOT / "tools" / "verify_alist_tvbox_1500_contract.py"
+UPSTREAM_CONTRACT_SCRIPT = REPO_ROOT / "tools" / "verify_alist_tvbox_1511_contract.py"
+UPSTREAM_CONTRACT_EVIDENCE = (
+    REPO_ROOT / "work" / "v80-upstream-1511-github-evidence-20260818.json"
+)
 MACRO_A_DIFFERENTIAL_SCRIPT = REPO_ROOT / "work" / "run_v80_p2_macro_a_differential.py"
 MACRO_B_DIFFERENTIAL_SCRIPT = REPO_ROOT / "work" / "run_v80_p2_macro_b_differential.py"
 CHAOS_RECOVERY_SCRIPT = REPO_ROOT / "tools" / "run_v80_p3_chaos_recovery.py"
@@ -401,6 +404,8 @@ P3_MANAGED_FILES = (
     "tools/verify_alist_tvbox_1471_contract.py",
     "tools/verify_alist_tvbox_1480_contract.py",
     "tools/verify_alist_tvbox_1500_contract.py",
+    "tools/verify_alist_tvbox_1511_contract.py",
+    "work/v80-upstream-1511-github-evidence-20260818.json",
     "tests/test_v80_p3_history_event_queue.py",
     "tests/test_v80_p3_history_sync_v145.py",
     "tests/test_v80_p3_history_sync_overlay.py",
@@ -409,6 +414,7 @@ P3_MANAGED_FILES = (
     "tests/test_alist_tvbox_1471_contract.py",
     "tests/test_alist_tvbox_1480_contract.py",
     "tests/test_alist_tvbox_1500_contract.py",
+    "tests/test_alist_tvbox_1511_contract.py",
     "src/douban_tmdb_follow_single/reliability_contract.py",
     "tools/build_v80_reliability_overlay.py",
     "tests/test_v80_p3_reliability_contract.py",
@@ -590,6 +596,7 @@ STEP_GATE_CONTRACTS = {
 STEP_GATE_CONTRACTS.update({
     "sensitive_data": "2",
     "chaos_recovery": "2",
+    "upstream_contract": "2",
     "output_admission_dry_run": "2",
 })
 # Kept as a compatibility surface for existing report/test consumers; no step is
@@ -3588,12 +3595,28 @@ def _run_pytest(
             resume_source["steps"].get("pytest")
             if resume_source is not None else None
         )
+        source_status = source_step.get("status") if source_step else None
         source_failed_nodeids = (
             (source_step.get("pytest_selection") or {}).get("failed_nodeids")
             if isinstance(source_step, dict) else None
         )
-        coverage = "verified" if source_failed_nodeids is not None else "legacy-explicit"
-        missing = sorted(set(source_failed_nodeids or ()) - set(selected_nodeids))
+        if source_status == "failed":
+            coverage = (
+                "verified" if source_failed_nodeids is not None
+                else "legacy-explicit"
+            )
+            missing = sorted(
+                set(source_failed_nodeids or ()) - set(selected_nodeids)
+            )
+            selection_basis = "source_failures"
+        elif source_status == "passed":
+            coverage = "changed-input-explicit"
+            missing = []
+            selection_basis = "changed_inputs"
+        else:
+            coverage = "invalid-source"
+            missing = []
+            selection_basis = "invalid_source"
         row["pytest_resume"] = {
             "source_report_sha256": (
                 resume_source.get("sha256") if resume_source is not None else None
@@ -3601,17 +3624,21 @@ def _run_pytest(
             "source_step_sha256": (
                 _canonical_sha256(source_step) if source_step is not None else None
             ),
-            "source_status": source_step.get("status") if source_step else None,
+            "source_status": source_status,
             "source_failed_nodeids": source_failed_nodeids,
             "selected_nodeids": list(selected_nodeids),
             "failure_coverage": coverage,
+            "selection_basis": selection_basis,
             "missing_source_failures": missing,
             "unselected_source_evidence_reused": True,
         }
-        if source_step is None or source_step.get("status") != "failed":
+        if source_status not in ("failed", "passed"):
             row.update({
                 "status": "failed",
-                "detail": "targeted pytest resume requires a failed pytest source step",
+                "detail": (
+                    "targeted pytest resume requires a passed or failed pytest "
+                    "source step"
+                ),
             })
             return row
         if missing:
@@ -3701,6 +3728,7 @@ def build_commands(args, artifact, report_dir):
         commands.append((
             "upstream_contract",
             [sys.executable, UPSTREAM_CONTRACT_SCRIPT, args.upstream_root,
+             "--evidence", UPSTREAM_CONTRACT_EVIDENCE,
              "--json-out", report_dir / "upstream.json"], True,
         ))
     return commands
@@ -4118,11 +4146,15 @@ def _step_input_scopes(name, args, fingerprinter):
             "upstream_verifier",
             (
                 UPSTREAM_CONTRACT_SCRIPT,
+                REPO_ROOT / "tools" / "verify_alist_tvbox_1500_contract.py",
                 REPO_ROOT / "tools" / "verify_alist_tvbox_1480_contract.py",
                 REPO_ROOT / "tools" / "verify_alist_tvbox_1471_contract.py",
                 REPO_ROOT / "tools" / "verify_alist_tvbox_1461_contract.py",
                 REPO_ROOT / "tools" / "verify_alist_tvbox_1451_contract.py",
             ),
+        ))
+        scopes.append(fingerprinter.files(
+            "upstream_release_evidence", (UPSTREAM_CONTRACT_EVIDENCE,),
         ))
     elif name == "output_admission_dry_run":
         scopes.append(fingerprinter.files("output_admission_policy", (OUTPUT_ADMISSION_POLICY,)))
@@ -4916,6 +4948,7 @@ def run_gate(args, runner=None):
             if args.upstream_root:
                 command = [
                     sys.executable, UPSTREAM_CONTRACT_SCRIPT, args.upstream_root,
+                    "--evidence", UPSTREAM_CONTRACT_EVIDENCE,
                     "--json-out", temp_dir / "upstream.json",
                 ]
                 command_rows["upstream_contract"] = lambda: _run_command(
@@ -5019,8 +5052,8 @@ def _parser():
     parser.add_argument(
         "--pytest-node", action="append", default=[],
         help=(
-            "repeatable tests/*.py path or node id used to close a failed pytest "
-            "step without rerunning the full suite"
+            "repeatable tests/*.py path or node id used to close a failed or "
+            "input-invalidated pytest step without rerunning the full suite"
         ),
     )
     parser.add_argument("--partial", action="store_true", help="allow an explicitly incomplete diagnostic run")
