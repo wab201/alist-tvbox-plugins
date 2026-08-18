@@ -1,0 +1,8 @@
+[
+  {
+    "id": "douban_tmdb_follow_single_v80_private",
+    "file": "staging/豆瓣TMDB追更单入口.py",
+    "version": 80,
+    "valid": true
+  }
+]

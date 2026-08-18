@@ -69,9 +69,9 @@ def test_overlay_is_deterministic_and_has_one_narrow_insertion():
 
     assert first == second
     assert first["insertions"] == ("diagnostics-snapshot-envelope",)
-    assert first["input_size"] == 850898
+    assert first["input_size"] == 854396
     assert first["input_sha256"] == (
-        "B273E4ED166E1DA6C2212555C98A3EE94E6CC6557D7E12BB745EFB1859031ABC"
+        "A4AE219E575441137ADD531DCF7FD86D41BBF64D4096C67D4FD8B8C25993A798"
     )
     assert first["size"] > first["input_size"]
 

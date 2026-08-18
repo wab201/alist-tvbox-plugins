@@ -7,8 +7,8 @@
   "writable": true,
   "index_contract": "none",
   "encoding": "utf-8",
-  "expected_size": 862377,
-  "expected_sha256": "C1ACAB802121E3F69ADEA0EBF1AB271C14015124AA28D2D1F8F58F97C8481B7D",
+  "expected_size": 870797,
+  "expected_sha256": "0CEBC73A78BCC8C7853A6BD0F0C78F4D95DD786C861425F9E0A4EC40FA0583F9",
   "chunks": [
     "parts/00_module_prelude.pyinc",
     "parts/01_runtime_components.pyinc",

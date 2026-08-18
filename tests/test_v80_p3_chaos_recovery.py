@@ -6,8 +6,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNNER_PATH = ROOT / "tools" / "run_v80_p3_chaos_recovery.py"
-EXPECTED_SIZE = 862377
-EXPECTED_SHA256 = "C1ACAB802121E3F69ADEA0EBF1AB271C14015124AA28D2D1F8F58F97C8481B7D"
+EXPECTED_SIZE = 870797
+EXPECTED_SHA256 = "0CEBC73A78BCC8C7853A6BD0F0C78F4D95DD786C861425F9E0A4EC40FA0583F9"
 
 
 def _load(name, path):
@@ -30,7 +30,7 @@ def test_chaos_report_covers_every_planned_fault_and_recovery_baseline():
     rows = {row["name"]: row for row in report["scenarios"]}
 
     assert tuple(rows) == tuple(RUNNER.EXPECTED_RECOVERY_MS)
-    assert report["summary"] == {"total": 12, "passed": 12, "failed": 0}
+    assert report["summary"] == {"total": 13, "passed": 13, "failed": 0}
     for name, expected_ms in RUNNER.EXPECTED_RECOVERY_MS.items():
         assert rows[name]["status"] == "passed"
         assert rows[name]["expected_recovery_ms"] == expected_ms
@@ -80,6 +80,15 @@ def test_chaos_report_proves_isolation_and_lifecycle_invariants():
         "recovery_ms": 0,
         "stale_cache_commit_rejected": True,
         "stale_bulkhead_release_fenced": True,
+    }
+    assert rows["resource_combiner_fail_open"]["evidence"] == {
+        "recovery_ms": 0,
+        "switch_active": True,
+        "combiner_calls": 1,
+        "legacy_fallback_calls": 1,
+        "retry_attempts": 0,
+        "legacy_bound": "",
+        "fallback_preserved": True,
     }
 
 

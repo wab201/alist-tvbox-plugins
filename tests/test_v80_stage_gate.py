@@ -99,6 +99,7 @@ EXPECTED_P2_MANAGED_FILES = {
     "tests/test_v80_p2_resource_candidate_shadow_policy.py",
     "tests/test_v80_p2_resource_shadow_vendor.py",
     "tests/test_v80_p2_resource_shadow_overlay.py",
+    "tests/test_v80_p2_resource_output_switch_overlay.py",
     "tests/test_v80_p2_resource_candidate_shadow_runtime.py",
     "tests/test_v80_p2_resource_matching.py",
     "tests/test_v80_p2_resource_models.py",
@@ -118,6 +119,7 @@ EXPECTED_P2_MANAGED_FILES = {
     "tests/test_v80_p2_resource_schema.py",
     "tools/build_v80_resource_shadow_vendor.py",
     "tools/build_v80_resource_shadow_overlay.py",
+    "tools/build_v80_resource_output_switch_overlay.py",
     "work/run_v80_p2_19_differential.py",
     "work/run_v80_p2_macro_a_differential.py",
     "work/run_v80_p2_macro_b_differential.py",
@@ -132,6 +134,7 @@ EXPECTED_P3_MANAGED_FILES = {
     "tools/verify_alist_tvbox_1461_contract.py",
     "tools/verify_alist_tvbox_1471_contract.py",
     "tools/verify_alist_tvbox_1480_contract.py",
+    "tools/verify_alist_tvbox_1500_contract.py",
     "tests/test_v80_p3_history_event_queue.py",
     "tests/test_v80_p3_history_sync_v145.py",
     "tests/test_v80_p3_history_sync_overlay.py",
@@ -139,6 +142,7 @@ EXPECTED_P3_MANAGED_FILES = {
     "tests/test_alist_tvbox_1461_contract.py",
     "tests/test_alist_tvbox_1471_contract.py",
     "tests/test_alist_tvbox_1480_contract.py",
+    "tests/test_alist_tvbox_1500_contract.py",
     "src/douban_tmdb_follow_single/reliability_contract.py",
     "tools/build_v80_reliability_overlay.py",
     "tests/test_v80_p3_reliability_contract.py",
@@ -287,6 +291,7 @@ def _args(**overrides):
         "report": ROOT / "work" / "test-v80-gate.json",
         "resume_from": None,
         "resume_source_sha256": None,
+        "pytest_node": [],
         "partial": True,
         "skip_tests": False,
         "fongmi_root": None,
@@ -336,7 +341,13 @@ def _copy_frozen_structure(tmp_path):
 def _differential_payload():
     payload = dict(GATE.EXPECTED_MACRO_A_DIFFERENTIAL)
     payload.update({
+        "equal": 45000,
+        "different": 5000,
         "scenario_counts": dict(GATE.EXPECTED_MACRO_A_SCENARIO_COUNTS),
+        "scenario_differences": {
+            name: 5000 if name == "selected_different" else 0
+            for name in GATE.EXPECTED_MACRO_A_SCENARIO_COUNTS
+        },
         "decision_counts": dict(GATE.EXPECTED_MACRO_A_DECISION_COUNTS),
         "report_status_counts": dict(GATE.EXPECTED_MACRO_A_REPORT_STATUS_COUNTS),
         "first_failures": [],
@@ -365,6 +376,13 @@ def _differential_builds():
                 "input_size": expected["overlay_input_size"],
                 "input_sha256": expected["overlay_input_sha256"],
                 "insertions": tuple(range(expected["overlay_insertion_count"])),
+            },
+            "resource_output_switch_overlay": {
+                "input_size": expected["output_switch_input_size"],
+                "input_sha256": expected["output_switch_input_sha256"],
+                "size": expected["output_switch_size"],
+                "sha256": expected["output_switch_sha256"],
+                "insertions": tuple(range(expected["output_switch_insertion_count"])),
             },
         },
     }
@@ -402,6 +420,13 @@ def _macro_b_differential_builds():
                 "input_size": expected["overlay_input_size"],
                 "input_sha256": expected["overlay_input_sha256"],
                 "insertions": tuple(range(expected["overlay_insertion_count"])),
+            },
+            "resource_output_switch_overlay": {
+                "input_size": expected["output_switch_input_size"],
+                "input_sha256": expected["output_switch_input_sha256"],
+                "size": expected["output_switch_size"],
+                "sha256": expected["output_switch_sha256"],
+                "insertions": tuple(range(expected["output_switch_insertion_count"])),
             },
         },
     }
@@ -512,7 +537,20 @@ def test_sensitive_scan_allows_placeholders_and_test_values(tmp_path):
     source = tmp_path / "example.txt"
     source.write_text(
         'Authorization: "<token>"\npassword="test-password"\n'
+        'token="fixture-token"\n'
         'url="https://example.com/subscription/<token>"\n',
+        encoding="utf-8",
+    )
+
+    assert GATE.scan_sensitive_files([source], repo_root=tmp_path) == []
+
+
+def test_sensitive_scan_allows_credentials_only_on_reserved_test_hosts(tmp_path):
+    source = tmp_path / "reserved-hosts.txt"
+    source.write_text(
+        'url="https://api.example/path?token=opaque-value"\n'
+        'url="https://api.example.test/path?password=opaque-value"\n'
+        'url="https://api.invalid/path?sig=opaque-value"\n',
         encoding="utf-8",
     )
 
@@ -665,12 +703,23 @@ def test_sensitive_scan_ignores_canonical_protocol_header_names(tmp_path):
 
 def test_managed_sensitive_paths_cover_v80_inventory():
     relative = {path.relative_to(ROOT).as_posix() for path in GATE.managed_sensitive_paths()}
+    test_tree = {
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "tests").rglob("*")
+        if path.is_file()
+        and "__pycache__" not in path.parts
+        and path.suffix.lower() != ".pyc"
+    }
 
     assert relative == (
         EXPECTED_P1_MANAGED_FILES | EXPECTED_P2_MANAGED_FILES
         | EXPECTED_P3_MANAGED_FILES | EXPECTED_P4_MANAGED_FILES
-        | EXPECTED_P5_MANAGED_FILES | EXPECTED_P1_PARTS
+        | EXPECTED_P5_MANAGED_FILES | EXPECTED_P1_PARTS | test_tree
     )
+    assert relative == {
+        path.relative_to(ROOT).as_posix()
+        for path in GATE.implementation_tree_paths()
+    }
 
 
 def test_structure_rejects_changed_chunk_order(tmp_path):
@@ -1057,7 +1106,7 @@ def test_build_contract_records_the_p2_through_p5_build_chain(release_builds):
     assert step["security_policy_module_input_sha256"] == (
         builds["development"]["security_policy_module"]["input_sha256"]
     )
-    assert step["route_security_overlay_insertion_count"] == 4
+    assert step["route_security_overlay_insertion_count"] == 9
     assert step["route_security_overlay_input_sha256"] == (
         builds["development"]["route_security_overlay"]["input_sha256"]
     )
@@ -1198,6 +1247,24 @@ def test_build_contract_records_the_p2_through_p5_build_chain(release_builds):
     )
     assert step["history_concurrency_ownership_overlay_sha256"] == (
         builds["development"]["history_concurrency_ownership_overlay"]["sha256"]
+    )
+    assert step["resource_output_switch_overlay_insertion_count"] == 9
+    assert step["resource_output_switch_overlay_insertions"] == [
+        "controlled-switch-state",
+        "private-raw-plugin-config",
+        "shared-output-owner",
+        "shared-binding-owner",
+        "shared-recent-owner",
+        "foreground-production-owner",
+        "background-production-owner",
+        "background-shadow-legacy-owner",
+        "background-shadow-candidate-owner",
+    ]
+    assert step["resource_output_switch_overlay_input_sha256"] == (
+        builds["development"]["resource_output_switch_overlay"]["input_sha256"]
+    )
+    assert step["resource_output_switch_overlay_sha256"] == (
+        builds["development"]["resource_output_switch_overlay"]["sha256"]
     )
 
 
@@ -2418,19 +2485,9 @@ def test_build_contract_rejects_tampered_playback_concurrency_ownership_overlay(
 
 
 def _forge_history_concurrency_ownership_output(development):
-    forged_output = bytearray(development["bytes"])
-    forged_output[-1] = ord(" ")
-    forged_output = bytes(forged_output)
-    forged_sha256 = hashlib.sha256(forged_output).hexdigest().upper()
-    development["history_concurrency_ownership_overlay"].update({
-        "size": len(forged_output),
-        "sha256": forged_sha256,
-    })
-    development.update({
-        "bytes": forged_output,
-        "size": len(forged_output),
-        "sha256": forged_sha256,
-    })
+    current = development["history_concurrency_ownership_overlay"]["sha256"]
+    replacement = ("0" if current[0] != "0" else "1") + current[1:]
+    development["history_concurrency_ownership_overlay"]["sha256"] = replacement
 
 
 @pytest.mark.parametrize("mutation,expected_detail", (
@@ -2458,6 +2515,44 @@ def _forge_history_concurrency_ownership_output(development):
     ),
 ))
 def test_build_contract_rejects_tampered_history_concurrency_ownership_overlay(
+        release_builds, mutation, expected_detail):
+    development = copy.deepcopy(release_builds["development"])
+    mutation(development)
+
+    step, builds = GATE.check_builds(_fake_build(
+        release_builds["baseline"], development,
+    ))
+
+    assert step["status"] == "failed"
+    assert expected_detail in step["detail"]
+    assert builds is None
+
+
+@pytest.mark.parametrize("mutation,expected_detail", (
+    (
+        lambda development: development.pop("resource_output_switch_overlay"),
+        "missing the P2 private resource output switch overlay",
+    ),
+    (
+        lambda development: development["resource_output_switch_overlay"].update(
+            input_sha256="0" * 64,
+        ),
+        "P2 resource output switch overlay is not based on the History ownership output",
+    ),
+    (
+        lambda development: development["resource_output_switch_overlay"].update(
+            insertions=("changed",),
+        ),
+        "P2 resource output switch overlay insertions metadata is invalid",
+    ),
+    (
+        lambda development: development["resource_output_switch_overlay"].update(
+            sha256="0" * 64,
+        ),
+        "P2 resource output switch overlay sha256 metadata is invalid",
+    ),
+))
+def test_build_contract_rejects_tampered_resource_output_switch_overlay(
         release_builds, mutation, expected_detail):
     development = copy.deepcopy(release_builds["development"])
     mutation(development)
@@ -2521,7 +2616,8 @@ def _write_pytest_junit(command, tests=3, skipped=1, failures=0, errors=0):
 
 
 def _write_pytest_selection(
-        environment, collected=3, selected=3, deselected=0, exitstatus=0):
+        environment, collected=3, selected=3, deselected=0, exitstatus=0,
+        failed_nodeids=None):
     output = Path(environment[GATE.PYTEST_EVIDENCE_ENV])
     output.write_text(json.dumps({
         "schema": GATE.PYTEST_SELECTION_SCHEMA,
@@ -2529,6 +2625,7 @@ def _write_pytest_selection(
         "selected": selected,
         "deselected": deselected,
         "exitstatus": exitstatus,
+        "failed_nodeids": list(failed_nodeids or ()),
     }), encoding="utf-8")
 
 
@@ -2541,7 +2638,7 @@ def _passed_pytest_step():
         },
         pytest_selection={
             "collected": 1, "selected": 1, "deselected": 0,
-            "exitstatus": 0,
+            "exitstatus": 0, "failed_nodeids": [],
         },
     )
 
@@ -2588,6 +2685,7 @@ def test_pytest_subprocess_uses_sanitized_environment_and_junit_evidence(
         "selected": 3,
         "deselected": 0,
         "exitstatus": 0,
+        "failed_nodeids": [],
     }
     assert result["pytest_isolation"]["confcutdir"] == str(
         GATE.REPO_ROOT / "tests"
@@ -2656,6 +2754,75 @@ def test_pytest_rejects_success_exit_with_deselected_machine_evidence(tmp_path):
     assert result["status"] == "failed"
     assert result["pytest_selection"]["deselected"] == 1
     assert "deselected 1 tests" in result["detail"]
+
+
+def test_targeted_pytest_resume_records_legacy_explicit_closure(tmp_path):
+    nodeid = "tests/test_sample.py::test_failure"
+    resume_source = {
+        "sha256": "A" * 64,
+        "steps": {"pytest": GATE._step("pytest", "failed")},
+    }
+
+    def runner(command, **kwargs):
+        assert command[-1] == nodeid
+        _write_pytest_junit(command, tests=1, skipped=0)
+        _write_pytest_selection(kwargs["env"], collected=1, selected=1)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    result = GATE._run_pytest(
+        tmp_path, runner=runner, selected_nodeids=(nodeid,),
+        resume_source=resume_source,
+    )
+
+    assert result["status"] == "passed"
+    assert result["pytest_resume"]["failure_coverage"] == "legacy-explicit"
+    assert result["pytest_resume"]["selected_nodeids"] == [nodeid]
+    assert result["pytest_resume"]["unselected_source_evidence_reused"] is True
+
+
+def test_targeted_pytest_resume_must_cover_recorded_source_failures(tmp_path):
+    source_failure = "tests/test_sample.py::test_source_failure"
+    selected = "tests/test_sample.py::test_other"
+    resume_source = {
+        "sha256": "A" * 64,
+        "steps": {
+            "pytest": GATE._step(
+                "pytest", "failed",
+                pytest_selection={"failed_nodeids": [source_failure]},
+            ),
+        },
+    }
+
+    def runner(command, **kwargs):
+        _write_pytest_junit(command, tests=1, skipped=0)
+        _write_pytest_selection(kwargs["env"], collected=1, selected=1)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    result = GATE._run_pytest(
+        tmp_path, runner=runner, selected_nodeids=(selected,),
+        resume_source=resume_source,
+    )
+
+    assert result["status"] == "failed"
+    assert result["pytest_resume"]["failure_coverage"] == "verified"
+    assert result["pytest_resume"]["missing_source_failures"] == [source_failure]
+
+
+def test_failed_pytest_command_still_records_failed_nodeids(tmp_path):
+    failed = "tests/test_sample.py::test_failure"
+
+    def runner(command, **kwargs):
+        _write_pytest_junit(command, tests=1, skipped=0, failures=1)
+        _write_pytest_selection(
+            kwargs["env"], collected=1, selected=1, exitstatus=1,
+            failed_nodeids=[failed],
+        )
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+
+    result = GATE._run_pytest(tmp_path, runner=runner)
+
+    assert result["status"] == "failed"
+    assert result["pytest_selection"]["failed_nodeids"] == [failed]
 
 
 def _write_private_pytest_repo(root):
@@ -2807,6 +2974,8 @@ def test_macro_a_differential_script_exit_contract_checks_all_evidence_groups():
         lambda report: report["scenario_counts"].pop("disabled"),
         lambda report: report["decision_counts"].pop("selected"),
         lambda report: report["report_status_counts"].update(error=0),
+        lambda report: report["scenario_differences"].update(selected_error=1),
+        lambda report: report.update(controlled_switch_active=False),
         lambda report: report["first_failures"].append({"index": 1}),
     ]
 
@@ -2845,7 +3014,7 @@ def test_stage_gate_validates_macro_a_differential_report_and_current_build(tmp_
     result = GATE.check_macro_a_runtime_differential(builds, tmp_path, runner=runner)
 
     assert result["status"] == "passed"
-    assert result["evidence"]["equal"] == 50000
+    assert result["evidence"]["equal"] == 45000
     assert result["evidence"]["module_count"] == 17
 
     builds["development"]["vendor"]["sha256"] = "0" * 64
@@ -2859,7 +3028,7 @@ def test_stage_gate_rejects_success_exit_with_incomplete_macro_a_coverage(tmp_pa
     mutations = [
         lambda report: report["scenario_counts"].pop("disabled"),
         lambda report: report["decision_counts"].pop("selected"),
-        lambda report: report["report_status_counts"].pop("error"),
+        lambda report: report["report_status_counts"].pop("different"),
     ]
 
     for mutate in mutations:
@@ -2884,6 +3053,7 @@ def test_macro_b_differential_script_exit_contract_checks_all_evidence_groups():
         lambda report: report["decision_counts"].pop("selected"),
         lambda report: report["report_status_counts"].pop("observed"),
         lambda report: report.update(exception_calls=0),
+        lambda report: report.update(controlled_switch_active=False),
         lambda report: report["first_failures"].append({"case": 1}),
     ]
 
@@ -2935,6 +3105,7 @@ def test_stage_gate_rejects_success_exit_with_incomplete_macro_b_coverage(tmp_pa
 
 
 def _chaos_payload():
+    scenario_count = len(GATE.EXPECTED_CHAOS_RECOVERY_MS)
     return {
         "schema": "v80-p3-chaos-recovery/1",
         "candidate": {
@@ -2949,7 +3120,7 @@ def _chaos_payload():
             "hot_cache_ms": 0,
             "note": "Synthetic transport latency; not a real-device benchmark.",
         },
-        "summary": {"total": 12, "passed": 12, "failed": 0},
+        "summary": {"total": scenario_count, "passed": scenario_count, "failed": 0},
         "scenarios": [
             {
                 "name": name,
@@ -2982,7 +3153,10 @@ def test_stage_gate_validates_chaos_recovery_report_and_current_build(tmp_path):
     result = GATE.check_chaos_recovery(builds, tmp_path, runner=runner)
 
     assert result["status"] == "passed"
-    assert result["evidence"]["summary"] == {"total": 12, "passed": 12, "failed": 0}
+    scenario_count = len(GATE.EXPECTED_CHAOS_RECOVERY_MS)
+    assert result["evidence"]["summary"] == {
+        "total": scenario_count, "passed": scenario_count, "failed": 0,
+    }
     assert result["evidence"]["recovery_ms"] == GATE.EXPECTED_CHAOS_RECOVERY_MS
 
 
@@ -3014,6 +3188,20 @@ def test_output_admission_dry_run_admits_complete_in_memory_evidence():
     assert result["admit"] is True
     assert result["reason"] == "admitted"
     assert all(result["evidence"].values())
+
+
+def test_output_admission_dry_run_rejects_invalid_private_release():
+    def reject_private_release():
+        raise RuntimeError("staged artifact differs from fixed build")
+
+    result = GATE.check_output_admission_dry_run(
+        _output_admission_steps(), private_release_checker=reject_private_release,
+    )
+
+    assert result["status"] == "failed"
+    assert result["admit"] is False
+    assert result["reason"] == "private_release_invalid"
+    assert result["evidence"]["private_release_verified"] is False
 
 
 @pytest.mark.parametrize(
@@ -3490,6 +3678,17 @@ def _install_resume_gate_stubs(monkeypatch, calls, statuses=None):
     baseline = b"baseline"
     development = b"development"
 
+    build_payload = {
+        "baseline": {
+            "bytes": baseline, "size": len(baseline),
+            "sha256": hashlib.sha256(baseline).hexdigest().upper(),
+        },
+        "development": {
+            "bytes": development, "size": len(development),
+            "sha256": hashlib.sha256(development).hexdigest().upper(),
+        },
+    }
+
     def builds():
         row = step(
             "build_contracts",
@@ -3498,18 +3697,10 @@ def _install_resume_gate_stubs(monkeypatch, calls, statuses=None):
             development_size=len(development),
             development_sha256=hashlib.sha256(development).hexdigest().upper(),
         )
-        return row, {
-            "baseline": {
-                "bytes": baseline, "size": len(baseline),
-                "sha256": hashlib.sha256(baseline).hexdigest().upper(),
-            },
-            "development": {
-                "bytes": development, "size": len(development),
-                "sha256": hashlib.sha256(development).hexdigest().upper(),
-            },
-        }
+        return row, build_payload
 
     monkeypatch.setattr(GATE, "check_builds", builds)
+    monkeypatch.setattr(GATE, "_materialize_builds", lambda: build_payload)
     monkeypatch.setattr(
         GATE, "check_behavior_diff",
         lambda *a, **k: step("behavior_diff", evidence={"marker": "behavior"}),
@@ -3630,6 +3821,7 @@ def _write_resume_upstream_git(root):
         ("1.46.1", "1461"),
         ("1.47.1", "1471"),
         ("1.48.0", "1480"),
+        ("1.50.0", "1500"),
     ):
         (root / "source.go").write_text(content, encoding="utf-8")
         for command in (
@@ -3670,8 +3862,9 @@ def test_upstream_git_state_fingerprint_covers_the_complete_verifier_chain(tmp_p
     assert set(original["value"]) == {
         "root", "head", "exact_tag", "worktree_status",
         "tag_1450_commit", "tag_1451_commit", "tag_1461_commit",
-        "tag_1471_commit", "tag_1480_commit", "delta_1450_1451",
-        "delta_1451_1461", "delta_1461_1471", "delta_1471_1480",
+        "tag_1471_commit", "tag_1480_commit", "tag_1500_commit",
+        "delta_1450_1451", "delta_1451_1461", "delta_1461_1471",
+        "delta_1471_1480", "delta_1480_1500",
     }
     assert original["valid"]
 
@@ -3769,10 +3962,9 @@ def test_resume_step_catalog_is_exact_and_acyclic():
     assert tuple(GATE.STEP_DEPENDENCIES) == GATE.STEP_ORDER
     assert len(GATE.STEP_ORDER) == 18
     assert len(set(GATE.STEP_ORDER)) == 18
-    assert GATE.ALWAYS_EXECUTE_STEPS == {
-        "git_v70_tag", "implementation_tree", "build_contracts",
-        "output_admission_dry_run", "v70_source_lock",
-    }
+    assert GATE.ALWAYS_EXECUTE_STEPS == frozenset()
+    assert tuple(GATE.STEP_GATE_CONTRACTS) == GATE.STEP_ORDER
+    assert all(GATE.STEP_GATE_CONTRACTS.values())
 
     visiting = set()
     visited = set()
@@ -3793,8 +3985,29 @@ def test_resume_step_catalog_is_exact_and_acyclic():
         visit(step_name)
 
 
-def test_current_upstream_contract_is_1480_leaf_with_explicit_base_chain():
-    assert GATE.UPSTREAM_CONTRACT_SCRIPT.name == "verify_alist_tvbox_1480_contract.py"
+def test_output_admission_input_scope_binds_private_release_artifacts():
+    scopes = GATE._step_input_scopes(
+        "output_admission_dry_run", _args(), GATE._InputFingerprinter(),
+    )
+    private_scope = next(
+        scope for scope in scopes if scope["name"] == "private_release_inputs"
+    )
+
+    assert private_scope["valid"] is True
+    assert set(private_scope["paths"]) == {
+        path.resolve().relative_to(GATE.REPO_ROOT.resolve()).as_posix()
+        for path in (
+            GATE.PRIVATE_RELEASE_SCRIPT,
+            GATE.PRIVATE_RELEASE_MANIFEST,
+            GATE.PRIVATE_RELEASE_INDEX,
+            GATE.PRIVATE_RELEASE_SOURCE,
+            GATE.CONTROLLED_SWITCH_EVIDENCE,
+        )
+    }
+
+
+def test_current_upstream_contract_is_1500_leaf_with_explicit_base_chain():
+    assert GATE.UPSTREAM_CONTRACT_SCRIPT.name == "verify_alist_tvbox_1500_contract.py"
 
     args = _args(upstream_root=Path("upstream"))
     scopes = GATE._step_input_scopes(
@@ -3810,6 +4023,7 @@ def test_current_upstream_contract_is_1480_leaf_with_explicit_base_chain():
         "tools/verify_alist_tvbox_1461_contract.py",
         "tools/verify_alist_tvbox_1471_contract.py",
         "tools/verify_alist_tvbox_1480_contract.py",
+        "tools/verify_alist_tvbox_1500_contract.py",
     }
 
 
@@ -3817,10 +4031,35 @@ def test_parser_accepts_resume_from():
     args = GATE._parser().parse_args([
         "--partial", "--resume-from", "source.json",
         "--resume-source-sha256", "A" * 64,
+        "--pytest-node", "tests/test_sample.py::test_failure",
     ])
 
     assert args.resume_from == Path("source.json")
     assert args.resume_source_sha256 == "A" * 64
+    assert args.pytest_node == ["tests/test_sample.py::test_failure"]
+
+
+def test_pytest_node_requires_resume_source():
+    args = _args(pytest_node=["tests/test_sample.py::test_failure"])
+
+    with pytest.raises(GATE.GateError, match="requires --resume-from"):
+        GATE._validate_args(args)
+
+
+@pytest.mark.parametrize("value", (
+    "../tests/test_sample.py::test_failure",
+    "work/test_sample.py::test_failure",
+    "tests/not-python.txt::test_failure",
+))
+def test_pytest_node_rejects_non_test_targets(value):
+    args = _args(
+        resume_from=Path("source.json"),
+        resume_source_sha256="A" * 64,
+        pytest_node=[value],
+    )
+
+    with pytest.raises(GATE.GateError, match="relative tests"):
+        GATE._validate_args(args)
 
 
 def test_resume_from_requires_a_pinned_source_sha256():
@@ -3926,6 +4165,7 @@ def test_command_timeout_is_execution_budget_not_resume_input():
     assert "command_options" not in scope_map("behavior_diff", short)
     assert scope_map("pytest", short)["command_options"]["value"] == {
         "skip_tests": False,
+        "selected_nodeids": [],
     }
     assert (
         scope_map("pytest", short)["command_options"]["sha256"]
@@ -4244,15 +4484,11 @@ def test_matching_resume_reuses_only_non_anchor_steps_and_keeps_source_read_only
     assert source_path.read_bytes() == source_bytes
     assert closure["resume"]["source_report_sha256"] == source_sha256
     assert closure["resume"]["source_sha256_verified"] is True
-    assert set(closure["resume"]["executed_steps"]) == GATE.ALWAYS_EXECUTE_STEPS
-    assert set(closure["resume"]["reused_steps"]) == (
-        set(GATE.STEP_ORDER) - GATE.ALWAYS_EXECUTE_STEPS
-    )
+    assert closure["resume"]["executed_steps"] == []
+    assert set(closure["resume"]["reused_steps"]) == set(GATE.STEP_ORDER)
+    assert closure["resume"]["materialized_steps"] == ["build_contracts"]
     assert not closure["resume"]["legacy_steps"]
-    assert set(calls) == {
-        "git_v70_tag", "implementation_tree", "build_contracts",
-        "v70_source_lock",
-    }
+    assert set(calls) == {"implementation_tree"}
     source_by_name = {row["name"]: row for row in source_report["steps"]}
     closure_by_name = {row["name"]: row for row in closure["steps"]}
     assert closure_by_name["behavior_diff"]["evidence"] == (
@@ -4335,9 +4571,18 @@ def test_failed_step_resumes_without_reexecuting_independent_passes(
     assert by_name["macro_b_runtime_differential"]["execution"] == "reused"
     assert by_name["chaos_recovery"]["execution"] == "reused"
     assert set(calls) == {
-        "git_v70_tag", "implementation_tree", "build_contracts",
-        "macro_a_runtime_differential", "v70_source_lock",
+        "implementation_tree", "macro_a_runtime_differential",
+        "v70_source_lock",
     }
+    invalidation = by_name["macro_a_runtime_differential"]["resume_invalidation"]
+    assert invalidation["source_status"] == "failed"
+    assert invalidation["source_input_sha256"]
+    assert invalidation["current_input_sha256"]
+    assert invalidation["propagation_paths"] == [["macro_a_runtime_differential"]]
+    admission = by_name["output_admission_dry_run"]["resume_invalidation"]
+    assert ["macro_a_runtime_differential", "output_admission_dry_run"] in (
+        admission["propagation_paths"]
+    )
 
 
 def test_implementation_tree_failure_report_remains_a_valid_resume_source(

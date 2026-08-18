@@ -48,8 +48,8 @@ class FollowOperationV51Test(unittest.TestCase):
         for index in range(5):
             self.spider._diagnostic_event(
                 "test.event", "ERROR",
-                exc=RuntimeError("request token=secret-tmdb-token failed"),
-                request_url="https://example.test/play?token=secret-tmdb-token&index=%d" % index,
+                exc=RuntimeError("request token=fixture-tmdb-token failed"),
+                request_url="https://example.test/play?token=fixture-tmdb-token&index=%d" % index,
             )
 
         snapshot = self.spider._diagnostic_snapshot()
@@ -826,7 +826,7 @@ class FollowOperationV51Test(unittest.TestCase):
         self.spider.init({
             "atvp_plugin_mode": "alist-tvbox-raw",
             "api": "https://tv.example.com",
-            "token": "sub-token",
+            "token": "fixture-sub-token",
             "history_api": "http://history.example.com",
         })
 
@@ -898,7 +898,7 @@ class FollowOperationV51Test(unittest.TestCase):
                 self.closed = False
                 self.payload = json.dumps({
                     "authorities": [{"authority": "USER"}],
-                    "token": "history-token",
+                    "token": "fixture-history-token",
                 }).encode("utf-8")
 
             def iter_content(self, chunk_size=None):
@@ -1582,7 +1582,7 @@ class FollowOperationV51Test(unittest.TestCase):
         success = Mock(status_code=200)
         success.close = Mock()
         self.spider._atvp_session = Mock()
-        self.spider._atvp_session.headers = {"Authorization": "history-token"}
+        self.spider._atvp_session.headers = {"Authorization": "fixture-history-token"}
         self.spider._atvp_session.delete.side_effect = [failed, success]
         self.spider._atvp_session.get.return_value = JsonResponse({
             "id": 37, "key": "site@@@vod@@@1",
@@ -1618,7 +1618,7 @@ class FollowOperationV51Test(unittest.TestCase):
         failed = Mock(status_code=500)
         failed.close = Mock()
         self.spider._atvp_session = Mock()
-        self.spider._atvp_session.headers = {"Authorization": "history-token"}
+        self.spider._atvp_session.headers = {"Authorization": "fixture-history-token"}
         self.spider._atvp_session.delete.return_value = failed
         self.spider._atvp_session.get.return_value = JsonResponse()
 
@@ -2966,8 +2966,8 @@ class FollowOperationV51Test(unittest.TestCase):
             "url": "https://cdn.example/episode-1.m3u8?sig=ok",
             "header": {
                 "User-Agent": "test",
-                "Cookie": "required-play-cookie",
-                "Authorization": "should-drop",
+                "Cookie": "fixture-play-cookie",
+                "Authorization": "test-should-drop",
             },
         }
         self.spider._atvp_play = Mock(return_value=direct_output)
@@ -2978,7 +2978,7 @@ class FollowOperationV51Test(unittest.TestCase):
         self.assertEqual(result["url"], direct_output["url"])
         self.assertEqual(result["header"], {
             "User-Agent": "test",
-            "Cookie": "required-play-cookie",
+            "Cookie": "fixture-play-cookie",
         })
         self.assertEqual(self.spider._route_probe_cache, {})
 
@@ -3005,16 +3005,16 @@ class FollowOperationV51Test(unittest.TestCase):
             "parse": 0,
             "url": "https://cdn.example/video.mp4?sig=ok",
             "header": {
-                "Cookie": "required-play-cookie",
+                "Cookie": "fixture-play-cookie",
                 "Referer": "https://pan.example/",
-                "Authorization": "should-drop",
+                "Authorization": "test-should-drop",
             },
         }, deadline=time.monotonic() + 5)
 
         self.assertIsNotNone(result)
-        self.assertEqual(captured["Cookie"], "required-play-cookie")
+        self.assertEqual(captured["Cookie"], "fixture-play-cookie")
         self.assertNotIn("Authorization", captured)
-        self.assertEqual(result["output"]["header"]["Cookie"], "required-play-cookie")
+        self.assertEqual(result["output"]["header"]["Cookie"], "fixture-play-cookie")
 
     def test_media_probe_drops_sensitive_headers_on_cross_origin_redirect(self):
         requests = []
@@ -3052,14 +3052,14 @@ class FollowOperationV51Test(unittest.TestCase):
             "parse": 0,
             "url": "https://cdn.example/video.mp4",
             "header": {
-                "Cookie": "required-play-cookie",
+                "Cookie": "fixture-play-cookie",
                 "Origin": "https://pan.example",
                 "Referer": "https://pan.example/",
             },
         }, deadline=time.monotonic() + 5)
 
         self.assertIsNotNone(result)
-        self.assertEqual(requests[0][1]["Cookie"], "required-play-cookie")
+        self.assertEqual(requests[0][1]["Cookie"], "fixture-play-cookie")
         self.assertNotIn("Cookie", requests[1][1])
         self.assertNotIn("Origin", requests[1][1])
         self.assertNotIn("Referer", requests[1][1])
@@ -3079,7 +3079,7 @@ class FollowOperationV51Test(unittest.TestCase):
             "parse": 0,
             "url": "https://cdn.example/video.mp4",
             "header": {
-                "Cookie": "required-play-cookie",
+                "Cookie": "fixture-play-cookie",
                 "Origin": "https://pan.example",
                 "Referer": "https://pan.example/",
                 "User-Agent": "test-agent",
@@ -4861,7 +4861,7 @@ class FollowOperationV51Test(unittest.TestCase):
         self.spider._resource_detail = Mock(return_value=detail)
         self.spider._atvp_play = Mock(side_effect=lambda play_id, **_kwargs: {
             "parse": 0, "url": "https://cdn.example/%s.mp4" % play_id,
-            "header": {"Cookie": "required"},
+            "header": {"Cookie": "fixture-required"},
         })
         self.spider._probe_media_output = Mock(side_effect=lambda output, deadline=None: {
             "checked_at": time.time(), "reachable": True,
@@ -5344,8 +5344,8 @@ class FollowOperationV51Test(unittest.TestCase):
     def test_background_and_check_links_share_normalized_resource_identity(self):
         variants = (
             "http://pan.quark.cn/s/demo/",
-            "https://pan.quark.cn/s/demo?password=1234",
-            "https://pan.quark.cn/s/demo#pwd=5678",
+            "https://pan.quark.cn/s/demo?password=test-password",
+            "https://pan.quark.cn/s/demo#pwd=test-password",
         )
         identities = {self.spider._resource_row_identity(value) for value in variants}
         self.assertEqual(len(identities), 1)

@@ -98,6 +98,9 @@ PLAYBACK_CONCURRENCY_OWNERSHIP_OVERLAY_SCRIPT = (
 HISTORY_CONCURRENCY_OWNERSHIP_OVERLAY_SCRIPT = (
     REPO_ROOT / "tools" / "build_v80_history_concurrency_ownership_overlay.py"
 )
+RESOURCE_OUTPUT_SWITCH_OVERLAY_SCRIPT = (
+    REPO_ROOT / "tools" / "build_v80_resource_output_switch_overlay.py"
+)
 METADATA_PATTERN = re.compile(
     r"(?m)^\s*//@(?P<key>name|id|version):(?P<value>.*?)\s*$"
 )
@@ -381,6 +384,21 @@ def _load_history_concurrency_ownership_overlay_builder():
         raise BuildError(
             "cannot load History concurrency ownership overlay builder: %s"
             % HISTORY_CONCURRENCY_OWNERSHIP_OVERLAY_SCRIPT
+        )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_resource_output_switch_overlay_builder():
+    spec = importlib.util.spec_from_file_location(
+        "v80_resource_output_switch_overlay_builder",
+        RESOURCE_OUTPUT_SWITCH_OVERLAY_SCRIPT,
+    )
+    if spec is None or spec.loader is None:
+        raise BuildError(
+            "cannot load resource output switch overlay builder: %s"
+            % RESOURCE_OUTPUT_SWITCH_OVERLAY_SCRIPT
         )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -1099,6 +1117,18 @@ def _apply_history_concurrency_ownership_overlay(source):
     return result["bytes"], metadata
 
 
+def _apply_resource_output_switch_overlay(source):
+    builder = _load_resource_output_switch_overlay_builder()
+    try:
+        result = builder.apply_resource_output_switch_overlay(source)
+    except builder.ResourceOutputSwitchOverlayError as exc:
+        raise BuildError(
+            "resource output switch overlay failed: %s" % exc
+        ) from exc
+    metadata = {key: value for key, value in result.items() if key != "bytes"}
+    return result["bytes"], metadata
+
+
 def _assemble(manifest, repo_root):
     manifest_dir = manifest["manifest_path"].parent
     chunks = []
@@ -1138,6 +1168,7 @@ def _assemble(manifest, repo_root):
     search_concurrency_ownership_overlay = None
     playback_concurrency_ownership_overlay = None
     history_concurrency_ownership_overlay = None
+    resource_output_switch_overlay = None
     if manifest["contract"] == "v80_development":
         source, vendor = _append_resource_shadow_vendor(source, manifest)
         source, overlay = _apply_resource_shadow_runtime_overlay(source)
@@ -1193,6 +1224,9 @@ def _assemble(manifest, repo_root):
         )
         source, history_concurrency_ownership_overlay = (
             _apply_history_concurrency_ownership_overlay(source)
+        )
+        source, resource_output_switch_overlay = (
+            _apply_resource_output_switch_overlay(source)
         )
     try:
         text = source.decode("utf-8")
@@ -1254,6 +1288,7 @@ def _assemble(manifest, repo_root):
         search_concurrency_ownership_overlay,
         playback_concurrency_ownership_overlay,
         history_concurrency_ownership_overlay,
+        resource_output_switch_overlay,
     )
 
 
@@ -1379,6 +1414,7 @@ def build_release(manifest_path=DEFAULT_MANIFEST):
         search_concurrency_ownership_overlay,
         playback_concurrency_ownership_overlay,
         history_concurrency_ownership_overlay,
+        resource_output_switch_overlay,
     ) = _assemble(manifest, repo_root)
     _audit_ast(text, output)
     metadata = _audit_metadata_and_index(text, manifest, repo_root)
@@ -1421,6 +1457,7 @@ def build_release(manifest_path=DEFAULT_MANIFEST):
         "search_concurrency_ownership_overlay": search_concurrency_ownership_overlay,
         "playback_concurrency_ownership_overlay": playback_concurrency_ownership_overlay,
         "history_concurrency_ownership_overlay": history_concurrency_ownership_overlay,
+        "resource_output_switch_overlay": resource_output_switch_overlay,
     }
 
 

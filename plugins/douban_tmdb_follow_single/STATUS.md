@@ -244,10 +244,18 @@
 | P5-5F 边界 | 不覆盖真实网络、服务器、MuMu、FongMi 或实机；无生产写入或部署，不改变公开 V70；未引入通用 executor/cache/retry/concurrency 框架 |
 | 独立模块中文别名 | `46/46`：10 个 P1 有序源码切片、24 个 P2 Python 模块、12 个 P3/P4/P5 叶模块均在开发源码 README 建立稳定映射；别名不改变文件名、符号或运行时合同 |
 | P4 重定向/响应边界收口 | 2026-08-18 已完成最小修复：Douban JSON/HTML、TMDB 与想看动作禁用自动重定向；`_resolve_user_id()` 仅解析同源 3xx `Location`，200 响应受 `256 KiB` 与总 deadline 约束；三个聚焦文件 `66 passed` |
-| 当前 V80 候选 | `862377` bytes；SHA256 `C1ACAB802121E3F69ADEA0EBF1AB271C14015124AA28D2D1F8F58F97C8481B7D`；未修改公开 V70 或根索引 |
+| 未探测播放 URL 收口 | V80 专用 route overlay 从 4 个扩为 9 个显式接缝；`_safe_atvp_play_output`、前台两处 fallback、资源详情探测前检查与 fallback 全部复用严格 DNS/地址策略和既有 deadline；三个共享分片逐字节恢复为冻结基线 |
+| 当前 V80 候选 | `870797` bytes；SHA256 `0CEBC73A78BCC8C7853A6BD0F0C78F4D95DD786C861425F9E0A4EC40FA0583F9`；build check、V70 baseline check 和编译通过；未修改公开 V70 或根索引 |
+| P2 接管状态 | raw-row-preserving combiner 已由 private-only controlled switch 接管前台与背景；共用 `_resource_output_candidate_order`，默认关闭，异常只单次回退旧 owner；Macro A `50000 / 14736 controlled differences / 0 errors`，Macro B `50000 equal`，Chaos `13/13` |
+| Controlled-switch 原子报告 | `work/v80-p2-controlled-output-switch-evidence-20260818.json`；`9442` bytes；SHA256 `40167BAF2EFDDAAC9F52D43AAFEAD70C55D3171EEC0051A59BBAC409FD2313E3` |
+| 私有发布合同 | `private/v80/` 已生成：`id=douban_tmdb_follow_single_v80_private`、`version=80`、独立索引与 staging；staged source `870801 / 049C722515F6851C379969C2886FA466EDD9FC9478B6B6F591E757DEEEDDCB97`；公开 `py/` 与根索引不变 |
+| 私有发布验证 | builder `4 passed`、`--check` 与编译通过；staged source 的 ATVP direct-play 与双运行时均 `ok=true`；原子报告 `work/v80-private-release-evidence-20260818.json` 为 `5284 / D0104CD3A19CA9B85D1FB1C8E768DE9D40DDA778840C535D3A9C491C440976E7` |
+| AList-TVBox 当前精确叶子 | `1.50.0 / 7ba1119e1e71bb427fb281f534a4c111ff7b500c`；相对 `1.48.0` 为 `20` 个路径变化，Atvp/raw 与七个播放同步 owner blob 保持不变 |
+| AList-TVBox 1.50.0 正式 closure | `work/v80-upstream-1500-complete-closure-20260818.json`；`18/18 passed`、`18 executed / 0 reused`、pytest `2133/2133`、Macro A/B 各 `50000/0/0`、Chaos `12/12`；稳定树 `182 / 4B33C067...24FFD`；`admit=true`；`2210.101s`；SHA256 `8FF99EC165D302DB425C4636CF2671CD202D05E4E90A6E74C5471D2D62E38194` |
+| AList-TVBox 1.50.0 边界 | 上游基线与 r4 closure 都早于当前 `870797 / 0CEBC7...83F9` 候选；公开 V70 仍为 `616699 / 233C73...82D4`；无生产写入或部署；当前候选必须生成自己的 DAG closure |
 | 本批次最终 closure | `work/v80-p5-5f-redirect-boundary-alias-closure-r6-20260818.json`；`18/18 passed`、pytest `2124 passed`、实现树 `180 / AB29AC3A...45AB` 且稳定；报告 SHA256 `743ACB44FDE44AA17E5E4118DE859854A5FCA5426FD04FDFDC74D9CAC91385A9`；`production_writes=false`、`deployment_attempted=false` |
-| V80 本地候选提交 | `v80-dev / 6d1ad3d85ab21ec804e512b112e77ebcf228f91e`（`feat: prepare V80 production candidate`）；tracked worktree 与 index 在提交后干净，历史未跟踪证据不纳入候选 |
-| 剩余发布路径 | 以固定候选提交进入私有灰度、真实服务器/MuMu/FongMi 验证、V70 回退演练、人工发布批准和生产晋升 |
+| 上一候选提交 | `v80-dev / 6d1ad3d85ab21ec804e512b112e77ebcf228f91e` 是当前安全/P2 取证改动之前的历史封印，不能代表 `87DCAC...BADC` |
+| 剩余发布路径 | 静默双指纹与变化节点 DAG closure -> 私有服务器导入/运行时 SHA256 -> MuMu 已安装 FongMi 私有配置验证 -> 人工批准和私有晋升；公开 V70 始终保持不变，私有撤回不涉及 V70 |
 | V70 锁定点 | 标签 `v70`，提交 `612617b35f08b98234c6e20c8137d8dea9035e97` |
 | 开发构建合同 | `manifest + parts + single-file build` |
 | P1 自动化 | `324 passed`；15 项 Golden 与 V70 全部一致 |

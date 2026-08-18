@@ -11,10 +11,10 @@ BUILD_PATH = ROOT / "tools" / "build_follow_plugin.py"
 OVERLAY_PATH = ROOT / "tools" / "build_v80_history_concurrency_ownership_overlay.py"
 MANIFEST_PATH = ROOT / "src" / "douban_tmdb_follow_single" / "release.json"
 PUBLIC_V70 = ROOT / "py" / "豆瓣TMDB追更单入口.py"
-P5_5E_SIZE = 859733
-P5_5E_SHA256 = "DFCDAEFBAEF0C6F2389E721EB377F1FA0DB34E889ED5D5E01E98B4A32DB308C0"
-FINAL_SIZE = 862377
-FINAL_SHA256 = "C1ACAB802121E3F69ADEA0EBF1AB271C14015124AA28D2D1F8F58F97C8481B7D"
+P5_5E_SIZE = 863231
+P5_5E_SHA256 = "ACFCBE12924D8A4F2C266CB9370DD24D0B9D0D876FB4A1FF898FF819C3F0BCE6"
+FINAL_SIZE = 865875
+FINAL_SHA256 = "DCD2CE50277119998BE2D92631CC90C11B3DDC733CB7B397E072E62FE117E773"
 INSERTIONS = (
     "history-job-owner-state",
     "live-init-history-job-reset",
@@ -49,13 +49,16 @@ def _p5_5e_source():
     manifest["expected_size"] = P5_5E_SIZE
     manifest["expected_sha256"] = P5_5E_SHA256
     original = BUILD._apply_history_concurrency_ownership_overlay
+    original_switch = BUILD._apply_resource_output_switch_overlay
     BUILD._apply_history_concurrency_ownership_overlay = lambda source: (source, None)
+    BUILD._apply_resource_output_switch_overlay = lambda source: (source, None)
     try:
         source = BUILD._assemble(
             manifest, BUILD._find_repo_root(manifest["manifest_path"]),
         )[0]
     finally:
         BUILD._apply_history_concurrency_ownership_overlay = original
+        BUILD._apply_resource_output_switch_overlay = original_switch
     assert len(source) == P5_5E_SIZE
     assert hashlib.sha256(source).hexdigest().upper() == P5_5E_SHA256
     return source

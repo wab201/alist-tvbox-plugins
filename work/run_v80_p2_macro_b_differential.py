@@ -75,10 +75,15 @@ def validation_errors(payload, expected_cases=None, expected_seed=None):
         "module_count": payload.get("module_count") == 17,
         "overlay_input_size": type(payload.get("overlay_input_size")) is int and payload["overlay_input_size"] > 0,
         "overlay_insertion_count": payload.get("overlay_insertion_count") == 8,
+        "output_switch_input_size": type(payload.get("output_switch_input_size")) is int and payload["output_switch_input_size"] > 0,
+        "output_switch_size": payload.get("output_switch_size") == payload.get("development_size"),
+        "output_switch_insertion_count": payload.get("output_switch_insertion_count") == 9,
+        "controlled_switch_active": payload.get("controlled_switch_active") is True,
     }
     for name in (
             "baseline_sha256", "development_sha256", "vendor_sha256",
-            "closure_sha256", "overlay_input_sha256"):
+            "closure_sha256", "overlay_input_sha256",
+            "output_switch_input_sha256", "output_switch_sha256"):
         checks[name] = bool(re.fullmatch(r"[0-9A-F]{64}", str(payload.get(name) or "")))
     errors.extend(name for name, valid in checks.items() if not valid)
     return errors
@@ -221,6 +226,7 @@ def _build_evidence(cases, seed):
     development_build = BUILD.check_release(DEV_MANIFEST)
     vendor = development_build["vendor"]
     overlay = development_build["overlay"]
+    output_switch = development_build["resource_output_switch_overlay"]
     scenario_counts = Counter()
     decision_counts = Counter()
     report_status_counts = Counter()
@@ -243,6 +249,15 @@ def _build_evidence(cases, seed):
             )
             baseline_spider = baseline_module.Spider()
             development_spider = development_module.Spider()
+            development_spider._alist_tvbox_plugin = True
+            development_spider._v80_resource_layered_output_enabled = (
+                development_spider._resource_layered_output_from_config({
+                    "v80_resource_layered_output": True,
+                })
+            )
+            controlled_switch_active = (
+                development_spider._resource_layered_output_active()
+            )
             original_shadow = development_module.run_resource_search_layered_shadow
             current = {"scenario": "", "marker": ""}
 
@@ -336,6 +351,12 @@ def _build_evidence(cases, seed):
         "overlay_input_size": overlay["input_size"],
         "overlay_input_sha256": overlay["input_sha256"],
         "overlay_insertion_count": len(overlay["insertions"]),
+        "output_switch_input_size": output_switch["input_size"],
+        "output_switch_input_sha256": output_switch["input_sha256"],
+        "output_switch_size": output_switch["size"],
+        "output_switch_sha256": output_switch["sha256"],
+        "output_switch_insertion_count": len(output_switch["insertions"]),
+        "controlled_switch_active": controlled_switch_active,
         "scenario_counts": dict(sorted(scenario_counts.items())),
         "decision_counts": dict(sorted(decision_counts.items())),
         "report_status_counts": dict(sorted(report_status_counts.items())),

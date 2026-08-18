@@ -64,21 +64,29 @@ def _spider(atvp_api=""):
     return spider
 
 
-def test_overlay_is_deterministic_and_has_four_narrow_insertions():
+def test_overlay_is_deterministic_and_has_nine_narrow_insertions():
     first = _overlay_result()
     second = OVERLAY.apply_route_security_overlay(_input_source())
 
     assert first["bytes"] == second["bytes"]
     assert first["insertions"] == (
-        "target-policy", "probe-headers", "redirect-decision", "redirect-transition",
+        "target-policy",
+        "strict-unprobed-output",
+        "player-unprobed-output",
+        "player-refreshed-unprobed-output",
+        "resource-probe-policy",
+        "resource-unprobed-output",
+        "probe-headers",
+        "redirect-decision",
+        "redirect-transition",
     )
-    assert first["input_size"] == 822566
+    assert first["input_size"] == 825860
     assert first["input_sha256"] == (
-        "A1C922715DDA59168D9EB12D0D820A345341840BA9DCF0856F7238CF1C8B8F76"
+        "EFB9930C43055E94D5BDE0D893612F2A1B0C81B8EA522F2AB21227140070FD62"
     )
 
 
-@pytest.mark.parametrize("index", range(4))
+@pytest.mark.parametrize("index", range(len(OVERLAY.INSERTIONS)))
 def test_overlay_rejects_missing_anchors(index):
     source = _input_source().decode("utf-8")
     label, anchor, _replacement = OVERLAY.INSERTIONS[index]
@@ -112,6 +120,28 @@ def test_unconfigured_private_media_target_is_rejected():
         "http://10.0.0.8/video.mp4",
         deadline=time.monotonic() + 5,
     ) is None
+
+
+def test_unprobed_output_rejects_unrelated_private_target_for_private_backend():
+    module = _runtime()
+    spider = _spider("http://10.10.100.4:4568")
+    spider._resolve_addresses = Mock(return_value={module.ipaddress.ip_address("10.0.0.8")})
+
+    assert spider._safe_atvp_play_output({
+        "parse": 0,
+        "url": "http://10.0.0.8/video.mp4",
+    }, deadline=time.monotonic() + 5) is False
+
+
+def test_unprobed_output_rejects_dns_name_resolving_to_loopback():
+    module = _runtime()
+    spider = _spider("https://backend.example")
+    spider._resolve_addresses = Mock(return_value={module.ipaddress.ip_address("127.0.0.1")})
+
+    assert spider._safe_atvp_play_output({
+        "parse": 0,
+        "url": "https://media.example/video.mp4",
+    }, deadline=time.monotonic() + 5) is False
 
 
 def test_external_redirect_to_trusted_internal_backend_is_rejected_before_second_request():

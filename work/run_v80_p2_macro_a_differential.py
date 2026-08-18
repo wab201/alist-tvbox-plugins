@@ -40,20 +40,24 @@ EXPECTED_FIXED_FIELDS = {
     "schema": "v80-p2-macro-a-runtime-differential/1",
     "seed": SEED,
     "cases": CASE_COUNT,
-    "equal": CASE_COUNT,
-    "different": 0,
     "errors": 0,
     "baseline_size": 616699,
     "baseline_sha256": "233C73CAE1048210B34872D4A10EA6023662300F70A8657DB82EA65C342182D4",
-    "development_size": 862377,
-    "development_sha256": "C1ACAB802121E3F69ADEA0EBF1AB271C14015124AA28D2D1F8F58F97C8481B7D",
-    "vendor_size": 61679,
-    "vendor_sha256": "53C6A87F2CFF65C4B9FABADF800D3D0F2291D90E3122174699F1DA4C2C8EF857",
-    "closure_sha256": "BD591DFEC19FA242F779AE93EBC9B01EB2787A63C25CECFBF0319D682DF355E8",
+    "development_size": 870797,
+    "development_sha256": "0CEBC73A78BCC8C7853A6BD0F0C78F4D95DD786C861425F9E0A4EC40FA0583F9",
+    "vendor_size": 64973,
+    "vendor_sha256": "5405EE86F10155B717852E3578750BFA9DE89073AB9BAD8FF3E92C58ACC77601",
+    "closure_sha256": "484FCBC3EB079CE3739AD08928D21F82E24101210AED012FC5FA6487553A7968",
     "module_count": 17,
-    "overlay_input_size": 678378,
-    "overlay_input_sha256": "3A8AD7ADB62372858A03E6B3790C85B6F17336CC8C00029B0E485A9E9593C253",
+    "overlay_input_size": 681672,
+    "overlay_input_sha256": "761EB09F5184A9B9914295A43B0A2F5AF1C46A414F8B0D0456477CA9A3639C01",
     "overlay_insertion_count": 8,
+    "output_switch_input_size": 865875,
+    "output_switch_input_sha256": "DCD2CE50277119998BE2D92631CC90C11B3DDC733CB7B397E072E62FE117E773",
+    "output_switch_size": 870797,
+    "output_switch_sha256": "0CEBC73A78BCC8C7853A6BD0F0C78F4D95DD786C861425F9E0A4EC40FA0583F9",
+    "output_switch_insertion_count": 9,
+    "controlled_switch_active": True,
     "shadow_calls": 30000,
     "disabled_shadow_calls": 0,
     "redacted_reports": True,
@@ -69,9 +73,12 @@ EXPECTED_DECISION_COUNTS = {
 }
 EXPECTED_REPORT_STATUS_COUNTS = {
     "different": 5000,
-    "equal": 5000,
-    "error": 5000,
+    "equal": 10000,
 }
+EXPECTED_ZERO_DIFFERENCE_SCENARIOS = frozenset((
+    "duplicate_job", "selected_equal", "selected_error",
+    "stale_worker", "submit_failure",
+))
 
 
 def _load_script(path, name):
@@ -224,7 +231,9 @@ def _make_case(rng, index, not_selected_key):
     }
 
 
-def _configure_owner(module, case, estimated_cost, shadow_enabled, futures):
+def _configure_owner(
+        module, case, estimated_cost, shadow_enabled, futures,
+        layered_output=False):
     owner = module.Spider.__new__(module.Spider)
     owner._cache_lock = threading.RLock()
     owner._cache_generation = 20
@@ -293,6 +302,13 @@ def _configure_owner(module, case, estimated_cost, shadow_enabled, futures):
     owner._resource_provider_key = lambda *values: next(
         (str(value) for value in values if value), ""
     )
+    if layered_output:
+        owner._alist_tvbox_plugin = True
+        owner._v80_resource_layered_output_enabled = (
+            owner._resource_layered_output_from_config({
+                "v80_resource_layered_output": True,
+            })
+        )
 
     if shadow_enabled:
         owner._resource_candidate_shadow_lock = threading.Lock()
@@ -347,6 +363,25 @@ def validation_errors(result):
         errors.append("decision_counts")
     if result.get("report_status_counts") != EXPECTED_REPORT_STATUS_COUNTS:
         errors.append("report_status_counts")
+    equal = result.get("equal")
+    different = result.get("different")
+    runtime_errors = result.get("errors")
+    if (
+            type(equal) is not int or type(different) is not int
+            or type(runtime_errors) is not int
+            or equal + different + runtime_errors != CASE_COUNT
+            or different < EXPECTED_SCENARIO_COUNTS["selected_different"]):
+        errors.append("outcome_counts")
+    scenario_differences = result.get("scenario_differences")
+    if (
+            not isinstance(scenario_differences, dict)
+            or set(scenario_differences) != set(SCENARIOS)
+            or sum(scenario_differences.values()) != different
+            or scenario_differences.get("selected_different")
+            != EXPECTED_SCENARIO_COUNTS["selected_different"]
+            or any(scenario_differences.get(name) != 0
+                   for name in EXPECTED_ZERO_DIFFERENCE_SCENARIOS)):
+        errors.append("scenario_differences")
     if result.get("first_failures") != []:
         errors.append("first_failures")
     return errors
@@ -363,10 +398,12 @@ def main(argv=None):
     baseline_result, development_result, baseline, development = _load_candidates()
     vendor = development_result["vendor"]
     overlay = development_result["overlay"]
+    output_switch = development_result["resource_output_switch_overlay"]
     estimated_cost = development.RESOURCE_CANDIDATE_SHADOW_ESTIMATED_COST_US
     not_selected_key = _find_not_selected_key(development, estimated_cost)
     rng = random.Random(SEED)
     scenario_counts = Counter()
+    scenario_differences = Counter({name: 0 for name in SCENARIOS})
     decision_counts = Counter()
     report_status_counts = Counter()
     shadow_results = []
@@ -375,6 +412,7 @@ def main(argv=None):
     equal = 0
     errors = 0
     first_failures = []
+    controlled_switch_active = True
     original_shadow = development.run_background_resource_candidate_shadow
 
     def capture_shadow(owner, legacy_rows, rows, **kwargs):
@@ -405,7 +443,14 @@ def main(argv=None):
                     baseline, case, estimated_cost, False, futures
                 )
                 development_owner, development_writes, development_refreshes = (
-                    _configure_owner(development, case, estimated_cost, True, futures)
+                    _configure_owner(
+                        development, case, estimated_cost, True, futures,
+                        layered_output=True,
+                    )
+                )
+                controlled_switch_active = (
+                    controlled_switch_active
+                    and development_owner._resource_layered_output_active()
                 )
                 expected = _run_schedule(
                     baseline, baseline_owner, case, baseline_writes, baseline_refreshes
@@ -436,13 +481,8 @@ def main(argv=None):
                     report_status_counts[result["report"]["status"]] += 1
             if expected == actual:
                 equal += 1
-            elif len(first_failures) < 10:
-                first_failures.append({
-                    "index": index,
-                    "scenario": case["scenario"],
-                    "expected": expected,
-                    "actual": actual,
-                })
+            else:
+                scenario_differences[case["scenario"]] += 1
     finally:
         development.run_background_resource_candidate_shadow = original_shadow
 
@@ -465,7 +505,14 @@ def main(argv=None):
         "overlay_input_size": overlay["input_size"],
         "overlay_input_sha256": overlay["input_sha256"],
         "overlay_insertion_count": len(overlay["insertions"]),
+        "output_switch_input_size": output_switch["input_size"],
+        "output_switch_input_sha256": output_switch["input_sha256"],
+        "output_switch_size": output_switch["size"],
+        "output_switch_sha256": output_switch["sha256"],
+        "output_switch_insertion_count": len(output_switch["insertions"]),
+        "controlled_switch_active": controlled_switch_active,
         "scenario_counts": dict(sorted(scenario_counts.items())),
+        "scenario_differences": dict(sorted(scenario_differences.items())),
         "decision_counts": dict(sorted(decision_counts.items())),
         "report_status_counts": dict(sorted(report_status_counts.items())),
         "shadow_calls": len(shadow_results),

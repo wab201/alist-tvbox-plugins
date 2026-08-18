@@ -13,7 +13,9 @@ from src.douban_tmdb_follow_single.resource_search_plan import (
     SUPPLEMENT_PROVIDER_LAYER,
 )
 from src.douban_tmdb_follow_single.resource_search_v70_adapter import (
+    build_v70_layered_resource_rows,
     build_v70_layered_resource_shadow,
+    combine_v70_layered_resource_rows,
 )
 
 
@@ -118,3 +120,130 @@ def test_unknown_v70_mode_is_rejected():
             [{"vod_id": "one", "_resource_mode": "future"}],
             available_modes=["vod"],
         )
+
+
+def test_raw_batches_preserve_complete_rows_and_hide_them_from_repr():
+    row = {
+        "vod_id": "raw-one",
+        "vod_name": "Raw One",
+        "_resource_mode": "vod",
+        "headers": {"Referer": "https://media.example/"},
+        "links": [{"url": "https://media.example/play"}],
+        "vod_remarks": "原始备注",
+        "private_payload": {"play_id": "opaque"},
+    }
+
+    batches = build_v70_layered_resource_rows([row], available_modes=["vod"])
+
+    assert _pairs(batches) == [(FAST_PROVIDER_LAYER, "vod")]
+    assert batches[0].rows == (row,)
+    assert batches[0].rows[0] is not row
+    assert tuple(batches[0].rows[0]) == tuple(row)
+    assert "media.example" not in repr(batches[0])
+
+
+def test_raw_combiner_keeps_layer_priority_and_complete_payloads():
+    rows = [
+        {
+            "vod_id": "cache-low",
+            "_resource_mode": "vod",
+            "score": 1,
+            "preference": (1,),
+            "provider": "a",
+            "headers": {"X-Cache": "low"},
+        },
+        {
+            "vod_id": "cache-high",
+            "_resource_mode": "vod",
+            "score": 2,
+            "preference": (2,),
+            "provider": "b",
+            "links": [{"url": "cache-high"}],
+        },
+        {
+            "vod_id": "recent",
+            "_resource_mode": "vod1",
+            "score": 9,
+            "preference": (9,),
+            "provider": "c",
+            "vod_remarks": "recent-row",
+        },
+        {
+            "vod_id": "provider-vod",
+            "_resource_mode": "vod",
+            "score": 99,
+            "preference": (99,),
+            "provider": "d",
+            "private_payload": {"play_id": "vod"},
+        },
+        {
+            "vod_id": "provider-pan",
+            "_resource_mode": "pansou",
+            "score": 100,
+            "preference": (100,),
+            "provider": "e",
+            "private_payload": {"play_id": "pan"},
+        },
+    ]
+
+    result = combine_v70_layered_resource_rows(
+        rows,
+        cached_rows=rows[:2],
+        recent_resource_id="recent",
+        available_modes=("pansou", "vod", "vod1"),
+        merge_rows=lambda left, right: dict(left, **right),
+        score_row=lambda row: row["score"],
+        preference_row=lambda row: row["preference"],
+        provider_row=lambda row: row["provider"],
+    )
+
+    assert [row["vod_id"] for row in result] == [
+        "cache-high", "cache-low", "recent", "provider-vod", "provider-pan",
+    ]
+    assert result[0]["links"] == [{"url": "cache-high"}]
+    assert result[1]["headers"] == {"X-Cache": "low"}
+    assert result[2]["vod_remarks"] == "recent-row"
+    assert result[-1]["private_payload"] == {"play_id": "pan"}
+
+
+def test_raw_combiner_reuses_the_frozen_merge_owner_within_a_layer():
+    rows = [
+        {
+            "vod_id": "duplicate",
+            "_resource_mode": "vod",
+            "score": 4,
+            "preference": (1,),
+            "provider": "one",
+            "headers": {"Referer": "first"},
+        },
+        {
+            "vod_id": "duplicate",
+            "_resource_mode": "vod",
+            "score": 4,
+            "preference": (1,),
+            "provider": "one",
+            "links": [{"url": "second"}],
+        },
+    ]
+    merge_calls = []
+
+    def merge_rows(left, right):
+        merge_calls.append((left["vod_id"], right["vod_id"]))
+        merged = dict(left)
+        merged.update(right)
+        merged["headers"] = left["headers"]
+        return merged
+
+    result = combine_v70_layered_resource_rows(
+        rows,
+        available_modes=("vod",),
+        merge_rows=merge_rows,
+        score_row=lambda row: row["score"],
+        preference_row=lambda row: row["preference"],
+        provider_row=lambda row: row["provider"],
+    )
+
+    assert merge_calls == [("duplicate", "duplicate")]
+    assert len(result) == 1
+    assert result[0]["headers"] == {"Referer": "first"}
+    assert result[0]["links"] == [{"url": "second"}]

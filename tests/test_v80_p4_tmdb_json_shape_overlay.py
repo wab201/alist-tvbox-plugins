@@ -104,9 +104,9 @@ def test_overlay_is_deterministic_and_has_one_narrow_insertion():
 
     assert first == second
     assert first["insertions"] == ("tmdb-json-shape",)
-    assert first["input_size"] == 825944
+    assert first["input_size"] == 829442
     assert first["input_sha256"] == (
-        "8FB4EEDAB97057412D622881A074BDA6D04F76617B81CA6802B6D34525FB70F0"
+        "689565138E7093BBC6511EA2AE98CB8DB06F4344857B327AA95A18F431B9FCBA"
     )
 
 

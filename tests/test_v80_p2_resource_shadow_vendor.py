@@ -17,7 +17,9 @@ from src.douban_tmdb_follow_single.resource_candidate_shadow_composition import 
     compose_resource_candidate_shadow,
 )
 from src.douban_tmdb_follow_single.resource_search_v70_adapter import (
+    build_v70_layered_resource_rows,
     build_v70_layered_resource_shadow,
+    combine_v70_layered_resource_rows,
 )
 
 
@@ -152,7 +154,9 @@ def test_vendor_module_imports_from_an_independent_path(tmp_path):
     assert callable(vendor.get_resource_provider_adapter)
     assert callable(vendor.build_resource_search_plan)
     assert callable(vendor.build_layered_resource_shadow)
+    assert callable(vendor.build_v70_layered_resource_rows)
     assert callable(vendor.build_v70_layered_resource_shadow)
+    assert callable(vendor.combine_v70_layered_resource_rows)
     assert callable(vendor.build_resource_search_layered_shadow_report)
     assert callable(vendor.run_resource_search_layered_shadow)
 
@@ -183,6 +187,33 @@ def test_vendored_v70_layered_search_matches_the_source(tmp_path):
     actual = [batch.to_dict() for batch in vendor.build_v70_layered_resource_shadow(rows, **kwargs)]
 
     assert actual == expected
+
+
+def test_vendored_raw_layered_rows_and_combiner_match_the_source(tmp_path):
+    _, vendor = _load_vendor(tmp_path)
+    rows = _rows()
+    kwargs = {
+        "available_modes": ("vod1", "vod"),
+        "merge_rows": _merge_rows,
+        "score_row": _score_row,
+        "preference_row": _preference_row,
+        "provider_row": _provider_row,
+    }
+
+    source_batches = build_v70_layered_resource_rows(
+        rows, available_modes=kwargs["available_modes"],
+    )
+    vendor_batches = vendor.build_v70_layered_resource_rows(
+        rows, available_modes=kwargs["available_modes"],
+    )
+    assert [
+        (batch.step.to_dict(), list(batch.rows)) for batch in vendor_batches
+    ] == [
+        (batch.step.to_dict(), list(batch.rows)) for batch in source_batches
+    ]
+    assert vendor.combine_v70_layered_resource_rows(rows, **kwargs) == (
+        combine_v70_layered_resource_rows(rows, **kwargs)
+    )
 
 
 @pytest.mark.parametrize(

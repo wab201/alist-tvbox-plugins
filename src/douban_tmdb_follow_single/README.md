@@ -855,12 +855,35 @@ blockers without adding a generic redirect or session layer. The fixed Douban JS
 TMDB, wishlist, and user-id owners disable Requests automatic redirects; user-id 3xx
 responses are not followed or read, while 200 responses use the existing 256 KiB limit,
 absolute deadline, and single close owner. The three focused P4 overlay files pass 66 tests.
-The resulting candidate is 862377 bytes with SHA-256
+That review's candidate is 862377 bytes with SHA-256
 `C1ACAB802121E3F69ADEA0EBF1AB271C14015124AA28D2D1F8F58F97C8481B7D`.
 The maintenance alias table above covers the exact 46-unit set: 10 ordered chunks and all
 36 root Python modules. The final content-addressed report for this batch is fixed at
 `work/v80-p5-5f-redirect-boundary-alias-closure-r6-20260818.json`; private canary work is
 not authorized unless that report passes all required steps.
+
+A later atomic owner audit found one remaining V80-only gap: an unprobed ATVP output
+could still use the weak URL-shape check after DNS/media probing returned no result. The
+minimal fix keeps all ten shared V70 chunks byte-identical and expands only the V80 route
+overlay from four to nine explicit seams. `_safe_atvp_play_output`, both foreground player
+fallbacks, and the resource-detail probe/fallback paths now reuse the strict resolved-target
+policy with the existing absolute deadline. The current candidate is 862581 bytes with
+SHA-256 `87DCAC75E7F60CA70219EA99C238940E756D53D17A82D2FE684622A38CD5BADC`;
+write/check passed and the focused composite closure is 318 passed. Atomic source evidence
+is recorded in `work/v80-source-owner-audit-20260818.json`.
+
+The raw-row-preserving combiner and private-V80-only controlled switch now share one
+`_resource_output_candidate_order` owner across foreground and background output. The switch
+is disabled by default and is accepted only for the raw-plugin private configuration. A
+combiner exception performs one legacy fallback without retry. The development candidate is
+870797 bytes with SHA-256
+`0CEBC73A78BCC8C7853A6BD0F0C78F4D95DD786C861425F9E0A4EC40FA0583F9`; Macro A has
+50,000 cases, 14,736 controlled differences, and zero errors, while Macro B is 50,000 equal
+with zero errors and Chaos is 13/13. The independent `private/v80/` package is also staged as
+`douban_tmdb_follow_single_v80_private` version 80. Its source is 870801 bytes with SHA-256
+`049C722515F6851C379969C2886FA466EDD9FC9478B6B6F591E757DEEEDDCB97`; ATVP direct-play
+and dual-runtime checks pass. Server and MuMu deployment must wait for the new changed-node
+dependency-graph closure.
 
 Write and then check the independent V80 development output:
 

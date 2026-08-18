@@ -14,14 +14,28 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMD
 
 ## V80 当前状态（2026-08-18）
 
-V80 的 P1-P5 本地工程链已经完成，项目级安全复核又关闭了固定 Douban
-JSON/HTML、TMDB、想看动作和用户 ID owner 的自动重定向/无界读取缺口。当前隔离候选为
-`862377` bytes、SHA256
-`C1ACAB802121E3F69ADEA0EBF1AB271C14015124AA28D2D1F8F58F97C8481B7D`；三个 P4
-聚焦文件 `66 passed`，46 个维护单元中文别名覆盖为 `46/46`。最终增量 closure 固定写入
-`work/v80-p5-5f-redirect-boundary-alias-closure-r6-20260818.json`。该报告、候选 Git
-提交、私有灰度、真实环境验证、回退演练和人工批准关闭前，本页部署步骤继续只适用于公开
-V70，禁止覆盖公开源码或把根 `spiders_v2.json` 切换到 V80。
+V80 的 P1、P3、P4、P5 本地能力链已经完成；P2 raw-row-preserving 分层组合器和
+private-V80-only controlled switch 已完成本地接管验证。前台与背景共用同一 output owner，
+switch 默认关闭，combiner 异常只执行一次 legacy fallback。当前开发候选为 `870797` bytes、
+SHA256 `0CEBC73A78BCC8C7853A6BD0F0C78F4D95DD786C861425F9E0A4EC40FA0583F9`；Macro A
+`50000` 例、`14736` 个受控差异、`0 errors`，Macro B `50000 equal`，Chaos `13/13`，
+ATVP、双运行时与 FongMi 分类合同通过。独立私有 staging 已生成但尚未部署；当前仍须完成
+文档后的静默双指纹与变化节点 DAG closure，不能复用较早的 r4 报告冒充新封印。
+
+## V80 私有部署边界
+
+- 允许把固定 V80 候选部署到私有容器、私有插件 ID 或私有配置；不得覆盖公开 V70 源码、
+  根 `spiders_v2.json` 或公共订阅。
+- 私有合同已生成在 `private/v80/`：`id=douban_tmdb_follow_single_v80_private`、初始
+  `version=80`、独立 `spiders_v2.json` 和 `staging/`。私有源码为 `870801` bytes、SHA256
+  `049C722515F6851C379969C2886FA466EDD9FC9478B6B6F591E757DEEEDDCB97`；本地 builder、
+  ATVP direct-play 与双运行时门禁通过。导入前仍须等待本轮 DAG closure。
+- 私有 EXT 必须保留 `atvp_plugin_mode=alist-tvbox-raw` 并显式设置
+  `v80_resource_layered_output=true`；未设置时继续走旧排序路径。
+- MuMu 使用已经安装的 FongMi 版本刷新私有配置，不另外安装新版客户端。
+- 私有部署撤回只删除/禁用私有 V80 条目或恢复上一份私有配置，并复核私有运行时 SHA256；
+  公开 V70 始终保持不变，不执行 V70 原子回退。
+- 服务器、MuMu/FongMi 和真实播放/History 结果必须单独记录为人工或运行时证据，不能由本地门禁代替。
 
 ## V80 历史封板记录
 

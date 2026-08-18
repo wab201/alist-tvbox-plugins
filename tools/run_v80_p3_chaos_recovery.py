@@ -2,6 +2,7 @@
 
 import argparse
 import importlib.util
+import ipaddress
 import json
 import os
 import socket
@@ -31,6 +32,7 @@ EXPECTED_RECOVERY_MS = {
     "truncated_json": 0,
     "oversized_json_boundary": 0,
     "stale_lifecycle_task": 0,
+    "resource_combiner_fail_open": 0,
 }
 
 
@@ -474,6 +476,9 @@ def _expired_play_url_scenario():
     spider._prepare_player_candidates = lambda candidates: list(candidates)
     spider._atvp_play = lambda *args, **kwargs: dict(play_outputs.pop(0))
     spider._probe_media_output = lambda *args, **kwargs: probes.pop(0)
+    spider._resolve_addresses = lambda *_args, **_kwargs: {
+        ipaddress.ip_address("1.1.1.1")
+    }
     spider._record_route_quality = lambda *args, **kwargs: None
     spider._cache_route_probe = lambda *args, **kwargs: None
     spider._remember_successful_follow_route = lambda *args, **kwargs: None
@@ -535,6 +540,59 @@ def _stale_lifecycle_scenario():
         spider.destroy()
 
 
+def _resource_combiner_fail_open_scenario():
+    module = _runtime_module()
+    spider = _new_spider(module)
+    original_combiner = module.combine_v70_layered_resource_rows
+    calls = {"combiner": 0, "legacy": 0}
+    rows = [
+        {"vod_id": "vod-one", "vod_name": "One", "_resource_mode": "vod"},
+        {"vod_id": "pan-one", "vod_name": "Two", "_resource_mode": "pansou"},
+    ]
+    item = {"title": "Fixture", "tmdb_id": "1"}
+    fallback = [dict(rows[1]), dict(rows[0])]
+
+    def fail_combiner(*args, **kwargs):
+        calls["combiner"] += 1
+        raise RuntimeError("fixture combiner failure")
+
+    def legacy_order(actual_rows, actual_item, bound="", modes=None):
+        calls["legacy"] += 1
+        _require(actual_rows is rows, "legacy fallback did not receive the original rows")
+        _require(actual_item is item, "legacy fallback did not receive the original item")
+        _require(bound == "", "background legacy fallback binding changed")
+        _require(tuple(modes or ()) == ("vod", "pansou"), "legacy fallback modes changed")
+        return fallback
+
+    try:
+        module.combine_v70_layered_resource_rows = fail_combiner
+        spider._resource_fair_candidate_order = legacy_order
+        spider._v80_resource_layered_output_enabled = True
+        output = spider._resource_output_candidate_order(
+            rows,
+            item,
+            bound="layered-bound",
+            cached_rows=({"vod_id": "cached"},),
+            modes=("vod", "pansou"),
+            legacy_bound="",
+        )
+        _require(output is fallback, "legacy fallback output was not returned")
+        _require(calls["combiner"] == 1, "combiner failure was retried")
+        _require(calls["legacy"] == 1, "legacy fallback did not execute exactly once")
+        return {
+            "recovery_ms": 0,
+            "switch_active": True,
+            "combiner_calls": calls["combiner"],
+            "legacy_fallback_calls": calls["legacy"],
+            "retry_attempts": 0,
+            "legacy_bound": "",
+            "fallback_preserved": True,
+        }
+    finally:
+        module.combine_v70_layered_resource_rows = original_combiner
+        spider.destroy()
+
+
 def _scenario_functions():
     module = _runtime_module()
     max_bytes = int(module.Spider.RESOURCE_API_RESPONSE_MAX_BYTES)
@@ -563,6 +621,7 @@ def _scenario_functions():
             b" " * (max_bytes + 1), oversized=True,
         ),
         "stale_lifecycle_task": _stale_lifecycle_scenario,
+        "resource_combiner_fail_open": _resource_combiner_fail_open_scenario,
     }
 
 

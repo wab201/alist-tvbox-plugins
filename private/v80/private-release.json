@@ -1,0 +1,51 @@
+{
+  "schema": "v80-private-release/1",
+  "contract": "private_v80_only",
+  "id": "douban_tmdb_follow_single_v80_private",
+  "version": 80,
+  "source_candidate": {
+    "path": "build/v80-dev/豆瓣TMDB追更单入口.py",
+    "bytes": 870797,
+    "sha256": "0CEBC73A78BCC8C7853A6BD0F0C78F4D95DD786C861425F9E0A4EC40FA0583F9"
+  },
+  "staged_source": {
+    "path": "private/v80/staging/豆瓣TMDB追更单入口.py",
+    "bytes": 870801,
+    "sha256": "049C722515F6851C379969C2886FA466EDD9FC9478B6B6F591E757DEEEDDCB97"
+  },
+  "private_index": {
+    "path": "private/v80/spiders_v2.json",
+    "bytes": 152,
+    "sha256": "932E5CAB8808C5D7EF4FC80EE5DB8BB6947D9E91C6375900C7672A2231F92DCA",
+    "file_is_relative_to_index": true
+  },
+  "controlled_switch": {
+    "default_enabled": false,
+    "required_extend": {
+      "atvp_plugin_mode": "alist-tvbox-raw",
+      "v80_resource_layered_output": true
+    }
+  },
+  "public_v70": {
+    "path": "py/豆瓣TMDB追更单入口.py",
+    "bytes": 616699,
+    "sha256": "233C73CAE1048210B34872D4A10EA6023662300F70A8657DB82EA65C342182D4",
+    "modified": false
+  },
+  "public_index": {
+    "path": "spiders_v2.json",
+    "bytes": 230,
+    "sha256": "436AD14B4CA2E2B5241C90F4FC10973B866FB06E950488C60362EB12ADEB7445",
+    "modified": false
+  },
+  "evidence": {
+    "path": "work/v80-p2-controlled-output-switch-evidence-20260818.json",
+    "bytes": 9442,
+    "sha256": "40167BAF2EFDDAAC9F52D43AAFEAD70C55D3171EEC0051A59BBAC409FD2313E3"
+  },
+  "deployment": {
+    "server": "not_executed",
+    "mumu": "not_executed",
+    "public_v70_rollback": "not_applicable"
+  }
+}

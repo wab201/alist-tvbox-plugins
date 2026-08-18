@@ -45,6 +45,37 @@ def _join(thread, timeout=5.0):
     assert not thread.is_alive()
 
 
+def test_player_rejects_unprobed_private_output_outside_backend_origin(monkeypatch):
+    module = _load_candidate()
+    spider = module.Spider()
+    spider.init(_config("private-target"))
+    target = "http://10.0.0.8/video.mp4"
+    play_id = spider._build_followplay(
+        target,
+        {
+            "media_type": "movie",
+            "tmdb_id": 42,
+            "source_id": "source-42",
+            "title": "Playback Fixture",
+            "year": 2026,
+        },
+        "42", 1, 1, "正片",
+    )
+    monkeypatch.setattr(spider, "_probe_media_output", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        spider,
+        "_resolve_addresses",
+        lambda *_args, **_kwargs: {module.ipaddress.ip_address("10.0.0.8")},
+    )
+
+    try:
+        result = spider.playerContent("不安全线路", play_id, [])
+        assert result["url"] == ""
+        assert "媒体Range验证失败" in result["msg"]
+    finally:
+        spider.destroy()
+
+
 def test_player_resume_side_effect_linearizes_before_live_init(monkeypatch):
     module = _load_candidate()
     spider = module.Spider()

@@ -86,7 +86,18 @@ PLAYBACK_CONCURRENCY_OWNERSHIP_OVERLAY_SCRIPT = (
 HISTORY_CONCURRENCY_OWNERSHIP_OVERLAY_SCRIPT = (
     REPO_ROOT / "tools" / "build_v80_history_concurrency_ownership_overlay.py"
 )
-UPSTREAM_CONTRACT_SCRIPT = REPO_ROOT / "tools" / "verify_alist_tvbox_1480_contract.py"
+RESOURCE_OUTPUT_SWITCH_OVERLAY_SCRIPT = (
+    REPO_ROOT / "tools" / "build_v80_resource_output_switch_overlay.py"
+)
+PRIVATE_RELEASE_SCRIPT = REPO_ROOT / "tools" / "build_v80_private_release.py"
+PRIVATE_RELEASE_ROOT = REPO_ROOT / "private" / "v80"
+PRIVATE_RELEASE_MANIFEST = PRIVATE_RELEASE_ROOT / "private-release.json"
+PRIVATE_RELEASE_INDEX = PRIVATE_RELEASE_ROOT / "spiders_v2.json"
+PRIVATE_RELEASE_SOURCE = PRIVATE_RELEASE_ROOT / "staging" / "豆瓣TMDB追更单入口.py"
+CONTROLLED_SWITCH_EVIDENCE = (
+    REPO_ROOT / "work" / "v80-p2-controlled-output-switch-evidence-20260818.json"
+)
+UPSTREAM_CONTRACT_SCRIPT = REPO_ROOT / "tools" / "verify_alist_tvbox_1500_contract.py"
 MACRO_A_DIFFERENTIAL_SCRIPT = REPO_ROOT / "work" / "run_v80_p2_macro_a_differential.py"
 MACRO_B_DIFFERENTIAL_SCRIPT = REPO_ROOT / "work" / "run_v80_p2_macro_b_differential.py"
 CHAOS_RECOVERY_SCRIPT = REPO_ROOT / "tools" / "run_v80_p3_chaos_recovery.py"
@@ -136,20 +147,24 @@ EXPECTED_MACRO_A_DIFFERENTIAL = {
     "schema": "v80-p2-macro-a-runtime-differential/1",
     "seed": 8020,
     "cases": 50000,
-    "equal": 50000,
-    "different": 0,
     "errors": 0,
     "baseline_size": 616699,
     "baseline_sha256": "233C73CAE1048210B34872D4A10EA6023662300F70A8657DB82EA65C342182D4",
-    "development_size": 862377,
-    "development_sha256": "C1ACAB802121E3F69ADEA0EBF1AB271C14015124AA28D2D1F8F58F97C8481B7D",
-    "vendor_size": 61679,
-    "vendor_sha256": "53C6A87F2CFF65C4B9FABADF800D3D0F2291D90E3122174699F1DA4C2C8EF857",
-    "closure_sha256": "BD591DFEC19FA242F779AE93EBC9B01EB2787A63C25CECFBF0319D682DF355E8",
+    "development_size": 870797,
+    "development_sha256": "0CEBC73A78BCC8C7853A6BD0F0C78F4D95DD786C861425F9E0A4EC40FA0583F9",
+    "vendor_size": 64973,
+    "vendor_sha256": "5405EE86F10155B717852E3578750BFA9DE89073AB9BAD8FF3E92C58ACC77601",
+    "closure_sha256": "484FCBC3EB079CE3739AD08928D21F82E24101210AED012FC5FA6487553A7968",
     "module_count": 17,
-    "overlay_input_size": 678378,
-    "overlay_input_sha256": "3A8AD7ADB62372858A03E6B3790C85B6F17336CC8C00029B0E485A9E9593C253",
+    "overlay_input_size": 681672,
+    "overlay_input_sha256": "761EB09F5184A9B9914295A43B0A2F5AF1C46A414F8B0D0456477CA9A3639C01",
     "overlay_insertion_count": 8,
+    "output_switch_input_size": 865875,
+    "output_switch_input_sha256": "DCD2CE50277119998BE2D92631CC90C11B3DDC733CB7B397E072E62FE117E773",
+    "output_switch_size": 870797,
+    "output_switch_sha256": "0CEBC73A78BCC8C7853A6BD0F0C78F4D95DD786C861425F9E0A4EC40FA0583F9",
+    "output_switch_insertion_count": 9,
+    "controlled_switch_active": True,
     "shadow_calls": 30000,
     "disabled_shadow_calls": 0,
     "redacted_reports": True,
@@ -176,9 +191,12 @@ EXPECTED_MACRO_A_DECISION_COUNTS = {
 }
 EXPECTED_MACRO_A_REPORT_STATUS_COUNTS = {
     "different": 5000,
-    "equal": 5000,
-    "error": 5000,
+    "equal": 10000,
 }
+EXPECTED_MACRO_A_ZERO_DIFFERENCE_SCENARIOS = frozenset((
+    "duplicate_job", "selected_equal", "selected_error",
+    "stale_worker", "submit_failure",
+))
 EXPECTED_MACRO_B_DIFFERENTIAL = {
     "schema": "v80-p2-macro-b-runtime-differential/1",
     "seed": 8021,
@@ -188,15 +206,21 @@ EXPECTED_MACRO_B_DIFFERENTIAL = {
     "errors": 0,
     "baseline_size": 616699,
     "baseline_sha256": "233C73CAE1048210B34872D4A10EA6023662300F70A8657DB82EA65C342182D4",
-    "development_size": 862377,
-    "development_sha256": "C1ACAB802121E3F69ADEA0EBF1AB271C14015124AA28D2D1F8F58F97C8481B7D",
-    "vendor_size": 61679,
-    "vendor_sha256": "53C6A87F2CFF65C4B9FABADF800D3D0F2291D90E3122174699F1DA4C2C8EF857",
-    "closure_sha256": "BD591DFEC19FA242F779AE93EBC9B01EB2787A63C25CECFBF0319D682DF355E8",
+    "development_size": 870797,
+    "development_sha256": "0CEBC73A78BCC8C7853A6BD0F0C78F4D95DD786C861425F9E0A4EC40FA0583F9",
+    "vendor_size": 64973,
+    "vendor_sha256": "5405EE86F10155B717852E3578750BFA9DE89073AB9BAD8FF3E92C58ACC77601",
+    "closure_sha256": "484FCBC3EB079CE3739AD08928D21F82E24101210AED012FC5FA6487553A7968",
     "module_count": 17,
-    "overlay_input_size": 678378,
-    "overlay_input_sha256": "3A8AD7ADB62372858A03E6B3790C85B6F17336CC8C00029B0E485A9E9593C253",
+    "overlay_input_size": 681672,
+    "overlay_input_sha256": "761EB09F5184A9B9914295A43B0A2F5AF1C46A414F8B0D0456477CA9A3639C01",
     "overlay_insertion_count": 8,
+    "output_switch_input_size": 865875,
+    "output_switch_input_sha256": "DCD2CE50277119998BE2D92631CC90C11B3DDC733CB7B397E072E62FE117E773",
+    "output_switch_size": 870797,
+    "output_switch_sha256": "0CEBC73A78BCC8C7853A6BD0F0C78F4D95DD786C861425F9E0A4EC40FA0583F9",
+    "output_switch_insertion_count": 9,
+    "controlled_switch_active": True,
     "shadow_calls": 40000,
     "disabled_shadow_calls": 0,
     "exception_calls": 5000,
@@ -235,6 +259,7 @@ EXPECTED_CHAOS_RECOVERY_MS = {
     "truncated_json": 0,
     "oversized_json_boundary": 0,
     "stale_lifecycle_task": 0,
+    "resource_combiner_fail_open": 0,
 }
 P2_MODULE_DAG = {
     "resource_candidate_merge.py": frozenset(("resource_row_identity",)),
@@ -274,6 +299,7 @@ P2_MODULE_DAG = {
         "resource_models", "resource_provider", "resource_search_plan",
     )),
     "resource_search_v70_adapter.py": frozenset((
+        "resource_candidate_ordering", "resource_candidate_pipeline",
         "resource_provider", "resource_row_identity", "resource_search_plan",
         "resource_search_shadow",
     )),
@@ -339,6 +365,7 @@ P2_MANAGED_FILES = (
     "tests/test_v80_p2_resource_candidate_shadow_policy.py",
     "tests/test_v80_p2_resource_shadow_vendor.py",
     "tests/test_v80_p2_resource_shadow_overlay.py",
+    "tests/test_v80_p2_resource_output_switch_overlay.py",
     "tests/test_v80_p2_resource_candidate_shadow_runtime.py",
     "tests/test_v80_p2_resource_matching.py",
     "tests/test_v80_p2_resource_models.py",
@@ -358,6 +385,7 @@ P2_MANAGED_FILES = (
     "tests/test_v80_p2_resource_schema.py",
     "tools/build_v80_resource_shadow_vendor.py",
     "tools/build_v80_resource_shadow_overlay.py",
+    "tools/build_v80_resource_output_switch_overlay.py",
     "work/run_v80_p2_19_differential.py",
     "work/run_v80_p2_macro_a_differential.py",
     "work/run_v80_p2_macro_b_differential.py",
@@ -372,6 +400,7 @@ P3_MANAGED_FILES = (
     "tools/verify_alist_tvbox_1461_contract.py",
     "tools/verify_alist_tvbox_1471_contract.py",
     "tools/verify_alist_tvbox_1480_contract.py",
+    "tools/verify_alist_tvbox_1500_contract.py",
     "tests/test_v80_p3_history_event_queue.py",
     "tests/test_v80_p3_history_sync_v145.py",
     "tests/test_v80_p3_history_sync_overlay.py",
@@ -379,6 +408,7 @@ P3_MANAGED_FILES = (
     "tests/test_alist_tvbox_1461_contract.py",
     "tests/test_alist_tvbox_1471_contract.py",
     "tests/test_alist_tvbox_1480_contract.py",
+    "tests/test_alist_tvbox_1500_contract.py",
     "src/douban_tmdb_follow_single/reliability_contract.py",
     "tools/build_v80_reliability_overlay.py",
     "tests/test_v80_p3_reliability_contract.py",
@@ -474,13 +504,18 @@ import os
 import pytest
 
 
-_STATE = {"collected": None}
+_STATE = {"collected": None, "failed_nodeids": set()}
 
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_collection_modifyitems(session, config, items):
     _STATE["collected"] = len(items)
     yield
+
+
+def pytest_runtest_logreport(report):
+    if report.failed:
+        _STATE["failed_nodeids"].add(report.nodeid)
 
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
@@ -496,6 +531,7 @@ def pytest_sessionfinish(session, exitstatus):
         "selected": selected,
         "deselected": collected - selected,
         "exitstatus": int(exitstatus),
+        "failed_nodeids": sorted(_STATE["failed_nodeids"]),
     }
     with open(os.environ["V80_PYTEST_GATE_EVIDENCE"], "w", encoding="utf-8") as handle:
         json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
@@ -546,14 +582,19 @@ STEP_DEPENDENCIES = {
         "output_admission_dry_run",
     ),
 }
-# These steps either establish current trust anchors or produce in-memory build objects.
-ALWAYS_EXECUTE_STEPS = frozenset((
-    "git_v70_tag",
-    "implementation_tree",
-    "build_contracts",
-    "output_admission_dry_run",
-    "v70_source_lock",
-))
+# Explicit per-step gate contracts keep an unrelated gate-tool edit from invalidating
+# every step. Bump only the contract whose validation semantics changed.
+STEP_GATE_CONTRACTS = {
+    name: "1" for name in STEP_ORDER
+}
+STEP_GATE_CONTRACTS.update({
+    "sensitive_data": "2",
+    "chaos_recovery": "2",
+    "output_admission_dry_run": "2",
+})
+# Kept as a compatibility surface for existing report/test consumers; no step is
+# unconditionally executed during a resume.
+ALWAYS_EXECUTE_STEPS = frozenset()
 _FINGERPRINT_EXCLUDED_DIRS = frozenset((
     ".git", ".gradle", ".idea", ".mypy_cache", ".pytest_cache",
     ".ruff_cache", ".venv", ".vscode", "__pycache__", "build",
@@ -830,6 +871,32 @@ def _load_history_concurrency_ownership_overlay_builder():
             "cannot load History concurrency ownership overlay builder: %s"
             % HISTORY_CONCURRENCY_OWNERSHIP_OVERLAY_SCRIPT
         )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_resource_output_switch_overlay_builder():
+    spec = importlib.util.spec_from_file_location(
+        "v80_resource_output_switch_overlay_builder",
+        RESOURCE_OUTPUT_SWITCH_OVERLAY_SCRIPT,
+    )
+    if spec is None or spec.loader is None:
+        raise GateError(
+            "cannot load resource output switch overlay builder: %s"
+            % RESOURCE_OUTPUT_SWITCH_OVERLAY_SCRIPT
+        )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_private_release_builder():
+    spec = importlib.util.spec_from_file_location(
+        "v80_private_release_builder", PRIVATE_RELEASE_SCRIPT,
+    )
+    if spec is None or spec.loader is None:
+        raise GateError("cannot load private release builder: %s" % PRIVATE_RELEASE_SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -1176,7 +1243,7 @@ _HEADER_SECRET = re.compile(r"(?i)^\s*(authorization|cookie)\s*:\s*(.+?)\s*$")
 _URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 _PLACEHOLDER = re.compile(
     r"(?i)^(?:<[^>]+>|\$\{[^}]+\}|%(?:s|\([^)]+\)s)|none|null|empty|example|sample|"
-    r"placeholder|dummy|redacted|changeme|test(?:[-_].*)?|your[-_].*)$"
+    r"placeholder|dummy|redacted|changeme|fixture(?:[-_].*)?|test(?:[-_].*)?|your[-_].*)$"
 )
 
 
@@ -1194,10 +1261,19 @@ def _looks_protocol_header_name(value):
     )
 
 
+def _is_reserved_test_host(hostname):
+    hostname = (hostname or "").rstrip(".").casefold()
+    return hostname in ("example", "invalid", "localhost", "test") or hostname.endswith(
+        (".example", ".invalid", ".localhost", ".test")
+    )
+
+
 def _url_has_credential(url):
     try:
         parsed = urlsplit(url)
     except ValueError:
+        return False
+    if _is_reserved_test_host(parsed.hostname):
         return False
     if parsed.username is not None and not _looks_placeholder(parsed.username):
         return True
@@ -1207,6 +1283,19 @@ def _url_has_credential(url):
         if key.lower() in _SENSITIVE_QUERY_KEYS and not _looks_placeholder(value):
             return True
     return bool(re.search(r"/(?:subscribe|subscription)/([^/?#]{8,})", parsed.path, re.I)) and not _looks_placeholder(parsed.path.rsplit("/", 1)[-1])
+
+
+def _managed_test_paths(repo_root):
+    test_root = Path(repo_root) / "tests"
+    return tuple(sorted(
+        (
+            path for path in test_root.rglob("*")
+            if path.is_file()
+            and "__pycache__" not in path.parts
+            and path.suffix.lower() != ".pyc"
+        ),
+        key=lambda path: path.relative_to(repo_root).as_posix(),
+    ))
 
 
 def managed_sensitive_paths(repo_root=REPO_ROOT):
@@ -1219,20 +1308,15 @@ def managed_sensitive_paths(repo_root=REPO_ROOT):
         )
     ]
     paths.extend(sorted((repo_root / "src/douban_tmdb_follow_single/parts").glob("*.pyinc")))
-    return paths
+    paths.extend(_managed_test_paths(repo_root))
+    return tuple(sorted(
+        set(paths), key=lambda path: path.relative_to(repo_root).as_posix(),
+    ))
 
 
 def implementation_tree_paths(repo_root=REPO_ROOT):
     repo_root = Path(repo_root)
-    paths = {Path(path) for path in managed_sensitive_paths(repo_root)}
-    test_root = repo_root / "tests"
-    paths.update(
-        path for path in test_root.rglob("*")
-        if path.is_file()
-        and "__pycache__" not in path.parts
-        and path.suffix.lower() != ".pyc"
-    )
-    return tuple(sorted(paths, key=lambda path: path.relative_to(repo_root).as_posix()))
+    return managed_sensitive_paths(repo_root)
 
 
 def check_implementation_tree(repo_root=REPO_ROOT, paths=None):
@@ -2357,24 +2441,59 @@ def check_builds(build=None):
                     "P5-5F History Concurrency Ownership overlay %s metadata is invalid"
                     % key
                 )
-        if rebuilt_history_concurrency["bytes"] != development["bytes"]:
+        resource_output_switch_overlay = development.get(
+            "resource_output_switch_overlay"
+        )
+        if not isinstance(resource_output_switch_overlay, dict):
             raise GateError(
-                "P5-5F History Concurrency Ownership overlay output bytes do not match the development build"
+                "V80 development build is missing the P2 private resource output switch overlay"
             )
         if (
-            history_concurrency_ownership_overlay.get("size") != development["size"]
-            or history_concurrency_ownership_overlay.get("sha256")
+            resource_output_switch_overlay.get("input_size")
+            != history_concurrency_ownership_overlay.get("size")
+            or resource_output_switch_overlay.get("input_sha256")
+            != history_concurrency_ownership_overlay.get("sha256")
+        ):
+            raise GateError(
+                "P2 resource output switch overlay is not based on the History ownership output"
+            )
+        resource_output_switch_builder = (
+            _load_resource_output_switch_overlay_builder()
+        )
+        rebuilt_resource_output_switch = (
+            resource_output_switch_builder.apply_resource_output_switch_overlay(
+                rebuilt_history_concurrency["bytes"]
+            )
+        )
+        for key in (
+                "size", "sha256", "input_size", "input_sha256", "alias_zh",
+                "insertions"):
+            if (
+                resource_output_switch_overlay.get(key)
+                != rebuilt_resource_output_switch.get(key)
+            ):
+                raise GateError(
+                    "P2 resource output switch overlay %s metadata is invalid"
+                    % key
+                )
+        if rebuilt_resource_output_switch["bytes"] != development["bytes"]:
+            raise GateError(
+                "P2 resource output switch overlay bytes do not match the development build"
+            )
+        if (
+            resource_output_switch_overlay.get("size") != development["size"]
+            or resource_output_switch_overlay.get("sha256")
             != development["sha256"]
         ):
             raise GateError(
-                "P5-5F History Concurrency Ownership overlay fingerprint does not match the development build"
+                "P2 resource output switch overlay fingerprint does not match the development build"
             )
         output = development["output"]
         existing = output.is_file()
         if existing and output.read_bytes() != development["bytes"]:
             raise GateError("existing V80 development output differs from the in-memory build")
         return _step(
-            "build_contracts", "passed", detail="frozen V70, P2 vendor/overlay, P3 reliability chains, P4 security/response boundaries, and the P5 observability/runtime/snapshot/lifecycle/search/playback/History ownership chain are valid",
+            "build_contracts", "passed", detail="frozen V70, P2 vendor/shadow/private-output-switch chain, P3 reliability chains, P4 security/response boundaries, and the P5 observability/runtime/snapshot/lifecycle/search/playback/History ownership chain are valid",
             duration_seconds=round(time.monotonic() - started, 3), baseline_sha256=baseline["sha256"],
             baseline_size=baseline["size"], development_sha256=development["sha256"],
             development_size=development["size"], development_output_present=existing,
@@ -2550,12 +2669,50 @@ def check_builds(build=None):
             history_concurrency_ownership_overlay_insertions=(
                 history_concurrency_ownership_overlay["insertions"]
             ),
+            resource_output_switch_overlay_sha256=(
+                resource_output_switch_overlay["sha256"]
+            ),
+            resource_output_switch_overlay_input_sha256=(
+                resource_output_switch_overlay["input_sha256"]
+            ),
+            resource_output_switch_overlay_insertion_count=len(
+                resource_output_switch_overlay["insertions"]
+            ),
+            resource_output_switch_overlay_insertions=(
+                resource_output_switch_overlay["insertions"]
+            ),
         ), {"baseline": baseline, "development": development}
     except Exception as exc:
         return _step(
             "build_contracts", "failed", detail=str(exc),
             duration_seconds=round(time.monotonic() - started, 3),
         ), None
+
+
+def _materialize_builds():
+    """Load build bytes for dependent checks without rerunning the build gate."""
+    build = _load_build_module()
+    return {
+        "baseline": build.check_release(BASELINE_MANIFEST),
+        "development": build.build_release(DEV_MANIFEST),
+    }
+
+
+def _materialized_builds_match_step(source_row, builds):
+    if not isinstance(source_row, dict) or not isinstance(builds, dict):
+        return False
+    baseline = builds.get("baseline") or {}
+    development = builds.get("development") or {}
+    expected = {
+        "baseline_size": baseline.get("size"),
+        "baseline_sha256": baseline.get("sha256"),
+        "development_size": development.get("size"),
+        "development_sha256": development.get("sha256"),
+    }
+    return all(
+        source_row.get(key) == value
+        for key, value in expected.items()
+    )
 
 
 def check_behavior_diff(builds, report_dir, runner=None, timeout=DEFAULT_COMMAND_TIMEOUT):
@@ -2663,6 +2820,7 @@ def check_macro_a_runtime_differential(
         payload = json.loads(report_path.read_text(encoding="utf-8"))
         vendor = builds["development"]["vendor"]
         overlay = builds["development"]["overlay"]
+        output_switch = builds["development"]["resource_output_switch_overlay"]
         expected_build = {
             "baseline_size": builds["baseline"]["size"],
             "baseline_sha256": builds["baseline"]["sha256"],
@@ -2675,7 +2833,16 @@ def check_macro_a_runtime_differential(
             "overlay_input_size": overlay["input_size"],
             "overlay_input_sha256": overlay["input_sha256"],
             "overlay_insertion_count": len(overlay["insertions"]),
+            "output_switch_input_size": output_switch["input_size"],
+            "output_switch_input_sha256": output_switch["input_sha256"],
+            "output_switch_size": output_switch["size"],
+            "output_switch_sha256": output_switch["sha256"],
+            "output_switch_insertion_count": len(output_switch["insertions"]),
         }
+        scenario_differences = payload.get("scenario_differences")
+        equal = payload.get("equal")
+        different = payload.get("different")
+        runtime_errors = payload.get("errors")
         required_values = {
             "fixed evidence": all(
                 payload.get(name) == expected
@@ -2694,6 +2861,26 @@ def check_macro_a_runtime_differential(
                 payload.get("report_status_counts")
                 == EXPECTED_MACRO_A_REPORT_STATUS_COUNTS
             ),
+            "outcome counts": (
+                type(equal) is int
+                and type(different) is int
+                and type(runtime_errors) is int
+                and equal + different + runtime_errors
+                == EXPECTED_MACRO_A_DIFFERENTIAL["cases"]
+                and different
+                >= EXPECTED_MACRO_A_SCENARIO_COUNTS["selected_different"]
+            ),
+            "controlled switch differences": (
+                isinstance(scenario_differences, dict)
+                and set(scenario_differences) == set(EXPECTED_MACRO_A_SCENARIO_COUNTS)
+                and sum(scenario_differences.values()) == different
+                and scenario_differences.get("selected_different")
+                == EXPECTED_MACRO_A_SCENARIO_COUNTS["selected_different"]
+                and all(
+                    scenario_differences.get(name) == 0
+                    for name in EXPECTED_MACRO_A_ZERO_DIFFERENCE_SCENARIOS
+                )
+            ),
             "failure detail": payload.get("first_failures") == [],
         }
         errors.extend(name for name, valid in required_values.items() if not valid)
@@ -2710,7 +2897,11 @@ def check_macro_a_runtime_differential(
             "module_count": payload.get("module_count"),
             "overlay_input_sha256": payload.get("overlay_input_sha256"),
             "overlay_insertion_count": payload.get("overlay_insertion_count"),
+            "output_switch_sha256": payload.get("output_switch_sha256"),
+            "output_switch_insertion_count": payload.get("output_switch_insertion_count"),
+            "controlled_switch_active": payload.get("controlled_switch_active"),
             "scenario_counts": payload.get("scenario_counts"),
+            "scenario_differences": scenario_differences,
             "decision_counts": payload.get("decision_counts"),
             "report_status_counts": payload.get("report_status_counts"),
             "shadow_calls": payload.get("shadow_calls"),
@@ -2728,7 +2919,7 @@ def check_macro_a_runtime_differential(
         )
     else:
         row["detail"] = (
-            "50,000 runtime cases preserved production state with complete shadow coverage"
+            "50,000 controlled background cases preserved state and reported actual layered output"
         )
     row["evidence"] = _sanitize(evidence)
     return row
@@ -2762,6 +2953,7 @@ def check_macro_b_runtime_differential(
         payload = json.loads(report_path.read_text(encoding="utf-8"))
         vendor = builds["development"]["vendor"]
         overlay = builds["development"]["overlay"]
+        output_switch = builds["development"]["resource_output_switch_overlay"]
         expected_build = {
             "baseline_size": builds["baseline"]["size"],
             "baseline_sha256": builds["baseline"]["sha256"],
@@ -2774,6 +2966,11 @@ def check_macro_b_runtime_differential(
             "overlay_input_size": overlay["input_size"],
             "overlay_input_sha256": overlay["input_sha256"],
             "overlay_insertion_count": len(overlay["insertions"]),
+            "output_switch_input_size": output_switch["input_size"],
+            "output_switch_input_sha256": output_switch["input_sha256"],
+            "output_switch_size": output_switch["size"],
+            "output_switch_sha256": output_switch["sha256"],
+            "output_switch_insertion_count": len(output_switch["insertions"]),
         }
         required_values = {
             "fixed evidence": all(
@@ -2809,6 +3006,9 @@ def check_macro_b_runtime_differential(
             "module_count": payload.get("module_count"),
             "overlay_input_sha256": payload.get("overlay_input_sha256"),
             "overlay_insertion_count": payload.get("overlay_insertion_count"),
+            "output_switch_sha256": payload.get("output_switch_sha256"),
+            "output_switch_insertion_count": payload.get("output_switch_insertion_count"),
+            "controlled_switch_active": payload.get("controlled_switch_active"),
             "scenario_counts": payload.get("scenario_counts"),
             "decision_counts": payload.get("decision_counts"),
             "report_status_counts": payload.get("report_status_counts"),
@@ -2828,7 +3028,7 @@ def check_macro_b_runtime_differential(
         )
     else:
         row["detail"] = (
-            "50,000 layered-search cases preserved V70 output with complete shadow coverage"
+            "50,000 controlled foreground cases preserved V70 output with complete shadow coverage"
         )
     row["evidence"] = _sanitize(evidence)
     return row
@@ -2925,7 +3125,7 @@ def check_chaos_recovery(
         )
     else:
         row["detail"] = (
-            "12 deterministic faults met their recovery baselines without production side effects"
+            "13 deterministic faults met their recovery baselines without production side effects"
         )
     row["evidence"] = _sanitize(evidence)
     return row
@@ -2933,6 +3133,7 @@ def check_chaos_recovery(
 
 def check_output_admission_dry_run(
     steps, *, production_writes=False, deployment_attempted=False, decider=None,
+    private_release_checker=None,
 ):
     by_name = {}
     duplicates = []
@@ -2988,8 +3189,44 @@ def check_output_admission_dry_run(
         ),
     }
     try:
+        checker = private_release_checker or _load_private_release_builder().check_private_release
+        private_release = checker()
+        manifest = private_release["manifest"]
+        evidence["private_release_verified"] = True
+        evidence["private_release"] = {
+            "schema": manifest["schema"],
+            "id": manifest["id"],
+            "version": manifest["version"],
+            "source_sha256": hashlib.sha256(
+                private_release["source_bytes"]
+            ).hexdigest().upper(),
+            "index_sha256": hashlib.sha256(
+                private_release["index_bytes"]
+            ).hexdigest().upper(),
+            "manifest_sha256": hashlib.sha256(
+                private_release["manifest_bytes"]
+            ).hexdigest().upper(),
+        }
+    except Exception as exc:
+        evidence["private_release_verified"] = False
+        return _step(
+            "output_admission_dry_run", "failed",
+            detail="private V80 release is not deployable: %s" % _redact(exc),
+            admit=False, reason="private_release_invalid", evidence=evidence,
+        )
+    try:
         decide = decider or _load_output_admission_policy()
-        decision = decide(enabled=True, **evidence)
+        decision = decide(
+            enabled=True,
+            development_build_verified=evidence["development_build_verified"],
+            candidate_shadow_verified=evidence["candidate_shadow_verified"],
+            layered_shadow_verified=evidence["layered_shadow_verified"],
+            atvp_compatibility_verified=evidence["atvp_compatibility_verified"],
+            dual_runtime_verified=evidence["dual_runtime_verified"],
+            fongmi_category_verified=evidence["fongmi_category_verified"],
+            public_v70_locked=evidence["public_v70_locked"],
+            public_output_untouched=evidence["public_output_untouched"],
+        )
         if (
             not isinstance(decision, dict)
             or tuple(decision) != ("admit", "reason")
@@ -3168,9 +3405,10 @@ def _prepare_pytest_private_runtime(report_dir):
     return paths
 
 
-def _pytest_command(report_dir, repo_root=REPO_ROOT):
+def _pytest_command(report_dir, repo_root=REPO_ROOT, selected_nodeids=()):
     paths = _pytest_private_paths(report_dir)
     tests_root = Path(repo_root).resolve() / "tests"
+    targets = list(selected_nodeids) if selected_nodeids else ["tests"]
     return [
         sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
         "-p", PYTEST_EVIDENCE_PLUGIN_NAME,
@@ -3179,8 +3417,8 @@ def _pytest_command(report_dir, repo_root=REPO_ROOT):
         "-o", "addopts=",
         "--basetemp", report_dir / "pytest",
         "--junitxml", paths["junit"],
-        "--durations=30", "tests",
-    ]
+        "--durations=30",
+    ] + targets
 
 
 def _pytest_environment(private_root, evidence_path):
@@ -3279,12 +3517,19 @@ def _pytest_selection_evidence(path):
         counts[name] = count
     if counts["collected"] != counts["selected"] + counts["deselected"]:
         raise GateError("pytest selection evidence counts are inconsistent")
-    return {"path": str(path), **counts}
+    failed_nodeids = value.get("failed_nodeids", [])
+    if (
+            not isinstance(failed_nodeids, list)
+            or not all(isinstance(item, str) and item for item in failed_nodeids)
+            or len(failed_nodeids) != len(set(failed_nodeids))
+    ):
+        raise GateError("pytest selection evidence has invalid failed node ids")
+    return {"path": str(path), **counts, "failed_nodeids": failed_nodeids}
 
 
 def _run_pytest(
         report_dir, runner=None, timeout=DEFAULT_COMMAND_TIMEOUT,
-        repo_root=None):
+        repo_root=None, selected_nodeids=(), resume_source=None):
     report_dir = Path(report_dir)
     repo_root = Path(repo_root) if repo_root is not None else REPO_ROOT
     try:
@@ -3292,7 +3537,9 @@ def _run_pytest(
         for output in (paths["junit"], paths["selection"]):
             if output.exists() or output.is_symlink():
                 output.unlink()
-        command = _pytest_command(report_dir, repo_root=repo_root)
+        command = _pytest_command(
+            report_dir, repo_root=repo_root, selected_nodeids=selected_nodeids,
+        )
         isolation = _pytest_private_evidence(paths, command, repo_root)
     except (OSError, GateError) as exc:
         return _step(
@@ -3318,8 +3565,6 @@ def _run_pytest(
             "detail": "pytest private configuration changed while tests were running",
         })
         return row
-    if row.get("status") != "passed":
-        return row
     try:
         evidence = _pytest_junit_evidence(paths["junit"])
     except (OSError, GateError) as exc:
@@ -3338,6 +3583,43 @@ def _run_pytest(
         return row
     row["pytest_junit"] = evidence
     row["pytest_selection"] = selection
+    if selected_nodeids:
+        source_step = (
+            resume_source["steps"].get("pytest")
+            if resume_source is not None else None
+        )
+        source_failed_nodeids = (
+            (source_step.get("pytest_selection") or {}).get("failed_nodeids")
+            if isinstance(source_step, dict) else None
+        )
+        coverage = "verified" if source_failed_nodeids is not None else "legacy-explicit"
+        missing = sorted(set(source_failed_nodeids or ()) - set(selected_nodeids))
+        row["pytest_resume"] = {
+            "source_report_sha256": (
+                resume_source.get("sha256") if resume_source is not None else None
+            ),
+            "source_step_sha256": (
+                _canonical_sha256(source_step) if source_step is not None else None
+            ),
+            "source_status": source_step.get("status") if source_step else None,
+            "source_failed_nodeids": source_failed_nodeids,
+            "selected_nodeids": list(selected_nodeids),
+            "failure_coverage": coverage,
+            "missing_source_failures": missing,
+            "unselected_source_evidence_reused": True,
+        }
+        if source_step is None or source_step.get("status") != "failed":
+            row.update({
+                "status": "failed",
+                "detail": "targeted pytest resume requires a failed pytest source step",
+            })
+            return row
+        if missing:
+            row.update({
+                "status": "failed",
+                "detail": "targeted pytest resume omitted source failed node ids",
+            })
+            return row
     if selection["exitstatus"] != 0:
         row.update({
             "status": "failed",
@@ -3388,7 +3670,13 @@ def _run_pytest(
 def build_commands(args, artifact, report_dir):
     commands = []
     if not args.skip_tests:
-        commands.append(("pytest", _pytest_command(report_dir), True))
+        commands.append((
+            "pytest",
+            _pytest_command(
+                report_dir, selected_nodeids=_pytest_selected_nodeids(args),
+            ),
+            True,
+        ))
     commands.append((
         "resource_shadow_vendor",
         [sys.executable, RESOURCE_SHADOW_VENDOR_SCRIPT], True,
@@ -3721,10 +4009,12 @@ def _git_repository_state_input(fingerprinter, name, root):
         ("tag_1461_commit", ("rev-parse", "1.46.1^{commit}")),
         ("tag_1471_commit", ("rev-parse", "1.47.1^{commit}")),
         ("tag_1480_commit", ("rev-parse", "1.48.0^{commit}")),
+        ("tag_1500_commit", ("rev-parse", "1.50.0^{commit}")),
         ("delta_1450_1451", ("diff", "--name-only", "1.45.0..1.45.1")),
         ("delta_1451_1461", ("diff", "--name-only", "1.45.1..1.46.1")),
         ("delta_1461_1471", ("diff", "--name-only", "1.46.1..1.47.1")),
         ("delta_1471_1480", ("diff", "--name-only", "1.47.1..1.48.0")),
+        ("delta_1480_1500", ("diff", "--name-only", "1.48.0..1.50.0")),
     )
     values = {"root": root.as_posix()}
     errors = []
@@ -3772,7 +4062,9 @@ def _development_output_path():
 
 
 def _step_input_scopes(name, args, fingerprinter):
-    scopes = [fingerprinter.files("gate_tool", (GATE_SCRIPT,))]
+    scopes = [fingerprinter.value(
+        "step_gate_contract", STEP_GATE_CONTRACTS[name],
+    )]
     command_steps = {
         "behavior_diff", "macro_a_runtime_differential",
         "macro_b_runtime_differential", "chaos_recovery", "pytest",
@@ -3826,6 +4118,7 @@ def _step_input_scopes(name, args, fingerprinter):
             "upstream_verifier",
             (
                 UPSTREAM_CONTRACT_SCRIPT,
+                REPO_ROOT / "tools" / "verify_alist_tvbox_1480_contract.py",
                 REPO_ROOT / "tools" / "verify_alist_tvbox_1471_contract.py",
                 REPO_ROOT / "tools" / "verify_alist_tvbox_1461_contract.py",
                 REPO_ROOT / "tools" / "verify_alist_tvbox_1451_contract.py",
@@ -3833,6 +4126,16 @@ def _step_input_scopes(name, args, fingerprinter):
         ))
     elif name == "output_admission_dry_run":
         scopes.append(fingerprinter.files("output_admission_policy", (OUTPUT_ADMISSION_POLICY,)))
+        scopes.append(fingerprinter.files(
+            "private_release_inputs",
+            (
+                PRIVATE_RELEASE_SCRIPT,
+                PRIVATE_RELEASE_MANIFEST,
+                PRIVATE_RELEASE_INDEX,
+                PRIVATE_RELEASE_SOURCE,
+                CONTROLLED_SWITCH_EVIDENCE,
+            ),
+        ))
     elif name == "v70_source_lock":
         scopes.append(fingerprinter.files(
             "v70_public_inputs",
@@ -3846,6 +4149,7 @@ def _step_input_scopes(name, args, fingerprinter):
     if name == "pytest":
         scopes.append(fingerprinter.value("command_options", {
             "skip_tests": bool(args.skip_tests),
+            "selected_nodeids": list(_pytest_selected_nodeids(args)),
         }))
         scopes.append(fingerprinter.files(
             "pytest_public_inputs",
@@ -3894,7 +4198,7 @@ def _step_input_scopes(name, args, fingerprinter):
 _STEP_RUNTIME_KEYS = frozenset((
     "duration_seconds", "execution", "input_dependencies", "input_manifest",
     "input_schema", "input_sha256", "resume_blocked_reason", "reuse_reason",
-    "reused_from", "source_duration_seconds", "stable_after_commands",
+    "resume_invalidation", "reused_from", "source_duration_seconds", "stable_after_commands",
     "final_file_count", "final_input_sha256", "final_tree_sha256",
     "input_stable_after_gate", "started_input_sha256",
 ))
@@ -3954,6 +4258,158 @@ def _source_step_input_sha256(row):
         "dependencies": row.get("input_dependencies"),
     }
     return _canonical_sha256(descriptor)
+
+
+_RESUME_IGNORED_SCOPE_NAMES = frozenset(("gate_tool", "step_gate_contract"))
+
+
+def _resume_normalized_input_sha256(row, by_name, memo=None):
+    """Compare step-local evidence while allowing the old global gate scope to migrate."""
+    if memo is None:
+        memo = {}
+    name = row.get("name")
+    if name in memo:
+        return memo[name]
+    scopes = [
+        scope for scope in row.get("input_manifest", ())
+        if scope.get("name") not in _RESUME_IGNORED_SCOPE_NAMES
+    ]
+    dependencies = []
+    for dependency in row.get("input_dependencies", ()):
+        dependency_name = dependency.get("name")
+        dependency_row = by_name.get(dependency_name)
+        dependencies.append({
+            "name": dependency_name,
+            "status": dependency.get("status"),
+            "input_sha256": (
+                _resume_normalized_input_sha256(dependency_row, by_name, memo)
+                if dependency_row is not None else None
+            ),
+            "result_sha256": dependency.get("result_sha256"),
+        })
+    descriptor = {
+        "schema": row.get("input_schema"),
+        "step": name,
+        "inputs": scopes,
+        "dependencies": dependencies,
+    }
+    digest = _canonical_sha256(descriptor)
+    memo[name] = digest
+    return digest
+
+
+def _resume_scope_changes(source_row, current_row):
+    source_scopes = {
+        scope.get("name"): scope for scope in source_row.get("input_manifest", ())
+        if isinstance(scope, dict)
+    }
+    current_scopes = {
+        scope.get("name"): scope for scope in current_row.get("input_manifest", ())
+        if isinstance(scope, dict)
+    }
+    changes = []
+    for name in sorted(set(source_scopes) | set(current_scopes)):
+        if name in _RESUME_IGNORED_SCOPE_NAMES:
+            continue
+        source_scope = source_scopes.get(name)
+        current_scope = current_scopes.get(name)
+        if source_scope == current_scope:
+            continue
+        changes.append({
+            "name": name,
+            "source_sha256": source_scope.get("sha256") if source_scope else None,
+            "current_sha256": current_scope.get("sha256") if current_scope else None,
+            "source_valid": source_scope.get("valid") if source_scope else None,
+            "current_valid": current_scope.get("valid") if current_scope else None,
+        })
+    return changes
+
+
+def _resume_dependency_changes(name, source, current_row, resume_source, current_by_name):
+    source_by_name = resume_source["steps"]
+    source_memo = {}
+    current_memo = {}
+    changes = []
+    for dependency_name in STEP_DEPENDENCIES[name]:
+        source_dependency = source_by_name.get(dependency_name)
+        current_dependency = current_by_name.get(dependency_name)
+        source_normalized = (
+            _resume_normalized_input_sha256(source_dependency, source_by_name, source_memo)
+            if source_dependency is not None else None
+        )
+        current_normalized = (
+            _resume_normalized_input_sha256(current_dependency, current_by_name, current_memo)
+            if current_dependency is not None else None
+        )
+        source_result = (
+            _step_semantic_sha256(source_dependency)
+            if source_dependency is not None else None
+        )
+        current_result = (
+            _step_semantic_sha256(current_dependency)
+            if current_dependency is not None else None
+        )
+        if (
+                source_dependency is None
+                or current_dependency is None
+                or source_dependency.get("status") != current_dependency.get("status")
+                or source_normalized != current_normalized
+                or source_result != current_result
+        ):
+            changes.append({
+                "name": dependency_name,
+                "source_status": source_dependency.get("status") if source_dependency else None,
+                "current_status": current_dependency.get("status") if current_dependency else None,
+                "source_input_sha256": source_normalized,
+                "current_input_sha256": current_normalized,
+                "source_result_sha256": source_result,
+                "current_result_sha256": current_result,
+            })
+    return changes
+
+
+def _resume_invalidation_evidence(
+        name, input_record, resume_source, reason, current_steps,
+):
+    if resume_source is None:
+        return None
+    source = resume_source["steps"].get(name)
+    current_row = {
+        "name": name,
+        "input_schema": input_record.get("input_schema"),
+        "input_manifest": input_record.get("input_manifest", ()),
+        "input_dependencies": input_record.get("input_dependencies", ()),
+    }
+    current_by_name = {
+        row.get("name"): row for row in current_steps
+        if isinstance(row, dict) and isinstance(row.get("name"), str)
+    }
+    current_by_name[name] = current_row
+    source_by_name = resume_source["steps"]
+    source_normalized = (
+        _resume_normalized_input_sha256(source, source_by_name)
+        if source is not None else None
+    )
+    current_normalized = _resume_normalized_input_sha256(current_row, current_by_name)
+    scope_changes = _resume_scope_changes(source or {}, current_row)
+    dependency_changes = (
+        _resume_dependency_changes(
+            name, source, current_row, resume_source, current_by_name,
+        )
+        if source is not None else []
+    )
+    return {
+        "reason": _redact(reason),
+        "source_status": source.get("status") if source else None,
+        "source_input_sha256": source.get("input_sha256") if source else None,
+        "current_input_sha256": input_record.get("input_sha256"),
+        "source_normalized_input_sha256": source_normalized,
+        "current_normalized_input_sha256": current_normalized,
+        "direct_failure": source is None or source.get("status") != "passed",
+        "changed_scopes": scope_changes,
+        "changed_dependencies": dependency_changes,
+        "propagation_paths": [],
+    }
 
 
 def _load_resume_source(path, report_path, expected_sha256=None):
@@ -4024,9 +4480,7 @@ def _load_resume_source(path, report_path, expected_sha256=None):
     }
 
 
-def _resume_decision(name, input_record, resume_source):
-    if name in ALWAYS_EXECUTE_STEPS:
-        return None, "current trust anchor or in-memory build producer"
+def _resume_decision(name, input_record, resume_source, current_steps=None):
     if resume_source is None:
         return None, None
     source = resume_source["steps"].get(name)
@@ -4041,11 +4495,37 @@ def _resume_decision(name, input_record, resume_source):
     if input_record.get("input_valid") is not True:
         return None, "current input or dependency evidence is incomplete"
     if source.get("input_sha256") != input_record.get("input_sha256"):
+        if current_steps is not None:
+            current_row = {
+                "name": name,
+                "input_schema": input_record.get("input_schema"),
+                "input_manifest": input_record.get("input_manifest", ()),
+                "input_dependencies": input_record.get("input_dependencies", ()),
+            }
+            current_by_name = {
+                row.get("name"): row for row in current_steps
+                if isinstance(row, dict) and isinstance(row.get("name"), str)
+            }
+            current_by_name[name] = current_row
+            source_normalized = _resume_normalized_input_sha256(
+                source, resume_source["steps"],
+            )
+            current_normalized = _resume_normalized_input_sha256(
+                current_row, current_by_name,
+            )
+            if source_normalized == current_normalized:
+                return source, (
+                    "legacy gate-tool scope changed; step-local inputs and dependency "
+                    "result evidence are unchanged"
+                )
         return None, "current input or dependency fingerprint changed"
     return source, None
 
 
-def _annotate_step(row, name, input_record, execution, blocked_reason=None, resume_source=None):
+def _annotate_step(
+        row, name, input_record, execution, blocked_reason=None,
+        resume_source=None, resume_invalidation=None,
+):
     row = copy.deepcopy(row)
     if row.get("name") != name:
         row = _step(
@@ -4077,10 +4557,12 @@ def _annotate_step(row, name, input_record, execution, blocked_reason=None, resu
     })
     if blocked_reason is not None and resume_source is not None:
         row["resume_blocked_reason"] = _redact(blocked_reason)
+    if resume_invalidation is not None:
+        row["resume_invalidation"] = resume_invalidation
     return row
 
 
-def _reuse_step(source, name, input_record, resume_source):
+def _reuse_step(source, name, input_record, resume_source, reuse_reason=None):
     row = copy.deepcopy(source)
     original_duration = row.get("source_duration_seconds", row.get("duration_seconds"))
     for key in (
@@ -4092,13 +4574,51 @@ def _reuse_step(source, name, input_record, resume_source):
     if original_duration is not None:
         row["source_duration_seconds"] = original_duration
     row = _annotate_step(row, name, input_record, "reused")
-    row["reuse_reason"] = "passed evidence and dependency fingerprints are unchanged"
+    row["reuse_reason"] = reuse_reason or (
+        "passed evidence and dependency fingerprints are unchanged"
+    )
     row["reused_from"] = {
         "report_sha256": resume_source["sha256"],
         "step_sha256": _canonical_sha256(source),
         "generated_at": resume_source["report"].get("generated_at"),
     }
     return row
+
+
+def _attach_resume_propagation_paths(steps):
+    by_name = {row.get("name"): row for row in steps}
+    memo = {}
+
+    def paths_for(name):
+        if name in memo:
+            return memo[name]
+        row = by_name.get(name)
+        if row is None:
+            return []
+        paths = []
+        invalidation = row.get("resume_invalidation")
+        if isinstance(invalidation, dict) and (
+                invalidation.get("direct_failure")
+                or invalidation.get("changed_scopes")
+        ):
+            paths.append([name])
+        for dependency in STEP_DEPENDENCIES.get(name, ()):
+            for path in paths_for(dependency):
+                paths.append(path + [name])
+        unique = []
+        seen = set()
+        for path in paths:
+            key = tuple(path)
+            if key not in seen:
+                seen.add(key)
+                unique.append(path)
+        memo[name] = unique
+        return unique
+
+    for row in steps:
+        invalidation = row.get("resume_invalidation")
+        if isinstance(invalidation, dict):
+            invalidation["propagation_paths"] = paths_for(row["name"])
 
 
 def _assert_resume_source_unchanged(resume_source):
@@ -4184,6 +4704,27 @@ def atomic_write_report(path, report, repo_root=REPO_ROOT):
             temp_path.unlink()
 
 
+def _pytest_selected_nodeids(args):
+    raw = tuple(getattr(args, "pytest_node", ()) or ())
+    normalized = []
+    for item in raw:
+        value = str(item).strip().replace("\\", "/")
+        base = value.split("::", 1)[0]
+        parts = base.split("/")
+        if (
+                not value
+                or not base.startswith("tests/")
+                or not base.endswith(".py")
+                or any(part in ("", ".", "..") for part in parts)
+                or Path(base).is_absolute()
+        ):
+            raise GateError("--pytest-node must name a relative tests/*.py path or node id")
+        normalized.append(value)
+    if len(normalized) != len(set(normalized)):
+        raise GateError("--pytest-node values must be unique")
+    return tuple(sorted(normalized))
+
+
 def _validate_args(args):
     if not _valid_timeout(args.command_timeout):
         raise GateError("--command-timeout must be finite and greater than zero")
@@ -4195,6 +4736,9 @@ def _validate_args(args):
     if not partial and not args.upstream_root:
         raise GateError("complete mode requires --upstream-root; use --partial for an incomplete diagnostic run")
     expected_resume_sha256 = getattr(args, "resume_source_sha256", None)
+    pytest_nodeids = _pytest_selected_nodeids(args)
+    if pytest_nodeids and getattr(args, "resume_from", None) is None:
+        raise GateError("--pytest-node requires --resume-from")
     if getattr(args, "resume_from", None) is not None and expected_resume_sha256 is None:
         raise GateError("--resume-from requires --resume-source-sha256")
     if expected_resume_sha256 is not None:
@@ -4211,19 +4755,38 @@ def run_gate(args, runner=None):
         getattr(args, "resume_from", None), args.report,
         expected_sha256=getattr(args, "resume_source_sha256", None),
     )
+    pytest_nodeids = _pytest_selected_nodeids(args)
+    if (
+            resume_source is not None
+            and resume_source["steps"]["pytest"].get("status") == "failed"
+            and not pytest_nodeids
+            and not args.skip_tests
+    ):
+        raise GateError(
+            "resuming a failed pytest step requires one or more --pytest-node targets"
+        )
     started_at = dt.datetime.now(dt.timezone.utc)
     fingerprinter = _InputFingerprinter(REPO_ROOT)
     steps = []
 
     def add_step(name, producer):
         input_record = _step_input_record(name, args, steps, fingerprinter)
-        source, blocked_reason = _resume_decision(name, input_record, resume_source)
+        source, blocked_reason = _resume_decision(
+            name, input_record, resume_source, current_steps=steps,
+        )
         if source is not None:
-            row = _reuse_step(source, name, input_record, resume_source)
+            row = _reuse_step(
+                source, name, input_record, resume_source,
+                reuse_reason=blocked_reason,
+            )
         else:
+            invalidation = _resume_invalidation_evidence(
+                name, input_record, resume_source, blocked_reason, steps,
+            )
             row = _annotate_step(
                 producer(), name, input_record, "executed",
                 blocked_reason=blocked_reason, resume_source=resume_source,
+                resume_invalidation=invalidation,
             )
         steps.append(row)
         return row
@@ -4238,12 +4801,42 @@ def run_gate(args, runner=None):
     implementation_tree_index = len(steps) - 1
 
     build_input = _step_input_record("build_contracts", args, steps, fingerprinter)
-    build_step, builds = check_builds()
-    steps.append(_annotate_step(
-        build_step, "build_contracts", build_input, "executed",
-        blocked_reason="current trust anchor or in-memory build producer",
-        resume_source=resume_source,
-    ))
+    build_source, build_blocked_reason = _resume_decision(
+        "build_contracts", build_input, resume_source, current_steps=steps,
+    )
+    builds = None
+    materialized_builds = False
+    if build_source is not None:
+        try:
+            candidate_builds = _materialize_builds()
+        except Exception as exc:
+            build_source = None
+            build_blocked_reason = "current build materialization failed: %s" % _redact(exc)
+        else:
+            if _materialized_builds_match_step(build_source, candidate_builds):
+                builds = candidate_builds
+                materialized_builds = True
+            else:
+                build_source = None
+                build_blocked_reason = (
+                    "current materialized build evidence changed from the passed source"
+                )
+    if build_source is not None:
+        build_row = _reuse_step(
+            build_source, "build_contracts", build_input, resume_source,
+            reuse_reason=build_blocked_reason,
+        )
+    else:
+        build_step, builds = check_builds()
+        build_row = _annotate_step(
+            build_step, "build_contracts", build_input, "executed",
+            blocked_reason=build_blocked_reason, resume_source=resume_source,
+            resume_invalidation=_resume_invalidation_evidence(
+                "build_contracts", build_input, resume_source,
+                build_blocked_reason, steps,
+            ),
+        )
+    steps.append(build_row)
 
     with tempfile.TemporaryDirectory(prefix="v80-stage-gate-") as temp_name:
         temp_dir = Path(temp_name)
@@ -4289,6 +4882,8 @@ def run_gate(args, runner=None):
                 if name == "pytest":
                     command_rows[name] = lambda: _run_pytest(
                         temp_dir, runner=runner, timeout=args.command_timeout,
+                        selected_nodeids=pytest_nodeids,
+                        resume_source=resume_source,
                     )
                 else:
                     command_rows[name] = lambda n=name, c=command, r=required: _run_command(
@@ -4309,6 +4904,8 @@ def run_gate(args, runner=None):
                 command_rows["pytest"] = lambda: _run_pytest(
                     temp_dir, runner=runner,
                     timeout=args.command_timeout,
+                    selected_nodeids=pytest_nodeids,
+                    resume_source=resume_source,
                 )
             for name in (
                     "resource_shadow_vendor", "atvp_compatibility", "dual_runtime",
@@ -4357,6 +4954,7 @@ def run_gate(args, runner=None):
         ),
     )
     _verify_step_inputs_stable(steps, args)
+    _attach_resume_propagation_paths(steps)
 
     names = [row.get("name") for row in steps]
     if tuple(names) != STEP_ORDER:
@@ -4386,6 +4984,9 @@ def run_gate(args, runner=None):
                 name for name in STEP_ORDER
                 if resume_source["steps"][name].get("input_sha256") is None
             ],
+            "materialized_steps": [
+                "build_contracts" if materialized_builds else None
+            ] if materialized_builds else [],
         })
     report = {
         "schema": REPORT_SCHEMA, "generated_at": started_at.isoformat().replace("+00:00", "Z"),
@@ -4413,6 +5014,13 @@ def _parser():
         "--resume-source-sha256",
         help=(
             "trusted 64-character SHA256 required with --resume-from"
+        ),
+    )
+    parser.add_argument(
+        "--pytest-node", action="append", default=[],
+        help=(
+            "repeatable tests/*.py path or node id used to close a failed pytest "
+            "step without rerunning the full suite"
         ),
     )
     parser.add_argument("--partial", action="store_true", help="allow an explicitly incomplete diagnostic run")

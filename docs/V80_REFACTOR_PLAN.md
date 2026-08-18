@@ -8,10 +8,10 @@
 
 - 当前公开发布仍为 `V70`，仓库索引 `spiders_v2.json` 仍登记 `version: 70`。
 - V80 只在 `v80-dev` 分支开发，不自动部署，不覆盖公开固定入口，不修改公开索引版本。
-- P1 至 P5 本地工程链已完成；当前候选为 `862377 / C1ACAB802121E3F69ADEA0EBF1AB271C14015124AA28D2D1F8F58F97C8481B7D`。
-- 项目级安全复核已关闭 Requests 自动重定向绕过 P4 响应边界及 `_resolve_user_id()` 无界读取；三个聚焦 P4 文件 `66 passed`，未新增通用 redirect/session 框架。
+- P1、P3、P4、P5 本地能力链已完成；P2 的模型、Provider、Schema、匹配、评分、合并、排序和影子差分已完成，但真实前台/背景输出仍由旧 `_resource_fair_candidate_order()` owner 负责，尚未完成生产接管。
+- 当前候选为 `862581 / 87DCAC75E7F60CA70219EA99C238940E756D53D17A82D2FE684622A38CD5BADC`。项目级安全复核除关闭 Requests 自动重定向和 `_resolve_user_id()` 无界读取外，已把未探测播放 URL 的弱兜底迁移到 V80 专用覆盖层，并让敏感扫描与实现树共用同一显式测试清单；定向组合闭包为 `318 passed`，未新增通用 redirect/session/cache/retry 框架。
 - 46 个维护单元中文别名已按 10 个 chunk 与 36 个 Python module 精确覆盖；最终 r6 closure 为 `18/18 passed`、pytest `2124 passed`，报告 SHA256 `743ACB44FDE44AA17E5E4118DE859854A5FCA5426FD04FDFDC74D9CAC91385A9`。
-- 本地候选已固定为 `v80-dev / 6d1ad3d85ab21ec804e512b112e77ebcf228f91e`；私有灰度、真实环境验证、回退演练和人工批准完成前，V80 不得接管公开行为。
+- `work/v80-upstream-1500-private-release-doc-closure-final-r4-20260818.json` 仍是上一受信完整基线；当前候选在文档同步、静默双指纹和 DAG 续跑完成前不描述为已封印提交。私有灰度、真实环境验证、私有配置撤回和人工批准完成前，V80 不得接管公开行为。
 
 ## 2. V70 冻结基线
 
@@ -388,7 +388,7 @@ P1 至 P4 全部门禁通过，无未解决的关键或高风险审计项。
 6. 使用私有开发插件 ID 或私有索引灰度，不覆盖 V70 公共入口。
 7. 发布候选经人工批准后，才原子更新源码、索引、文档和 `v80` 标签。
 
-### 当前原子工作包：P5-5 内容寻址续跑与 1.48.0 上游合同
+### 当前原子工作包：P5-5 内容寻址续跑与 1.50.0 上游合同
 
 P5-1 已冻结可观测性数据合同但不接入运行时。事件与快照 Schema 固定为 `v80-diagnostic-event/1` 和 `v80-diagnostics-snapshot/1`，快照最多 `256` 条、文本最多 `512` 字符；core/context/measurement 字段顺序、level/stage 闭集和 16 个 P3 failure kind 的唯一稳定 Error Code 均由一个纯叶模块拥有。P4-8 候选 `840543 / 749F16F3...` 是 P5-1 固定输入；policy 模块为 `2138` bytes、SHA256 `FDFA66B624DD9C5405A77B8FAAC1D2A3973B83AB7EBFB241AFBC99319AAE4C59`，封板候选为 `842681` bytes、SHA256 `19A5FFA67ADA386585DA663AD1C7FD91FEC04322903EE207602FE2A4CC082A73`。最终报告 `work/v80-p5-1-observability-policy-stage-gate-final-r2-20260816.json` 记录 `18/18 passed`、pytest `1711 passed`、Macro A/B 各 `50000/0/0`、Chaos `12/12`、敏感扫描 `146/0` 和 `admit=true`。
 
@@ -398,11 +398,13 @@ P5-3 只升级现有私有 `_diagnostic_snapshot()`：输出固定为 `v80-diagn
 
 P5-5 不增加通用缓存或自动依赖推断。18 个固定步骤继续使用显式输入和 DAG 失效传播；旧报告只读，新 closure 单独生成。FongMi requirements 候选与真实 dual-runtime verifier 统一为 `exists()` 语义：所有存在候选进入内容指纹，目录/读取失败使 scope 无效，零候选 fail-closed；失败由 `dual_runtime` 传播到 output admission 和 V70 source lock。修复前 `work/v80-p5-5-upstream-1471-closure-final-20260816.json` 的 `15/18 passed` 与 pytest `1801 passed` 只证明闭包传播，不能作为绿色封板。四代 verifier 单测为 `25 passed`，受影响 stage 单测另为 `4 passed`。45 秒静默双指纹后生成的唯一完整 baseline `work/v80-p5-5-upstream-1480-fingerprinted-baseline-20260816.json` 为 `18/18 passed`、`18 executed / 0 reused`、pytest `1811 passed`、Macro A/B 各 `50000/0/0`、Chaos `12/12`、敏感扫描 `158/0`，稳定实现树 `160 / FE835719DD2CF3FF6B259A75D23F2F63EFE47BECDF2B96F2E9310B681301149C`，`admit=true`、V70 source lock 通过，耗时 `824.449s`，无生产写入或部署。该 baseline 的受信 resume pin 为 `14AA4142678A71B0B64B1B9F86EE2BA6A6C9666AC1942997172B8A762476FFFD`；后续受管文档变化只执行 DAG 失效闭包，不重跑完整 gate。
 
+2026-08-18 已把当前上游精确叶子继续推进到 `1.50.0 / 7ba1119e1e71bb427fb281f534a4c111ff7b500c`。相对 `1.48.0` 的变化恰好为 `20` 个路径；Atvp/raw 与七个播放同步 owner blob 保持不变。新叶单测 `9 passed`，全部版本化上游验证器及 stage-gate 单测 `284 passed`。由于 `tools/run_v80_stage_gate.py` 是全部 18 步共同的 `gate_tool` 输入，本次叶子选择与指纹接入使旧 closure 全部失效，因此只执行一次必要的新基线，不削弱内容指纹或扩建兼容缓存。正式报告 `work/v80-upstream-1500-complete-closure-20260818.json` 为 `18/18 passed`、`18 executed / 0 reused`、pytest `2133/2133`、Macro A/B 各 `50000/0/0`、Chaos `12/12`、稳定树 `182 / 4B33C067BD84404B5372BA0CDB419575BBF795D8D2285217B4CDD0FBBD724FFD`、`admit=true`，耗时 `2210.101s`，SHA256 `8FF99EC165D302DB425C4636CF2671CD202D05E4E90A6E74C5471D2D62E38194`。候选保持 `862377 / C1ACAB...481B7D`，公开 V70 与生产状态未变；下一阶段只推进 P5-6 私有灰度、服务器/MuMu/FongMi 验证、人工批准和私有生产晋升，不执行 V70 原子回退。
+
 ### 交付物
 
 - 诊断事件 Schema、Error Code 目录和脱敏快照。
 - 性能、稳定性、兼容性、安全与实机联调报告。
-- V80 发布候选单文件、指纹、变更说明和回退演练记录。
+- V80 发布候选单文件、指纹、变更说明和私有部署撤回记录。
 - 原子发布清单。
 
 ### 验收
@@ -412,11 +414,11 @@ P5-5 不增加通用缓存或自动依赖推断。18 个固定步骤继续使用
 - 500+ 测试可作为增长目标，但合同覆盖、风险覆盖和确定性优先于数量。
 - “详情 <300ms”只允许声明为热缓存首屏目标；冷缓存网络搜索必须单独记录。
 - AList-TVBox 与 FongMi 双运行时、分类参数和实机链路全部通过。
-- 发布前再次确认 V70 标签和回退产物可用。
+- 发布前再次确认 V70 标签、公开源码和根索引未变化；V70 不作为私有 V80 的原子回退事务。
 
-### 回退
+### 私有部署撤回
 
-发布前：丢弃候选，公共版本继续为 V70。发布后：按已演练的原子回退流程恢复 V70 源码和 `version: 70` 索引，刷新插件与独立过滤器记录并验证运行时 SHA256。
+发布前可直接丢弃候选。私有部署后只撤销私有 V80 站点/插件条目或恢复上一份私有配置，并复核私有运行时 SHA256；公开 V70 源码、`version: 70` 根索引和公共订阅始终不变，不执行 V70 原子回退。
 
 ### 禁止事项
 
@@ -463,7 +465,7 @@ P5-5 不增加通用缓存或自动依赖推断。18 个固定步骤继续使用
 
 每个阶段验收后形成不可变的里程碑提交，建议使用内部 `v80-p1` 至 `v80-p5` 标记；这些标记不等于公开发布。
 
-## 11. 发布隔离与原子晋升
+## 11. 发布隔离与私有晋升
 
 开发期必须保持以下隔离：
 
@@ -473,24 +475,28 @@ P5-5 不增加通用缓存或自动依赖推断。18 个固定步骤继续使用
 | 插件 ID | `douban_tmdb_follow_single` | 私有开发 ID 或不进入容器 |
 | 索引 | 根 `spiders_v2.json`，`version: 70` | 私有开发索引或本地产物 |
 | 源码入口 | `py/豆瓣TMDB追更单入口.py` | 独立开发构建输出 |
-| 部署 | 仓库导入 V70 | 仅显式人工联调，不自动部署 |
+| 部署 | 公开 V70 保持原状 | 仅进入私有容器、私有插件 ID 或私有配置 |
 
-V80 晋升必须作为一次发布事务完成：
+V80 私有晋升必须作为一次受控事务完成：
 
 1. 冻结并复核候选提交。
-2. 完成所有门禁、实机联调和回退演练。
+2. 完成所有门禁、私有灰度和实机联调。
 3. 生成候选单文件并记录大小、SHA256 和测试证据。
-4. 经人工发布批准后，同时更新公开源码、`spiders_v2.json`、README、插件 README、DEPLOYMENT、STATUS、CHANGELOG。
-5. 创建不可移动的 `v80` 标签。
-6. 仓库导入、过滤器独立刷新和客户端订阅刷新后，验证实际运行时版本与 SHA256。
+4. 经人工批准后，只更新私有索引/配置和对应 README、DEPLOYMENT、STATUS、CHANGELOG；公开源码与根 `spiders_v2.json` 不变。
+5. 固定候选提交、报告 SHA256 和私有配置指纹，不创建或移动公开 `v80` 标签。
+6. 私有容器刷新和客户端私有配置刷新后，验证实际运行时版本与 SHA256。
 
-在第 4 步之前，任何 V80 产物都不属于公开发布。
+V80 仅作为私有部署目标；整个流程都不得改变公开 V70。
 
 ## 12. 执行记录
 
 ### 12.1 当前执行点（2026-08-18）
 
-当前只收敛发布证据，不再扩建业务能力或通用防御框架。固定候选为 `862377` bytes、SHA256 `C1ACAB802121E3F69ADEA0EBF1AB271C14015124AA28D2D1F8F58F97C8481B7D`；P4 重定向/响应边界聚焦回归 `66 passed`，维护别名 `46/46` 的集合断言 `1 passed`。受信 r5 因 gate 工具共同指纹变化安全失效，r6 实际执行全部 18 步并得到 `18/18 passed`、pytest `2124 passed`、稳定实现树 `180 / AB29AC3A...45AB`；只读报告 SHA256 为 `743ACB44FDE44AA17E5E4118DE859854A5FCA5426FD04FDFDC74D9CAC91385A9`。本地候选提交已固定为 `6d1ad3d85ab21ec804e512b112e77ebcf228f91e`，下一阶段仅为私有灰度、真实服务器/MuMu/FongMi 验证、完整回退演练、人工批准和生产晋升。禁止为了当前收口新增通用 redirect、session、cache、retry、executor、并发或跨项目框架。
+当前只处理真实阻断，不扩建通用防御框架。raw-row-preserving 分层组合器和 private-V80-only controlled switch 已完成本地接管验证：前台与背景共用 `_resource_output_candidate_order`，默认关闭，combiner 异常只单次回退旧 owner。当前候选为 `870797` bytes、SHA256 `0CEBC73A78BCC8C7853A6BD0F0C78F4D95DD786C861425F9E0A4EC40FA0583F9`；Macro A 为 `50000` 例、`14736` 个受控差异、`0 errors`，Macro B 为 `50000 equal / 0 different / 0 errors`，Chaos `13/13`，三项源码级兼容门禁通过。独立 `private/v80/` 已生成 `id=douban_tmdb_follow_single_v80_private`、`version=80`、私有索引和 staging；staged source 为 `870801 / 049C722515F6851C379969C2886FA466EDD9FC9478B6B6F591E757DEEEDDCB97`。下一阶段只做静默双指纹、变化节点 DAG closure 和私有运行时验证；禁止新增通用 redirect、session、cache、retry、executor、并发或跨项目框架。
+
+1.50.0 追加封板现作为当前上游源码基线：`work/v80-upstream-1500-complete-closure-20260818.json` 为 `18/18 passed`、pytest `2133/2133`、稳定树 `182 / 4B33C067...24FFD`、`admit=true`，报告 SHA256 `8FF99EC165D302DB425C4636CF2671CD202D05E4E90A6E74C5471D2D62E38194`。后续 r4 文档 closure 固定为 `6 executed / 12 reused`、稳定树 `182 / 71EBA399...8F91`、报告 SHA256 `4CFABE8441BD769BAB4A4246EF1B6BF5B03609E56E4E659176180A6B4538C9C5`；两者均是当前候选之前的受信基线，不替代本轮新 closure。
+
+当前发布边界按用户最新指令固定为：允许私有部署 V80，使用 MuMu 已安装的 FongMi 版本刷新私有配置，不另外安装新版；公开 V70 始终保持不变，取消 V70 原子回退。
 
 ### 12.2 历史执行记录
 

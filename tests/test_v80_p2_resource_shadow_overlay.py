@@ -203,10 +203,10 @@ def test_development_build_applies_the_fixed_runtime_overlay():
     ]
 
     assert result["overlay"] == {
-        "size": 681512,
-        "sha256": "52C9ABA52F9572790B268CF0DB95B4302952EE3CACA9A4ED337CA843E69F92BE",
-        "input_size": 678378,
-        "input_sha256": "3A8AD7ADB62372858A03E6B3790C85B6F17336CC8C00029B0E485A9E9593C253",
+        "size": 684806,
+        "sha256": "299C4B60A9F558677B2749FCE669FB81C1E367E37C6126D8946B64FFAC05A2C1",
+        "input_size": 681672,
+        "input_sha256": "761EB09F5184A9B9914295A43B0A2F5AF1C46A414F8B0D0456477CA9A3639C01",
         "insertions": (
             "state", "reset", "destroy", "worker", "order", "payload", "call", "layered",
         ),
@@ -258,6 +258,183 @@ def test_generated_runtime_defaults_disabled_and_preserves_committed_rows(
     assert spider._resource_candidate_shadow_last_report is None
     assert spider._resource_search_jobs == {}
     assert not hasattr(spider, "_resource_search_admissions")
+
+
+def test_private_output_switch_requires_raw_plugin_mode(runtime_spider):
+    spider, _cache_writes = runtime_spider
+
+    spider._alist_tvbox_plugin = False
+    assert spider._resource_layered_output_from_config({
+        "v80_resource_layered_output": True,
+    }) is False
+    spider._alist_tvbox_plugin = True
+    assert spider._resource_layered_output_from_config({}) is False
+    assert spider._resource_layered_output_from_config({
+        "v80_resource_layered_output": True,
+    }) is True
+
+
+def test_private_output_switch_routes_foreground_and_background_through_one_combiner(
+        runtime_module, runtime_spider, monkeypatch):
+    spider, cache_writes = runtime_spider
+    calls = []
+
+    def combine(rows, **kwargs):
+        calls.append({
+            "ids": [row.get("vod_id") for row in rows],
+            "modes": tuple(kwargs["available_modes"]),
+            "binding": kwargs["binding_resource_id"],
+            "recent": kwargs["recent_resource_id"],
+        })
+        return list(rows)
+
+    monkeypatch.setattr(runtime_module, "combine_v70_layered_resource_rows", combine)
+    spider._resource_fair_candidate_order = lambda *_args, **_kwargs: (
+        (_ for _ in ()).throw(AssertionError("enabled output bypassed shared combiner"))
+    )
+    spider._v80_resource_layered_output_enabled = True
+    spider.follow_alist_bindings = {}
+
+    assert [row["vod_id"] for row in _resource_candidates(spider)] == [
+        "private-layered-resource-id",
+    ]
+
+    def submit_background(*_args, **_kwargs):
+        future = Future()
+        future.set_result([{
+            "vod_id": "private-resource-id",
+            "_resource_mode": "pansou",
+            "provider": "quark",
+            "score": 10,
+            "preference": (2, 1),
+        }])
+        return future
+
+    spider._submit_resource_mode_search = submit_background
+    assert _schedule(spider, "layered-output") is True
+
+    assert calls == [
+        {
+            "ids": ["private-layered-resource-id"],
+            "modes": ("vod",),
+            "binding": "",
+            "recent": "",
+        },
+        {
+            "ids": ["private-resource-id"],
+            "modes": ("pansou",),
+            "binding": "",
+            "recent": "",
+        },
+    ]
+    assert cache_writes[-1][0] == "layered-output"
+
+
+def test_private_output_switch_falls_back_to_legacy_order_on_combiner_failure(
+        runtime_module, runtime_spider, monkeypatch):
+    spider, cache_writes = runtime_spider
+    legacy_calls = []
+
+    def legacy_order(rows, *_args, **_kwargs):
+        legacy_calls.append([row.get("vod_id") for row in rows])
+        return list(reversed(list(rows)))
+
+    monkeypatch.setattr(
+        runtime_module,
+        "combine_v70_layered_resource_rows",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("score failed")),
+    )
+    spider._resource_fair_candidate_order = legacy_order
+    spider._v80_resource_layered_output_enabled = True
+    spider.follow_alist_bindings = {}
+
+    rows = [{"vod_id": "first"}, {"vod_id": "second"}]
+    assert [row["vod_id"] for row in spider._resource_output_candidate_order(
+        rows, {"title": "Example"}, modes=("pansou",),
+    )] == ["second", "first"]
+
+    assert _schedule(spider, "layered-output-fallback") is True
+    assert cache_writes[-1][0] == "layered-output-fallback"
+    assert legacy_calls
+
+
+def test_private_output_switch_disabled_keeps_background_legacy_bound_empty(
+        runtime_spider):
+    spider, cache_writes = runtime_spider
+    observed_bounds = []
+
+    def legacy_order(rows, *_args, **kwargs):
+        observed_bounds.append(kwargs.get("bound"))
+        return list(rows)
+
+    spider._resource_fair_candidate_order = legacy_order
+    spider._v80_resource_layered_output_enabled = False
+    spider.follow_alist_bindings = {"123": "bound-resource"}
+
+    assert spider._schedule_supplement_resource_search(
+        ["pansou"],
+        ["Example"],
+        {"title": "Example", "year": "2026", "tmdb_id": "123"},
+        "legacy-bound",
+    ) is True
+    assert observed_bounds == [""]
+    assert cache_writes[-1][0] == "legacy-bound"
+
+
+def test_private_output_switch_shadow_compares_actual_layered_production_order(
+        runtime_module, runtime_spider):
+    spider, cache_writes = runtime_spider
+    rows = [
+        {
+            "vod_id": "bound-resource",
+            "_resource_mode": "pansou",
+            "provider": "quark",
+            "score": 1,
+            "preference": (1,),
+        },
+        {
+            "vod_id": "high-resource",
+            "_resource_mode": "pansou",
+            "provider": "baidu",
+            "score": 10,
+            "preference": (10,),
+        },
+    ]
+
+    def submit_search(*_args, **_kwargs):
+        future = Future()
+        future.set_result([dict(row) for row in rows])
+        return future
+
+    spider._submit_resource_mode_search = submit_search
+    spider._resource_fair_candidate_order = lambda values, *_args, **_kwargs: sorted(
+        values, key=lambda row: row["preference"], reverse=True,
+    )
+    spider._v80_resource_layered_output_enabled = True
+    spider._resource_candidate_shadow_enabled = True
+    spider._resource_candidate_shadow_sample_every = 1
+    spider._resource_candidate_shadow_budget_us = (
+        runtime_module.RESOURCE_CANDIDATE_SHADOW_ESTIMATED_COST_US
+    )
+    spider._resource_candidate_shadow_sampled_generation = None
+    spider.follow_alist_bindings = {"123": "bound-resource"}
+
+    assert spider._schedule_supplement_resource_search(
+        ["pansou"],
+        ["Example"],
+        {"title": "Example", "year": "2026", "tmdb_id": "123"},
+        "layered-shadow",
+    ) is True
+    assert [row["vod_id"] for row in cache_writes[-1][1]] == [
+        "bound-resource", "high-resource",
+    ]
+    assert spider._resource_candidate_shadow_last_report == {
+        "status": "different",
+        "legacy_count": 2,
+        "candidate_count": 2,
+        "first_difference": 0,
+        "error_type": "",
+    }
 
 
 def test_layered_runtime_defaults_disabled_before_fair_order(

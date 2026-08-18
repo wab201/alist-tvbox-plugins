@@ -59,7 +59,7 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
         if self.path == "/api/accounts/login":
-            self._json(200, {"authorities": [{"authority": "USER"}], "token": "fixture-auth"})
+            self._json(200, {"authorities": [{"authority": "USER"}], "token": "fixture-auth-token"})
             return
         if self.path == "/history/sub-token":
             value = json.loads(raw.decode("utf-8") or "[]")

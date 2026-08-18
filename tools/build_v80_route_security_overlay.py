@@ -58,6 +58,51 @@ TARGET_REPLACEMENT = '''    def _route_security_policy(self):
         return parsed, tuple(sorted(addresses, key=lambda address: (address.version, str(address))))
 '''
 
+SAFE_OUTPUT_ANCHOR = '''    def _safe_atvp_play_output(self, output):
+        if not isinstance(output, dict):
+            return False
+        if self._int_value(output.get("parse"), 0) != 0:
+            return False
+        media_url = Filter._first_http_url(output.get("url"))
+        return bool(media_url and Filter._safe_media_url(media_url, self.atvp_api))
+'''
+
+SAFE_OUTPUT_REPLACEMENT = '''    def _safe_atvp_play_output(self, output, deadline=None):
+        if not isinstance(output, dict):
+            return False
+        if self._int_value(output.get("parse"), 0) != 0:
+            return False
+        media_url = Filter._first_http_url(output.get("url"))
+        return bool(media_url and self._media_url_allowed(media_url, deadline=deadline))
+'''
+
+PLAYER_OUTPUT_ANCHOR = '''                    elif self._safe_atvp_play_output(output):
+'''
+
+PLAYER_OUTPUT_REPLACEMENT = '''                    elif self._safe_atvp_play_output(
+                            output, deadline=candidate_deadline):
+'''
+
+PLAYER_REFRESHED_OUTPUT_ANCHOR = '''                            elif self._safe_atvp_play_output(refreshed):
+'''
+
+PLAYER_REFRESHED_OUTPUT_REPLACEMENT = '''                            elif self._safe_atvp_play_output(
+                                    refreshed, deadline=candidate_deadline):
+'''
+
+RESOURCE_PROBE_ANCHOR = '''                if self._int_value((output or {}).get("parse"), 0) == 0 and Filter._safe_media_url(media_url, self.atvp_api):
+'''
+
+RESOURCE_PROBE_REPLACEMENT = '''                if (self._int_value((output or {}).get("parse"), 0) == 0
+                        and self._media_url_allowed(media_url, deadline=play_deadline)):
+'''
+
+RESOURCE_OUTPUT_ANCHOR = '''                if self._safe_atvp_play_output(output):
+'''
+
+RESOURCE_OUTPUT_REPLACEMENT = '''                if self._safe_atvp_play_output(output, deadline=play_deadline):
+'''
+
 HEADERS_ANCHOR = '''        playback_headers = dict(clean_output.get("header") or {})
         headers = dict(playback_headers)
         headers.setdefault("User-Agent", self.user_agent)
@@ -159,6 +204,15 @@ REDIRECT_REPLACEMENT = '''            if status in V80_SECURITY_REDIRECT_STATUSE
 
 INSERTIONS = (
     ("target-policy", TARGET_ANCHOR, TARGET_REPLACEMENT),
+    ("strict-unprobed-output", SAFE_OUTPUT_ANCHOR, SAFE_OUTPUT_REPLACEMENT),
+    ("player-unprobed-output", PLAYER_OUTPUT_ANCHOR, PLAYER_OUTPUT_REPLACEMENT),
+    (
+        "player-refreshed-unprobed-output",
+        PLAYER_REFRESHED_OUTPUT_ANCHOR,
+        PLAYER_REFRESHED_OUTPUT_REPLACEMENT,
+    ),
+    ("resource-probe-policy", RESOURCE_PROBE_ANCHOR, RESOURCE_PROBE_REPLACEMENT),
+    ("resource-unprobed-output", RESOURCE_OUTPUT_ANCHOR, RESOURCE_OUTPUT_REPLACEMENT),
     ("probe-headers", HEADERS_ANCHOR, HEADERS_REPLACEMENT),
     ("redirect-decision", LOOP_ANCHOR, LOOP_REPLACEMENT),
     ("redirect-transition", REDIRECT_ANCHOR, REDIRECT_REPLACEMENT),
@@ -224,11 +278,31 @@ def apply_route_security_overlay(source):
     spider = _class(tree, "Spider")
     policy = _method(spider, "_route_security_policy")
     target = _method(spider, "_resolved_media_target")
+    safe_output = _method(spider, "_safe_atvp_play_output")
+    player = _method(spider, "_v80_playerContent_unbounded")
+    resource_detail = _method(spider, "_validated_playable_detail")
     probe = _method(spider, "_v80_probe_media_output_unbounded")
     if len(_calls(policy, "V80SecurityPolicy")) != 1:
         raise RouteSecurityOverlayError("route policy must be constructed exactly once")
     if len(_calls(target, "evaluate")) != 1:
         raise RouteSecurityOverlayError("media target must be evaluated exactly once")
+    if len(_calls(safe_output, "_media_url_allowed")) != 1:
+        raise RouteSecurityOverlayError("unprobed output must use strict media policy once")
+    if _calls(safe_output, "_safe_media_url"):
+        raise RouteSecurityOverlayError("weak unprobed output policy remains active")
+    player_output_calls = _calls(player, "_safe_atvp_play_output")
+    if len(player_output_calls) != 2 or any(
+            not any(keyword.arg == "deadline" for keyword in call.keywords)
+            for call in player_output_calls):
+        raise RouteSecurityOverlayError("player fallback policy seams are invalid")
+    resource_output_calls = _calls(resource_detail, "_safe_atvp_play_output")
+    if len(resource_output_calls) != 1 or not any(
+            keyword.arg == "deadline" for keyword in resource_output_calls[0].keywords):
+        raise RouteSecurityOverlayError("resource fallback policy seam is invalid")
+    resource_policy_calls = _calls(resource_detail, "_media_url_allowed")
+    if len(resource_policy_calls) != 1 or not any(
+            keyword.arg == "deadline" for keyword in resource_policy_calls[0].keywords):
+        raise RouteSecurityOverlayError("resource probe policy seam is invalid")
     if len(_calls(probe, "redirect")) != 1:
         raise RouteSecurityOverlayError("each redirect hop must use one policy decision")
     if len(_calls(probe, "v80_security_filter_headers")) != 2:
