@@ -245,8 +245,9 @@
 | 独立模块中文别名 | `46/46`：10 个 P1 有序源码切片、24 个 P2 Python 模块、12 个 P3/P4/P5 叶模块均在开发源码 README 建立稳定映射；别名不改变文件名、符号或运行时合同 |
 | P4 重定向/响应边界收口 | 2026-08-18 已完成最小修复：Douban JSON/HTML、TMDB 与想看动作禁用自动重定向；`_resolve_user_id()` 仅解析同源 3xx `Location`，200 响应受 `256 KiB` 与总 deadline 约束；三个聚焦文件 `66 passed` |
 | 当前 V80 候选 | `862377` bytes；SHA256 `C1ACAB802121E3F69ADEA0EBF1AB271C14015124AA28D2D1F8F58F97C8481B7D`；未修改公开 V70 或根索引 |
-| 本批次最终 closure | 固定报告 `work/v80-p5-5f-redirect-boundary-alias-closure-r6-20260818.json`；必须保持 `18/18 passed`、实现树稳定、`production_writes=false`、`deployment_attempted=false` |
-| 剩余发布路径 | 精确收敛 Git 候选提交、私有灰度、真实服务器/MuMu/FongMi 验证、回退演练、人工发布批准和生产晋升 |
+| 本批次最终 closure | `work/v80-p5-5f-redirect-boundary-alias-closure-r6-20260818.json`；`18/18 passed`、pytest `2124 passed`、实现树 `180 / AB29AC3A...45AB` 且稳定；报告 SHA256 `743ACB44FDE44AA17E5E4118DE859854A5FCA5426FD04FDFDC74D9CAC91385A9`；`production_writes=false`、`deployment_attempted=false` |
+| V80 本地候选提交 | `v80-dev / 6d1ad3d85ab21ec804e512b112e77ebcf228f91e`（`feat: prepare V80 production candidate`）；tracked worktree 与 index 在提交后干净，历史未跟踪证据不纳入候选 |
+| 剩余发布路径 | 以固定候选提交进入私有灰度、真实服务器/MuMu/FongMi 验证、V70 回退演练、人工发布批准和生产晋升 |
 | V70 锁定点 | 标签 `v70`，提交 `612617b35f08b98234c6e20c8137d8dea9035e97` |
 | 开发构建合同 | `manifest + parts + single-file build` |
 | P1 自动化 | `324 passed`；15 项 Golden 与 V70 全部一致 |

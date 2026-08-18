@@ -10,8 +10,8 @@
 - V80 只在 `v80-dev` 分支开发，不自动部署，不覆盖公开固定入口，不修改公开索引版本。
 - P1 至 P5 本地工程链已完成；当前候选为 `862377 / C1ACAB802121E3F69ADEA0EBF1AB271C14015124AA28D2D1F8F58F97C8481B7D`。
 - 项目级安全复核已关闭 Requests 自动重定向绕过 P4 响应边界及 `_resolve_user_id()` 无界读取；三个聚焦 P4 文件 `66 passed`，未新增通用 redirect/session 框架。
-- 46 个维护单元中文别名已按 10 个 chunk 与 36 个 Python module 精确覆盖；最终增量 closure 固定写入 `work/v80-p5-5f-redirect-boundary-alias-closure-r6-20260818.json`。
-- closure、候选 Git 提交、私有灰度、真实环境验证、回退演练和人工批准完成前，V80 不得接管公开行为。
+- 46 个维护单元中文别名已按 10 个 chunk 与 36 个 Python module 精确覆盖；最终 r6 closure 为 `18/18 passed`、pytest `2124 passed`，报告 SHA256 `743ACB44FDE44AA17E5E4118DE859854A5FCA5426FD04FDFDC74D9CAC91385A9`。
+- 本地候选已固定为 `v80-dev / 6d1ad3d85ab21ec804e512b112e77ebcf228f91e`；私有灰度、真实环境验证、回退演练和人工批准完成前，V80 不得接管公开行为。
 
 ## 2. V70 冻结基线
 
@@ -490,7 +490,7 @@ V80 晋升必须作为一次发布事务完成：
 
 ### 12.1 当前执行点（2026-08-18）
 
-当前只收敛发布证据，不再扩建业务能力或通用防御框架。固定候选为 `862377` bytes、SHA256 `C1ACAB802121E3F69ADEA0EBF1AB271C14015124AA28D2D1F8F58F97C8481B7D`；P4 重定向/响应边界聚焦回归 `66 passed`，维护别名 `46/46` 的集合断言 `1 passed`。本批只从受信 r5 报告按依赖图续跑失效步骤，输出新的只读 closure；随后精确收敛 Git 候选提交，再进入私有灰度、真实服务器/MuMu/FongMi 验证、完整回退演练、人工批准和生产晋升。禁止为了当前收口新增通用 redirect、session、cache、retry、executor、并发或跨项目框架。
+当前只收敛发布证据，不再扩建业务能力或通用防御框架。固定候选为 `862377` bytes、SHA256 `C1ACAB802121E3F69ADEA0EBF1AB271C14015124AA28D2D1F8F58F97C8481B7D`；P4 重定向/响应边界聚焦回归 `66 passed`，维护别名 `46/46` 的集合断言 `1 passed`。受信 r5 因 gate 工具共同指纹变化安全失效，r6 实际执行全部 18 步并得到 `18/18 passed`、pytest `2124 passed`、稳定实现树 `180 / AB29AC3A...45AB`；只读报告 SHA256 为 `743ACB44FDE44AA17E5E4118DE859854A5FCA5426FD04FDFDC74D9CAC91385A9`。本地候选提交已固定为 `6d1ad3d85ab21ec804e512b112e77ebcf228f91e`，下一阶段仅为私有灰度、真实服务器/MuMu/FongMi 验证、完整回退演练、人工批准和生产晋升。禁止为了当前收口新增通用 redirect、session、cache、retry、executor、并发或跨项目框架。
 
 ### 12.2 历史执行记录
 
@@ -537,4 +537,4 @@ P5-5E **播放调用族并发与隔离基线** 已于 2026-08-17 完成小范围
 
 P5-5F **History 调用族并发与隔离基线** 已于 2026-08-17 完成小范围实现、确定性回归、三路最终复审和技术 closure。中文别名“History 并发所有权覆盖层”对应 13 个显式唯一替换，以 P5-5E `857088 / 3DAB5769...299F` 为精确输入，只收口 History job identity、background/manual/replacement owner、同一 context lock 内的 generation/category refresh 与临界区外持久化；`_history_sync_lock` 和 History 事件队列保持独立，不新增通用 executor/cache/retry/concurrency 框架。候选为 `859732 / B42B37C097AA989F0FE82EF380A71865A4FDA02F6606A295E120FD79DA610700`。正式 `/1` 报告 `work/v80-p5-history-concurrency-r3-20260817.json` 为 `8/8 passed`，SHA256 `9B00F4A4FCDBF4556CC764D706E67BC73EA0E4A5A6660D595BBB043050BC5E9C`；overlay/runner `34 passed`、构建消费者 `4 passed`、stage selector `12 passed`、Chaos `7 passed`、旧消费者修复后 `53 passed`，simplify/spec/security 最终均 `findings=0`。closure r1 只因 pytest 在 `2400s`、约 `75%` 超时；r2 只暴露 53 个历史测试消费者未禁用更晚 History overlay，两份报告均只读保留。最终技术 closure `work/v80-p5-5f-history-concurrency-closure-r3-20260817.json` 为 `18/18 passed`、`7 executed / 11 reused`、pytest `2117 passed`、稳定树 `180 / FE0ADBCF7628CFCE1E10D55FAF3B0780394CEFE1518755BBD388BDCDC5F87609`，SHA256 `77E0FF352DA25FAE2D76311584F70D1585CBB4E68274BD2CFCD505023F8D8648`；无生产写入或部署。
 
-后续不再扩建通用并发、缓存、重试、executor 或跨项目框架。V80 剩余发布路径固定为：最终增量 closure、精确 Git 候选提交、私有灰度、真实服务器/MuMu/FongMi 验证、完整回退演练、人工发布批准和生产晋升；任何生产切换前仍必须保持公开 V70 指纹锁，并生成新的只读证据报告。
+后续不再扩建通用并发、缓存、重试、executor 或跨项目框架。最终 r6 closure 与本地 Git 候选提交已经完成；V80 剩余发布路径固定为：私有灰度、真实服务器/MuMu/FongMi 验证、完整回退演练、人工发布批准和生产晋升。任何生产切换前仍必须保持公开 V70 指纹锁，并生成新的只读证据报告。
