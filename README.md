@@ -4,15 +4,94 @@
 
 目录层级参考 [`har01d5/tvbox`](https://github.com/har01d5/tvbox) 的公开发布方式：根目录提供仓库说明和订阅索引，`py/` 保存运行时 Python 文件。官方仓库中的弹幕、TMDB、直播和校验资产属于其自身业务，本仓库不机械复制。
 
-## 仓库导入
+## 追更助手傻瓜级使用说明（AList-TVBox Web）
 
-在 AList-TVBox Web 管理页打开插件管理，导入：
+不需要手工修改订阅 JSON，也不要自己添加 `api`、`token`、`secret`、`loader`、`source` 或 `raw`。准备好一个 TMDB API Read Access Token 后，按下面步骤操作即可。
+
+### 第 1 步：在 Web 界面导入仓库
+
+1. 用浏览器打开自己的 AList-TVBox Web 管理页并登录。
+2. 打开“插件管理”页面，点击“导入仓库”“添加仓库”或同类按钮。不同 AList-TVBox 版本的按钮文字可能略有不同。
+3. 将下面地址完整粘贴到仓库地址输入框，然后确认导入：
 
 ```text
 https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/spiders_v2.json
 ```
 
-升级时重新导入同一地址，然后在 FongMi/TvBox 中刷新实际使用的订阅。
+4. 在插件列表中找到“豆瓣 TMDB 追更助手”，确认版本显示为 `92`。
+
+以后升级仍然使用同一个地址重新导入。若还显示旧版本，先在 Web 界面重新导入仓库，不要修改插件 ID 或源码地址。
+
+### 第 2 步：把插件加入订阅并打开 EXT
+
+1. 在左侧菜单进入“订阅” -> “订阅源管理”。
+2. 打开准备给 FongMi/TvBox 使用的订阅源。
+3. 在插件列表中加入或找到“豆瓣 TMDB 追更助手 v92”。
+4. 点击插件所在行的“配置”。部分版本可能显示为“EXT”或“编辑”，它们指向同一个插件配置输入框。
+
+### 第 3 步：整段粘贴 EXT
+
+下面是可直接粘贴的合法 JSON。`_说明_*` 字段就是中文注释，插件会自动忽略，不需要删除；只替换需要填写的值。
+
+```json
+{
+  "_说明_使用方法": "复制整段到 AList-TVBox Web 中追更助手的 EXT/配置框。所有 _说明_ 字段只作中文注释，插件会忽略。",
+  "_说明_运行模式": "固定值，不要修改，也不要手工添加 api、token、secret、loader、source 或 raw。",
+  "atvp_plugin_mode": "alist-tvbox-raw",
+  "_说明_TMDB": "把下一行占位值替换为 TMDB API Read Access Token，不是 API Key v3。",
+  "tmdb_access_token": "YOUR_TMDB_READ_ACCESS_TOKEN",
+  "_说明_History地址": "通常留空，自动复用当前订阅地址；只有另有客户端可访问的 History HTTPS 地址时才填写。",
+  "history_api": "",
+  "_说明_History账号": "只读取云端记录可留空；需要跨设备写回播放进度时，同时填写当前 AList-TVBox 的 USER 或 ADMIN 账号和密码。",
+  "history_username": "",
+  "history_password": "",
+  "_说明_资源模式": "推荐保持默认顺序；插件会自动隐藏当前后端不可用的模式。",
+  "resource_search_modes": ["vod1", "vod", "pansou", "telegram"]
+}
+```
+
+必须修改：
+
+- 将 `YOUR_TMDB_READ_ACCESS_TOKEN` 替换为自己的 TMDB API Read Access Token。可在 TMDB 网站的“设置” -> “API”中复制，注意不是较短的 API Key v3。
+
+按需修改：
+
+- 只想读取已有播放记录：`history_username` 和 `history_password` 保持空字符串。
+- 需要把本机播放进度写回并跨设备同步：同时填写当前 AList-TVBox 可登录的 `USER` 或 `ADMIN` 用户名和密码。
+- `history_api` 通常保持空字符串。只有当前订阅地址不能承载 History，而且另有客户端可访问的 HTTPS 同步地址时才填写。
+
+### 第 4 步：保存并让客户端刷新
+
+1. 在 EXT/配置窗口点击“保存”或“确定”。
+2. 回到订阅源页面，再点击一次“保存”“更新”或“刷新”，确保新 EXT 已写入实际订阅。
+3. 打开 FongMi/TvBox，在设置或配置页面刷新正在使用的订阅。
+4. 回到首页，进入“豆瓣 TMDB 追更助手”。AList-TVBox 已显示 V92、但客户端仍是旧内容时，通常只是 FongMi/TvBox 尚未刷新订阅。
+
+### 第 5 步：开始追更
+
+- “追更确认”：搜索或打开一个电视剧、动漫、综艺等多集项目，确认后加入追更。电影和明确只有 0/1 集的项目不会加入。
+- “追更动态”：查看最近更新、已看集数、待看集数和继续播放入口。
+- “追更管理”：检查 History 同步连接、执行主动预热、查看线路状态或取消追更。
+- “主动预热”：首次配置后建议执行一次。处理完成后，卡片会显示“已预热”“已绑定资源”或“预热线路待刷新”等状态。
+
+### 快速自检
+
+1. “追更管理” -> “检查同步连接”：页面应明确显示成功、只读或失败原因。
+2. “追更管理” -> “主动预热”：处理数量应持续变化，完成后至少有部分条目显示可直接播放或已绑定资源。
+3. 播放一集数分钟后退出，再刷新“追更动态”：进度不应回退到更早位置。
+
+### 常见问题
+
+| 问题 | 处理方法 |
+| --- | --- |
+| Web 插件列表仍显示 V90/V91 | 使用上面的仓库地址重新导入，然后确认插件版本为 `92`。 |
+| Web 已是 V92，FongMi/TvBox 还是旧内容 | 在客户端刷新实际使用的订阅；必要时回到 Web 订阅源页面再次保存。 |
+| EXT 保存时报 JSON 错误 | 整段重新复制，不要加入 `//` 注释，不要使用中文引号，也不要漏掉逗号或双引号。 |
+| 检查同步显示只读 | 同时填写 `history_username` 和 `history_password`，账号必须具有 `USER` 或 `ADMIN` 角色。 |
+| 追更条目暂时没有线路 | 在“追更管理”执行主动预热，等待进度完成后再打开卡片。 |
+| TMDB 没有结果或资料不完整 | 先确认填写的是 API Read Access Token，并检查 Token 前后是否多了空格。 |
+
+> 安全提醒：不要把 TMDB Token、History 密码、Cookie、私有订阅完整地址或带签名的播放地址发到公开仓库、日志和问题报告中。
 
 ## 当前插件
 
@@ -35,16 +114,9 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/spiders_v2.j
 - TMDB 冷查询优先使用客户端通道，客户端过慢、返回空结果或失败时由服务端通道延迟补位，不形成无限重试。
 - 图片、分类、详情、身份、播放记录和线路质量使用有界缓存，过期内容可先返回旧值并在后台刷新。
 
-### 最小配置
+### 配置说明
 
-```json
-{
-  "atvp_plugin_mode": "alist-tvbox-raw",
-  "tmdb_access_token": "YOUR_TMDB_READ_ACCESS_TOKEN"
-}
-```
-
-需要跨设备写回播放记录时，再配置当前 AList-TVBox 容器中具有 `USER` 或 `ADMIN` 角色的账号。账号配置不完整时按只读模式运行。不要把账号、密码、Cookie、Token 或完整订阅地址提交到仓库、日志或问题报告。
+可直接复制的完整 EXT 已放在上方“第 3 步”。实际必填项只有固定运行模式和 TMDB API Read Access Token；需要跨设备写回播放记录时，再填写当前 AList-TVBox 中具有 `USER` 或 `ADMIN` 角色的账号。账号配置不完整时按只读模式运行。
 
 ### 升级后检查
 
