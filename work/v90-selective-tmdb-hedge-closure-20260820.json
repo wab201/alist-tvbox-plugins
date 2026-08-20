@@ -1,0 +1,133 @@
+{
+  "schema": "v90-selective-tmdb-hedge-closure/1",
+  "generated_at": "2026-08-20T03:21:03.657Z",
+  "overall": "passed",
+  "scope": {
+    "changed_owners": [
+      "version_metadata",
+      "candidate_recognition"
+    ],
+    "unchanged_owners_reused": [
+      "follow_interaction",
+      "history_merge",
+      "route_preheat_restore",
+      "playlist_output",
+      "filter_normalization"
+    ],
+    "full_pytest_executed": false,
+    "legacy_stage_gate_executed": false,
+    "macro_executed": false,
+    "chaos_executed": false
+  },
+  "behavior": {
+    "client_first": true,
+    "hedge_delay_ms": 800,
+    "server_on_client_empty": true,
+    "explicit_series_first_confident_tv_wins": true,
+    "unclear_content_waits_for_movie_conflict": true,
+    "client_unavailable_allows_server_takeover": true,
+    "health_sample_limit": 8,
+    "failure_limit": 3,
+    "degrade_seconds": 60,
+    "identity_cache_prefix": "tmdb-json:follow-identity:",
+    "infinite_retry_added": false,
+    "generic_cache_framework_added": false
+  },
+  "artifacts": {
+    "version_owner": {
+      "path": "src/douban_tmdb_follow_v80/owners/01_version_metadata.json",
+      "bytes": 1945,
+      "sha256": "B5D9E8D25E188E8FA54F3049EFDF8146DC78C25E40B018C50B2652402F81BA72"
+    },
+    "candidate_owner": {
+      "path": "src/douban_tmdb_follow_v80/owners/03_candidate_recognition.json",
+      "bytes": 147752,
+      "sha256": "6FB8F06D98AA135FC245839887F14992F561FDBFE379DD752CB5A3BF982CD11F"
+    },
+    "canonical": {
+      "path": "src/douban_tmdb_follow_v80/豆瓣TMDB追更单入口.py",
+      "bytes": 981757,
+      "sha256": "B81CCB95119B6A676CA7CBE93166EE2A7FC4D5AECE79EE78FC1852FBA0619CA9"
+    },
+    "staging": {
+      "path": "private/v80/staging/豆瓣TMDB追更单入口.py",
+      "bytes": 981757,
+      "sha256": "B81CCB95119B6A676CA7CBE93166EE2A7FC4D5AECE79EE78FC1852FBA0619CA9"
+    },
+    "private_index": {
+      "path": "private/v80/spiders_v2.json",
+      "bytes": 152,
+      "sha256": "9E213126607B8EEB66041EA5E92A6CCFBEE43BC4F282DC56D47A355BF8B7B0B0"
+    }
+  },
+  "verification": {
+    "targeted_pytest": {
+      "current_contracts": 20,
+      "current_passed": 20,
+      "test_file_sha256": "0EB964D6AEF994924698E107680EA3EDEDC0DD25A116EEF9526C8D9D7F8BA03C",
+      "executions": [
+        {
+          "selected": 19,
+          "passed": 19,
+          "failed": 0,
+          "duration_seconds": 8.84
+        },
+        {
+          "selected": 1,
+          "passed": 0,
+          "failed": 1,
+          "failure_owner": "test_fixture",
+          "failure": "NameError: requests is not defined"
+        },
+        {
+          "selected": 1,
+          "passed": 1,
+          "failed": 0,
+          "duration_seconds": 0.64,
+          "resume_policy": "failed_node_only"
+        }
+      ]
+    },
+    "build_check": "passed",
+    "python_compile": "passed",
+    "atvp_direct_play": {
+      "path": "work/v90-atvp-direct-play-20260820.json",
+      "sha256": "AFE451D4F4F956F8E40DE31FD04323599093FE99847969F1E8A6113AD2E487AF",
+      "ok": true
+    },
+    "fongmi_dual_runtime": {
+      "path": "work/v90-dual-runtime-20260820.json",
+      "sha256": "E9A5403C4228ED11708DA6BD13E463418F1A40CA8B01ED945E7FCEE051261433",
+      "ok": true
+    }
+  },
+  "deployment": {
+    "private_plugin_id": 421,
+    "version": 90,
+    "enabled": true,
+    "configuration_sha256": "A7F3F3E5D9414102D3EF0E28EEE3B5A787B372B8CE4EEB1FC11DB273709FF7EC",
+    "import_report": {
+      "path": "work/v80-private-server-import-v90-20260820.json",
+      "sha256": "6AD5DD3C772C8ADE890125BA8E9B7ACED5BC29F8D49503645BC1B0FCBD2AF9F3"
+    },
+    "readonly_audit": {
+      "path": "work/v80-private-server-post-import-readonly-v90-20260820.json",
+      "sha256": "21228547DCB80CB9D969D6CCE3426C02671095A0565CE0B868C1F88373127F0C",
+      "production_writes": false,
+      "managed_source_unchanged": true
+    }
+  },
+  "public_v70": {
+    "plugin_id": 416,
+    "version": 70,
+    "bytes": 616699,
+    "sha256": "233C73CAE1048210B34872D4A10EA6023662300F70A8657DB82EA65C342182D4",
+    "modified": false
+  },
+  "manual_validation_pending": [
+    "异地 FongMi 刷新现有私有订阅后确认插件显示 v90",
+    "观察冷查询快速客户端命中时无额外服务端等待",
+    "模拟客户端慢、空结果或临时失败时确认服务端补位",
+    "确认已有播放进度不会被 TMDB 空进度回退"
+  ]
+}

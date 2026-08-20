@@ -1,0 +1,54 @@
+# V80-only source owner for title and resource-name normalization.
+#
+# This file is parsed by tools/build_v80_private_release.py. The two methods
+# must remain AST-identical to their runtime definitions in the independent
+# V80 canonical source.
+
+class Filter:
+    @staticmethod
+    def _normalize_title(value):
+        text = unicodedata.normalize("NFKC", str(value or "")).lower()
+        text = re.sub(r"[\[【(（][^\]】)）]{0,40}[\]】)）]", " ", text)
+        chinese_number = "零〇一二两三四五六七八九十百壹贰叁肆伍陆柒捌玖拾佰"
+        text = re.sub(
+            r"(?i)(?:第?\s*[%s]+\s*(?:季|部)|第\s*\d+\s*(?:季|部)|season\s*\d+|s\s*0*\d+)\s*$" % chinese_number,
+            " ",
+            text,
+        )
+        text = re.sub(r"\b(?:19|20)\d{2}\b|2160p|1080p|720p|4k|全集|完结|更新至.*$", " ", text)
+        text = re.sub(r"(?:电视剧|连续剧|剧集|高清版|完整版|国语版|粤语版)\s*$", " ", text)
+        return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", text)
+
+
+class Spider:
+    @staticmethod
+    def _standardize_resource_name(value):
+        """Mirror the bounded part of AList TextUtils.cleanMediaTitle()."""
+        text = unicodedata.normalize("NFKC", str(value or "")).strip()
+        if not text:
+            return ""
+        text = re.sub(r"^[\s·•●✅✔✓★☆【】\[\]()（）{}]+", "", text)
+        # Telegram/VOD rows commonly carry a one-letter source marker such as
+        # `C沧元图`; remove only a leading marker before CJK text.
+        text = re.sub(r"^(?:[Cc]|资源标记)\s*(?=[\u3400-\u9fff])", "", text)
+        year = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", text)
+        text = re.sub(r"(?i)(?:系列更新中|更新中|连载中|全季更新|更新至\s*\d+|更至\s*\d+)", " ", text)
+        text = re.sub(
+            r"(?i)[\[【(（][^\]】)）]{0,96}(?:4k|8k|2160p|1080p|720p|web[- .]?dl|bluray|remux|更新|更至|完结|字幕|中字)[^\]】)）]{0,96}[\]】)）]",
+            " ", text,
+        )
+        text = re.sub(
+            r"(?i)\b(?:4k|8k|2160p|1080p|720p|uhd|hdr10?\+?|dv|remux|bluray|web[- .]?dl|webrip|h26[45]|hevc|mkv|mp4)\b.*$",
+            " ", text,
+        )
+        text = re.sub(r"(?i)\b\d{1,3}\s*[-~至]\s*\d{1,3}\s*(?:集|话|期)?\b", " ", text)
+        text = re.sub(r"\s+", " ", text).replace(" .", ".")
+        text = text.strip(" .-_·|/\\")
+        # Keep the season token readable for both display and matching.
+        text = re.sub(
+            r"(?<=[\u3400-\u9fff])(?=(?:第[零〇一二两三四五六七八九十百\d]{1,6}[季部]|Season\s*\d+|S\s*\d+))",
+            " ", text, flags=re.I,
+        )
+        if year and year.group(1) not in text:
+            text = "%s(%s)" % (text, year.group(1))
+        return text.strip()

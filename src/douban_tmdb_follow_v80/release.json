@@ -1,24 +1,16 @@
 {
-  "schema": "v80-private-release/3",
+  "schema": "v80-source/2",
   "contract": "independent_v80_modular",
   "id": "douban_tmdb_follow_single_v80_private",
   "version": 90,
-  "build": {
-    "baseline": {
-      "path": "src/douban_tmdb_follow_v80/parts/00_runtime_v80.pyinc",
-      "bytes": 872002,
-      "sha256": "B6319D2925AF60F5068DC84C2AA6B1AF753666CA4DA294533EB39736B5004CD7"
-    },
-    "owner_order": [
-      "version_metadata",
-      "follow_interaction",
-      "candidate_recognition",
-      "history_merge",
-      "route_preheat_restore",
-      "playlist_output"
-    ],
-    "canonical_is_generated": true,
-    "canonical_is_source_input": false
+  "entry": "豆瓣TMDB追更单入口.py",
+  "encoding": "utf-8",
+  "expected_size": 981757,
+  "expected_sha256": "B81CCB95119B6A676CA7CBE93166EE2A7FC4D5AECE79EE78FC1852FBA0619CA9",
+  "baseline": {
+    "path": "src/douban_tmdb_follow_v80/parts/00_runtime_v80.pyinc",
+    "bytes": 872002,
+    "sha256": "B6319D2925AF60F5068DC84C2AA6B1AF753666CA4DA294533EB39736B5004CD7"
   },
   "release_lineage": {
     "schema": "v80-release-lineage/1",
@@ -150,37 +142,14 @@
       }
     ]
   },
-  "canonical_source": {
-    "path": "src/douban_tmdb_follow_v80/豆瓣TMDB追更单入口.py",
-    "manifest": "src/douban_tmdb_follow_v80/release.json",
-    "bytes": 981757,
-    "sha256": "B81CCB95119B6A676CA7CBE93166EE2A7FC4D5AECE79EE78FC1852FBA0619CA9"
-  },
-  "staged_source": {
-    "path": "private/v80/staging/豆瓣TMDB追更单入口.py",
-    "bytes": 981757,
-    "sha256": "B81CCB95119B6A676CA7CBE93166EE2A7FC4D5AECE79EE78FC1852FBA0619CA9",
-    "byte_identical_to_canonical": true
-  },
-  "private_index": {
-    "path": "private/v80/spiders_v2.json",
-    "bytes": 152,
-    "sha256": "9E213126607B8EEB66041EA5E92A6CCFBEE43BC4F282DC56D47A355BF8B7B0B0",
-    "file_is_relative_to_index": true
-  },
-  "compatibility_targets": {
-    "alist_tvbox": {
-      "version": "1.51.1",
-      "commit": "47432df300c1ee54e799fe9c7a3eb169823c2f0e",
-      "evidence": "work/v80-upstream-1511-github-evidence-20260818.json",
-      "evidence_sha256": "E6AF69979CDF5587592ABD33000CC9EACDFAA9077FE70B93062BC9CB4AD3DF1B"
-    },
-    "fongmi": {
-      "source_version": "5.6.0",
-      "source_commit": "1a19fee278fa2234da725d61a53bf59b69fe9127",
-      "source_archive_sha256": "9C504A892649DD79FD4D657C7B31E8B34E81EC09CF6E8E421158C244AE05065B"
-    }
-  },
+  "owner_order": [
+    "version_metadata",
+    "follow_interaction",
+    "candidate_recognition",
+    "history_merge",
+    "route_preheat_restore",
+    "playlist_output"
+  ],
   "source_owners": {
     "version_metadata": {
       "name": "版本元数据",
@@ -235,10 +204,17 @@
       ]
     }
   },
-  "deployment": {
-    "scope": "build_time_initial_state",
-    "server": "not_executed_by_builder",
-    "mumu": "not_executed_by_builder",
-    "runtime_evidence": "tracked_outside_manifest"
+  "compatibility_targets": {
+    "alist_tvbox": {
+      "version": "1.51.1",
+      "commit": "47432df300c1ee54e799fe9c7a3eb169823c2f0e",
+      "evidence": "work/v80-upstream-1511-github-evidence-20260818.json",
+      "evidence_sha256": "E6AF69979CDF5587592ABD33000CC9EACDFAA9077FE70B93062BC9CB4AD3DF1B"
+    },
+    "fongmi": {
+      "source_version": "5.6.0",
+      "source_commit": "1a19fee278fa2234da725d61a53bf59b69fe9127",
+      "source_archive_sha256": "9C504A892649DD79FD4D657C7B31E8B34E81EC09CF6E8E421158C244AE05065B"
+    }
   }
 }

@@ -1,0 +1,53 @@
+{
+  "schema": "v90-public-release/1",
+  "id": "douban_tmdb_follow_single",
+  "version": 90,
+  "architecture": {
+    "development": "modular owners",
+    "runtime": "single generated Python file",
+    "public_source_is_generated": true,
+    "canonical_and_private_staging_are_not_edited": true
+  },
+  "built_from": {
+    "path": "src/douban_tmdb_follow_v80/豆瓣TMDB追更单入口.py",
+    "bytes": 981757,
+    "sha256": "B81CCB95119B6A676CA7CBE93166EE2A7FC4D5AECE79EE78FC1852FBA0619CA9",
+    "owner_order": [
+      "version_metadata",
+      "follow_interaction",
+      "candidate_recognition",
+      "history_merge",
+      "route_preheat_restore",
+      "playlist_output"
+    ]
+  },
+  "public_source": {
+    "path": "py/豆瓣TMDB追更单入口.py",
+    "bytes": 981711,
+    "sha256": "C5FA2CDD02ABAC809099769758D8CE50053C9AE09D11DDAA0F65719AD12ECA82"
+  },
+  "public_index": {
+    "path": "spiders_v2.json",
+    "bytes": 230,
+    "sha256": "198AA8C73FC21CF8120E647FCE041B4B5F928DD9FC88A42361FE6E9ADCD98949"
+  },
+  "compatibility": {
+    "alist_tvbox": {
+      "version": "1.51.1",
+      "commit": "47432df300c1ee54e799fe9c7a3eb169823c2f0e",
+      "evidence": "work/v80-upstream-1511-github-evidence-20260818.json",
+      "evidence_sha256": "E6AF69979CDF5587592ABD33000CC9EACDFAA9077FE70B93062BC9CB4AD3DF1B"
+    },
+    "fongmi": {
+      "source_version": "5.6.0",
+      "source_commit": "1a19fee278fa2234da725d61a53bf59b69fe9127",
+      "source_archive_sha256": "9C504A892649DD79FD4D657C7B31E8B34E81EC09CF6E8E421158C244AE05065B"
+    }
+  },
+  "evidence": {
+    "targeted_contracts": "20 passed",
+    "atvp_direct_play": "work/v90-public-atvp-direct-play-20260820.json",
+    "fongmi_dual_runtime": "work/v90-public-dual-runtime-20260820.json",
+    "closure": "work/v90-selective-tmdb-hedge-closure-20260820.json"
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "ok": true,
+  "script": "D:\\自写爬虫\\alist-tvbox-plugins\\py\\豆瓣TMDB追更单入口.py",
+  "mode": "dual-runtime",
+  "checks": [
+    {
+      "name": "imports standard base.spider contract",
+      "ok": true
+    },
+    {
+      "name": "Spider class is instantiable",
+      "ok": true
+    },
+    {
+      "name": "direct-PY imports are available",
+      "ok": true
+    },
+    {
+      "name": "source avoids Python 3.9-only string prefix/suffix APIs",
+      "ok": true
+    },
+    {
+      "name": "direct-PY method exists: init",
+      "ok": true
+    },
+    {
+      "name": "direct-PY method shape: init",
+      "ok": true,
+      "detail": "expected at least 1 bound parameters, got 1"
+    },
+    {
+      "name": "direct-PY method exists: homeContent",
+      "ok": true
+    },
+    {
+      "name": "direct-PY method shape: homeContent",
+      "ok": true,
+      "detail": "expected at least 1 bound parameters, got 1"
+    },
+    {
+      "name": "direct-PY method exists: categoryContent",
+      "ok": true
+    },
+    {
+      "name": "direct-PY method shape: categoryContent",
+      "ok": true,
+      "detail": "expected at least 4 bound parameters, got 4"
+    },
+    {
+      "name": "direct-PY method exists: detailContent",
+      "ok": true
+    },
+    {
+      "name": "direct-PY method shape: detailContent",
+      "ok": true,
+      "detail": "expected at least 1 bound parameters, got 1"
+    },
+    {
+      "name": "direct-PY method exists: searchContent",
+      "ok": true
+    },
+    {
+      "name": "direct-PY method shape: searchContent",
+      "ok": true,
+      "detail": "expected at least 3 bound parameters, got 3"
+    },
+    {
+      "name": "direct-PY method exists: playerContent",
+      "ok": true
+    },
+    {
+      "name": "direct-PY method shape: playerContent",
+      "ok": true,
+      "detail": "expected at least 3 bound parameters, got 3"
+    },
+    {
+      "name": "direct-PY method exists: localProxy",
+      "ok": true
+    },
+    {
+      "name": "direct-PY method shape: localProxy",
+      "ok": true,
+      "detail": "expected at least 1 bound parameters, got 1"
+    },
+    {
+      "name": "local proxy does not hardcode a foreign siteKey",
+      "ok": true,
+      "detail": "use the runtime-injected self.siteKey for FongMi proxy routing"
+    },
+    {
+      "name": "init accepts empty dict ext without container services",
+      "ok": true
+    },
+    {
+      "name": "homeContent returns a dict",
+      "ok": true
+    },
+    {
+      "name": "homeContent exposes categories",
+      "ok": true
+    },
+    {
+      "name": "localProxy returns standard status/content shape",
+      "ok": true
+    },
+    {
+      "name": "destroy completes in direct-PY mode",
+      "ok": true
+    }
+  ],
+  "failures": []
+}

@@ -1,0 +1,28 @@
+{
+  "schema": "v80-source-owner/1",
+  "key": "version_metadata",
+  "name": "版本元数据",
+  "base": "parts/00_runtime_v80.pyinc",
+  "replacements": [
+    {
+      "order": 123,
+      "symbol": "__module_docstring__",
+      "base_lines": [
+        2,
+        15
+      ],
+      "before": "\"\"\"\n//@name:豆瓣TMDB追更助手（V80私有）\n//@id:douban_tmdb_follow_single_v80_private\n//@version:80\n\nAList-TVBox raw Python plugin for Douban/TMDB browsing and follow-up playback.\n\nDeploy this source through AList-TVBox plugin management and load the generated\nsubscription in FongMi/TvBox. The plugin Extend/data must contain\n``atvp_plugin_mode=alist-tvbox-raw`` for follow, History, and cloud-resource\nfeatures. With an empty ext the same source remains a direct FongMi metadata\nsite with category/search/detail and direct-URL player compatibility. The same\nsource also exports ``Filter`` for AList-TVBox detail/player filter reuse.\n\"\"\"\n",
+      "after": "\"\"\"\n//@name:豆瓣TMDB追更助手（V80.1私有 v90）\n//@id:douban_tmdb_follow_single_v80_private\n//@version:90\n\nAList-TVBox raw Python plugin for Douban/TMDB browsing and follow-up playback.\n\nDeploy this source through AList-TVBox plugin management and load the generated\nsubscription in FongMi/TvBox. The plugin Extend/data must contain\n``atvp_plugin_mode=alist-tvbox-raw`` for follow, History, and cloud-resource\nfeatures. With an empty ext the same source remains a direct FongMi metadata\nsite with category/search/detail and direct-URL player compatibility. The same\nsource also exports ``Filter`` for AList-TVBox detail/player filter reuse.\n\"\"\"\n"
+    },
+    {
+      "order": 124,
+      "symbol": "Spider.name",
+      "base_lines": [
+        1336,
+        1336
+      ],
+      "before": "    name = \"豆瓣TMDB追更助手（AList-TVBox专用）\"\n",
+      "after": "    name = \"豆瓣TMDB追更助手（V80.1私有 v90）\"\n"
+    }
+  ]
+}

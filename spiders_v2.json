@@ -2,7 +2,7 @@
   {
     "id": "douban_tmdb_follow_single",
     "file": "py/豆瓣TMDB追更单入口.py",
-    "version": 70,
+    "version": 90,
     "valid": true
   },
   {
