@@ -4,6 +4,16 @@ __pycache__/
 *.zip
 .env
 .venv/
+.pytest_cache/
 .idea/
 .vscode/
 build/
+
+# Public repository boundary: development material stays outside this branch.
+src/
+tests/
+tools/
+work/
+private/
+reports_*.json
+requirements-dev.txt

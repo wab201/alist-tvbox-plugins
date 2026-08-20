@@ -1,62 +1,88 @@
-# AList-TVBox 插件仓库
+# AList-TVBox 公开插件仓库
 
-本仓库提供符合 AList-TVBox `spiders_v2.json` 格式的公开插件。豆瓣 TMDB 追更助手当前公开版本为 V90。
+本仓库只保存可直接导入或使用的公开发布产物，不包含开发源码、构建器、测试、私有部署文件或工程证据。
+
+目录层级参考 [`har01d5/tvbox`](https://github.com/har01d5/tvbox) 的公开发布方式：根目录提供仓库说明和订阅索引，`py/` 保存运行时 Python 文件。官方仓库中的弹幕、TMDB、直播和校验资产属于其自身业务，本仓库不机械复制。
 
 ## 仓库导入
 
-在 AList-TVBox Web 管理页打开插件管理，将以下地址作为仓库地址导入：
+在 AList-TVBox Web 管理页打开插件管理，导入：
 
 ```text
 https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/spiders_v2.json
 ```
 
-后续继续导入同一地址即可按插件 ID 和递增版本刷新源码。刷新 AList-TVBox 插件后，还需要在实际使用的 FongMi/TvBox 客户端刷新订阅。
+升级时重新导入同一地址，然后在 FongMi/TvBox 中刷新实际使用的订阅。
 
-## 插件列表
+## 当前插件
 
-| 插件 | 版本 | 状态 | 文档 |
+| 插件 | 版本 | 运行时文件 | 说明 |
 | --- | ---: | --- | --- |
-| 豆瓣 TMDB 追更助手 | 90 | 公开 | [功能与配置](plugins/douban_tmdb_follow_single/README.md) |
-| SeedHub 磁力与多网盘 | 1 | 公开 | [功能与配置](plugins/seedhub/README.md) |
+| 豆瓣 TMDB 追更助手 | 90 | `py/豆瓣TMDB追更单入口.py` | 追更、播放进度同步、线路预热与恢复 |
+| SeedHub 磁力与多网盘 | 1 | `py/SeedHub.py` | 磁力和多网盘资源搜索、详情与解析入口 |
 
 ## 豆瓣 TMDB 追更助手 V90
 
-V90 在 V70 的豆瓣/TMDB 浏览、剧集追更、AList 资源搜索和 History 续播基础上完成以下升级：
+### 主要能力
 
-- 播放记录使用 AList-TVBox Playback/History 通道做增量同步、墓碑处理和单调合并，TMDB 空进度不能覆盖较新的本地进度。
-- 追更管理提供简体中文操作反馈、取消追更、同步检测和全追更条目主动预热；已验证线路持久绑定，失效后再刷新。
-- 资源候选除 `/vod`、`/vod1`、PanSou、Telegram 外，还可从受控的活动订阅插件补充，并继续经过标题、详情、播放器、安全输出和 Range 验证。
-- 未被 TMDB 收录的新剧可先使用本地或豆瓣临时身份，后续迁移到正式 TMDB 剧集身份并保留进度、线路和来源别名。
-- TMDB 使用选择性双链路热备：客户端冷查询先发，`800ms` 后或空结果/传输失败时再由 AList-TVBox 服务端通道补位；连续失败只短期降级，不无限重试。
-- 图片、分类、详情、身份和可播放线路使用有界缓存；网络响应、重定向、请求头、超时、并发和诊断信息均有明确边界。
+- 从豆瓣、TMDB、FongMi 收藏和播放记录建立电视剧、动漫、综艺及真人秀等多集项目的追更状态。
+- 电影、独立视频和已知 0/1 集项目拒绝加入追更；TMDB 未收录的新剧可建立临时剧集身份，后续迁移时保留播放进度和线路绑定。
+- 使用 AList-TVBox Playback/History 通道同步播放记录，支持增量变化、完整快照、墓碑和单调进度合并。
+- 主动预热全部追更条目，展示处理进度和可播放状态；已验证线路长期绑定，失效后才重新搜索。
+- 资源候选覆盖 AList、PanSou、Telegram 和受控订阅插件，并在持久化前执行标题、目标集、详情、播放器和媒体可达性验证。
+- TMDB 冷查询优先使用客户端通道，客户端过慢、返回空结果或失败时由服务端通道延迟补位，不形成无限重试。
+- 图片、分类、详情、身份、播放记录和线路质量使用有界缓存，过期内容可先返回旧值并在后台刷新。
 
-完整更新记录见 [V70 到 V90 发布说明](docs/V70_TO_V90_RELEASE_NOTES.md)。
+### 最小配置
 
-## 构建架构
-
-开发态维护冻结 V80 基线和以下 owner：
-
-- 版本元数据
-- 追更交互
-- 候选识别
-- 播放记录合并
-- 线路预热与恢复
-- 播放列表输出
-- 资源名过滤与规范化
-
-`tools/build_v80_private_release.py` 生成 canonical/private staging，`tools/build_v90_public_release.py` 再生成公共身份的固定单文件和根索引。`py/豆瓣TMDB追更单入口.py` 是发布产物，不是长期手工维护源。
-
-公共 V90 源码为 `981711` 字节，SHA256：
-
-```text
-C5FA2CDD02ABAC809099769758D8CE50053C9AE09D11DDAA0F65719AD12ECA82
+```json
+{
+  "atvp_plugin_mode": "alist-tvbox-raw",
+  "tmdb_access_token": "YOUR_TMDB_READ_ACCESS_TOKEN"
+}
 ```
 
-## 兼容与验证
+需要跨设备写回播放记录时，再配置当前 AList-TVBox 容器中具有 `USER` 或 `ADMIN` 角色的账号。账号配置不完整时按只读模式运行。不要把账号、密码、Cookie、Token 或完整订阅地址提交到仓库、日志或问题报告。
 
-- AList-TVBox 源码合同：`1.51.1 / 47432df300c1ee54e799fe9c7a3eb169823c2f0e`
-- FongMi 源码合同：`5.6.0 / 1a19fee278fa2234da725d61a53bf59b69fe9127`
-- V90 定向合同：`20 passed`
-- 模块化构建、Python 编译、ATVP direct-play、FongMi 双运行时通过
+### 升级后检查
 
-本地合同不等同于用户异地客户端的真实刷新和播放验收。V70 可通过 Git 标签 `v70` 回看；活动公开索引已经指向 V90。
+1. 在“追更管理”中检查同步连接，确认页面有明确成功或失败反馈。
+2. 执行主动预热，确认进度持续更新，完成后有条目标记为可直接播放。
+3. 打开已追更剧集，确认优先出现绑定线路并能进入播放器。
+4. 播放数分钟后刷新追更动态，确认本地进度没有被空云端或空 TMDB 数据回退。
+5. 对一部未被 TMDB 收录但有明确多集证据的新剧确认追更，检查是否建立临时剧集身份。
+
+## SeedHub
+
+SeedHub 提供首页、电影/动漫/剧集分类、分页、搜索、详情以及磁力和多网盘资源分组。插件只在用户选择具体资源时解析入口，AList-TVBox 继续负责网盘账号、临时挂载、文件展开、字幕、播放地址和 `client-proxy`。
+
+SeedHub 的 EXT 可以留空。不要在 EXT 中填写 AList-TVBox 管理员密码、订阅 Token、网盘 Cookie 或容器 API 密钥。最终分享是否有效、账号是否已配置以及文件能否播放，以 AList-TVBox `/parse` 和 `/play` 的结果为准。
+
+## 公开目录
+
+```text
+.
+├── .gitattributes
+├── .gitignore
+├── README.md
+├── ARCHITECTURE.md
+├── CHANGELOG.md
+├── spiders_v2.json
+└── py/
+    ├── SeedHub.py
+    └── 豆瓣TMDB追更单入口.py
+```
+
+- `spiders_v2.json`：AList-TVBox 仓库导入索引。
+- `py/`：可直接加载的运行时单文件。
+- [`ARCHITECTURE.md`](ARCHITECTURE.md)：公开架构、模块职责和边界。
+- [`CHANGELOG.md`](CHANGELOG.md)：V70 到 V90 的逐版本变化。
+
+开发态模块、owner、构建脚本、测试、门禁、源码取证和私有部署材料不进入公开仓库。公开 Python 文件是已验证的发布产物，不作为长期手工维护源。
+
+## 发布边界
+
+- 当前公开活动入口为 V90。
+- V70 只保留在 Git 标签 `v70` 供历史查看，不参与运行时回退。
+- 公开仓库升级不修改独立私有部署。
+- 本地兼容验证不等同于用户设备上的真实订阅刷新和播放验收。
