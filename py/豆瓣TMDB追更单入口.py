@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-//@name:豆瓣TMDB追更助手 v90
+//@name:豆瓣TMDB追更助手 v92
 //@id:douban_tmdb_follow_single
-//@version:90
+//@version:92
 
 AList-TVBox raw Python plugin for Douban/TMDB browsing and follow-up playback.
 
@@ -584,6 +584,1409 @@ class _DoubanClient:
                 return text
             finally:
                 operation.close_tracked(response)
+
+
+from dataclasses import dataclass
+
+def _clone_cache_exception(exc):
+    try:
+        return type(exc)(*getattr(exc, "args", ()))
+    except Exception:
+        return RuntimeError(str(exc or "foreground cache load failed"))
+
+class _ForegroundCacheFlight(object):
+    __slots__ = (
+        "generation", "key", "leader_thread_id", "event", "state",
+        "value", "exception",
+    )
+
+    def __init__(self, generation, key):
+        self.generation = generation
+        self.key = key
+        self.leader_thread_id = threading.current_thread().ident
+        self.event = threading.Event()
+        self.state = "running"
+        self.value = None
+        self.exception = None
+
+@dataclass(frozen=True)
+class ResourceScore:
+    score: int
+    outcome: str
+    reason: str
+    components: tuple = ()
+
+def v91_extract_season(value):
+    text = str(value or "")
+    found = re.search(
+        r"(?i)(?:\bS\s*0*(\d{1,2})(?:\b|(?=E))|\bseason\s*0*(\d{1,2})\b|"
+        r"第\s*0*(\d{1,2})\s*(?:季|部))",
+        text,
+    )
+    if found:
+        return int(next(item for item in found.groups() if item is not None))
+    chinese = re.search(
+        r"第?\s*([零〇一二两三四五六七八九十百壹贰叁肆伍陆柒捌玖拾佰]{1,6})\s*(?:季|部)",
+        text,
+    )
+    if not chinese:
+        return 0
+    digits = {
+        "零": 0, "〇": 0, "一": 1, "壹": 1, "二": 2, "两": 2, "贰": 2,
+        "三": 3, "叁": 3, "四": 4, "肆": 4, "五": 5, "伍": 5,
+        "六": 6, "陆": 6, "七": 7, "柒": 7, "八": 8, "捌": 8,
+        "九": 9, "玖": 9,
+    }
+    units = {"十": 10, "拾": 10, "百": 100, "佰": 100}
+    number = chinese.group(1)
+    if not any(char in units for char in number):
+        values = [str(digits[char]) for char in number if char in digits]
+        return int("".join(values)) if values else 0
+    total = 0
+    current = 0
+    for char in number:
+        if char in digits:
+            current = digits[char]
+        elif char in units:
+            total += (current or 1) * units[char]
+            current = 0
+    return total + current
+
+def v91_standardize_resource_name(value):
+    """Mirror the bounded part of AList TextUtils.cleanMediaTitle()."""
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    if not text:
+        return ""
+    text = re.sub(r"(?<=[\u3400-\u9fff])\s+(?=[\u3400-\u9fff])", "", text)
+    text = re.sub(
+        r"(?<=[\u3400-\u9fff])\s*[.·•・．]+\s*(?=[\u3400-\u9fff])",
+        "", text,
+    )
+    text = re.sub(r"^[\s·•●✅✔✓★☆【】\[\]()（）{}]+", "", text)
+    text = re.sub(r"^(?:[Cc]|资源标记)\s*(?=[\u3400-\u9fff])", "", text)
+    year = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", text)
+    text = re.sub(r"(?i)(?:系列更新中|更新中|连载中|全季更新|更新至\s*\d+|更至\s*\d+)", " ", text)
+    text = re.sub(
+        r"(?i)[\[【(（][^\]】)）]{0,96}(?:4k|8k|2160p|1080p|720p|web[- .]?dl|bluray|"
+        r"remux|更新|更至|完结|字幕|中字)[^\]】)）]{0,96}[\]】)）]",
+        " ", text,
+    )
+    text = re.sub(
+        r"(?i)\b(?:4k|8k|2160p|1080p|720p|uhd|hdr10?\+?|dv|remux|bluray|web[- .]?dl|"
+        r"webrip|h26[45]|hevc|mkv|mp4)\b.*$",
+        " ", text,
+    )
+    text = re.sub(r"(?i)\b\d{1,3}\s*[-~至]\s*\d{1,3}\s*(?:集|话|期)?\b", " ", text)
+    text = re.sub(r"\s+", " ", text).replace(" .", ".")
+    text = text.strip(" .-_·|/\\")
+    text = re.sub(
+        r"(?<=[\u3400-\u9fff])(?=(?:第[零〇一二两三四五六七八九十百\d]{1,6}[季部]|"
+        r"Season\s*\d+|S\s*\d+))",
+        " ", text, flags=re.I,
+    )
+    if year and year.group(1) not in text:
+        text = "%s(%s)" % (text, year.group(1))
+    return text.strip()
+
+def v91_resource_score(owner, row, item, bound):
+    """Keep V90 row scoring while making the behavior an importable owner."""
+    return v91_resource_score_detail(owner, row, item, bound).score
+
+def v91_resource_score_detail(owner, row, item, bound):
+    """Return the V90 score together with the first strict rejection reason."""
+    resource_id = str(row.get("vod_id") or row.get("id") or "").strip()
+    aliases = {
+        owner._normalize_media_title(value)
+        for value in owner._follow_title_alias_values(item)
+    } - {""}
+    work_titles = owner._resource_work_title_values(row)
+    title_values = work_titles or owner._resource_title_values(row)
+    if not title_values:
+        return ResourceScore(0, "insufficient", "missing_title")
+    if all(owner._resource_has_denied_variant(value) for value in title_values):
+        return ResourceScore(0, "conflict", "denied_variant")
+    tracking_season = owner._tracking_season(item)
+    season_count = owner._positive_int(item.get("season_count"), 0)
+    single_season = season_count == 1 or (season_count <= 0 and tracking_season == 1)
+    year = str(item.get("year") or "")[:4]
+    if bound and resource_id == bound:
+        return ResourceScore(
+            10000, "match", "bound_resource",
+            (("bound_resource", 10000),),
+        )
+    best = 0
+    best_reason = ""
+    rejected = set()
+    for raw_actual in title_values:
+        actual = owner._normalize_media_title(raw_actual)
+        if not actual:
+            rejected.add("missing_title")
+            continue
+        if owner._resource_has_denied_variant(raw_actual):
+            rejected.add("denied_variant")
+            continue
+        row_season = v91_extract_season(raw_actual)
+        if row_season and row_season != tracking_season and not single_season:
+            rejected.add("season_conflict")
+            continue
+        year_text = " ".join(
+            str(row.get(key) or "")
+            for key in (
+                "vod_name", "name", "title", "work_title", "note",
+                "vod_year", "vod_remarks",
+            )
+        )
+        row_years = set(re.findall(r"(?<!\d)((?:19|20)\d{2})(?!\d)", year_text))
+        if year and row_years and year not in row_years and row_season != tracking_season:
+            rejected.add("year_conflict")
+            continue
+        if actual in aliases:
+            score = 500
+            reason = "exact_title"
+        elif owner._resource_decorated_alias(raw_actual, aliases):
+            score = 470
+            reason = "decorated_title"
+        else:
+            rejected.add("non_exact_title")
+            continue
+        if row_season == tracking_season:
+            score += 80
+        if year and year in row_years:
+            score += 30
+        if score > best:
+            best = score
+            best_reason = reason
+    if best > 0:
+        return ResourceScore(best, "match", best_reason)
+    for reason, outcome in (
+            ("denied_variant", "conflict"),
+            ("season_conflict", "conflict"),
+            ("year_conflict", "conflict"),
+            ("non_exact_title", "insufficient"),
+            ("missing_title", "insufficient")):
+        if reason in rejected:
+            return ResourceScore(0, outcome, reason)
+    return ResourceScore(0, "insufficient", "missing_title")
+
+V92_TRUSTED_PLUGIN_DETAIL_MARKER = "trusted_plugin_detail_required"
+
+V92_IDENTITY_HARD_REJECTIONS = frozenset((
+    "denied_variant",
+    "season_conflict",
+    "year_conflict",
+))
+
+@dataclass(frozen=True)
+class ResourceIdentityDecision:
+    accepted: bool
+    reason: str
+    confidence: str
+    relaxed: bool = False
+    evidence: tuple = ()
+
+def _v92_plugin_identity(owner, row):
+    if not isinstance(row, dict):
+        return 0
+    if str(row.get("_resource_mode") or "").strip().lower() != "plugin":
+        return 0
+    resource_id = str(row.get("vod_id") or row.get("id") or "").strip()
+    decoded = owner._atvp_plugin_decode_resource_id(resource_id)
+    plugin_id = owner._positive_int((decoded or {}).get("plugin_id"), 0)
+    allowlist = owner.ATVP_PLUGIN_CANDIDATE_POLICY.get("allowlist") or {}
+    return plugin_id if plugin_id in allowlist else 0
+
+def v92_resource_search_admission(owner, row, item, bound=""):
+    """Allow trusted plugins to reach detail verification without weakening hard conflicts."""
+    strict = v91_resource_score_detail(owner, row, item, bound)
+    if strict.score > 0:
+        return ResourceIdentityDecision(
+            True, strict.reason or "strict_title_match", "strict",
+            evidence=(("score", strict.score),),
+        )
+    if strict.reason in V92_IDENTITY_HARD_REJECTIONS:
+        return ResourceIdentityDecision(False, strict.reason, "conflict")
+    plugin_id = _v92_plugin_identity(owner, row)
+    if not plugin_id:
+        return ResourceIdentityDecision(False, strict.reason, strict.outcome)
+    return ResourceIdentityDecision(
+        True,
+        "trusted_plugin_detail_required",
+        "trusted_source",
+        relaxed=True,
+        evidence=(("plugin_id", plugin_id), ("search_reason", strict.reason)),
+    )
+
+def v92_admit_resource_candidates(owner, rows, item, bound="", modes=("plugin",)):
+    """Preserve strict ordering, then append bounded trusted candidates for detail checks."""
+    rows = [dict(row) for row in rows or [] if isinstance(row, dict)]
+    strict = list(owner._resource_fair_candidate_order(
+        rows, item, bound=bound, modes=modes,
+    ))
+    output = list(strict)
+    seen = {
+        owner._resource_row_identity(row)
+        for row in output if isinstance(row, dict)
+    } - {""}
+    configured_limit = owner._positive_int(
+        owner.ATVP_PLUGIN_CANDIDATE_POLICY.get("search_limit"), 8,
+    )
+    limit = max(len(output), configured_limit)
+    for row in rows:
+        if len(output) >= limit:
+            break
+        identity = owner._resource_row_identity(row)
+        if not identity or identity in seen:
+            continue
+        decision = v92_resource_search_admission(owner, row, item, bound)
+        if not decision.accepted or not decision.relaxed:
+            continue
+        admitted = dict(row)
+        admitted["_v92_identity_admission"] = V92_TRUSTED_PLUGIN_DETAIL_MARKER
+        admitted["_v92_identity_reason"] = decision.reason
+        output.append(admitted)
+        seen.add(identity)
+    return output
+
+def _v92_detail_values(detail, vod, keys):
+    values = []
+    for payload in (vod, detail):
+        if not isinstance(payload, dict):
+            continue
+        for key in keys:
+            value = str(payload.get(key) or "").strip()
+            if value and value not in values:
+                values.append(value)
+    return values
+
+def _v92_detail_media_type(detail, vod):
+    text = " ".join(_v92_detail_values(
+        detail, vod,
+        ("media_type", "mediaType", "type_name", "type", "vod_class", "vod_tag"),
+    )).casefold()
+    if re.search(r"(?:电影|movie|film)", text, re.I):
+        return "movie"
+    if re.search(r"(?:电视剧|连续剧|剧集|电视动画|动漫|综艺|tv|series|anime)", text, re.I):
+        return "tv"
+    return ""
+
+def _v92_detail_external_identity(item, detail, vod):
+    matched = []
+    for label, target_keys, detail_keys in (
+            ("tmdb", ("tmdb_id",), ("tmdb_id", "tmdbId")),
+            ("douban", ("douban_id",), ("douban_id", "doubanId"))):
+        target = next((
+            str(item.get(key) or "").strip()
+            for key in target_keys if str(item.get(key) or "").strip()
+        ), "")
+        if not target:
+            continue
+        values = set(_v92_detail_values(detail, vod, detail_keys))
+        if not values:
+            continue
+        if target not in values:
+            return False, "%s_id_conflict" % label, ()
+        matched.append(label + "_id")
+    return True, "", tuple(matched)
+
+def v92_resource_detail_identity(owner, row, item, detail):
+    """Require independent detail evidence for candidates admitted by source trust."""
+    marker = str((row or {}).get("_v92_identity_admission") or "")
+    if marker != V92_TRUSTED_PLUGIN_DETAIL_MARKER:
+        return ResourceIdentityDecision(True, "strict_search_identity", "strict")
+    vod = owner._payload_first_vod(detail)
+    if not isinstance(vod, dict):
+        return ResourceIdentityDecision(False, "detail_missing", "insufficient", relaxed=True)
+
+    identity_ok, identity_reason, identity_evidence = _v92_detail_external_identity(
+        item or {}, detail, vod,
+    )
+    if not identity_ok:
+        return ResourceIdentityDecision(False, identity_reason, "conflict", relaxed=True)
+
+    target_type = str((item or {}).get("media_type") or "tv").strip().lower()
+    detail_type = _v92_detail_media_type(detail, vod)
+    if detail_type and target_type in ("movie", "tv") and detail_type != target_type:
+        return ResourceIdentityDecision(False, "detail_type_conflict", "conflict", relaxed=True)
+
+    title_keys = (
+        "vod_name", "name", "title", "show_name", "original_name", "original_title",
+    )
+    raw_titles = _v92_detail_values(detail, vod, title_keys)
+    context_values = raw_titles + _v92_detail_values(
+        detail, vod, ("vod_year", "year", "release_date", "premiere", "vod_remarks"),
+    )
+    target_year = str((item or {}).get("year") or "")[:4]
+    detail_years = set(re.findall(
+        r"(?<!\d)((?:19|20)\d{2})(?!\d)", " ".join(context_values),
+    ))
+    if target_year and detail_years and target_year not in detail_years:
+        return ResourceIdentityDecision(False, "detail_year_conflict", "conflict", relaxed=True)
+
+    tracking_season = owner._tracking_season(item or {})
+    season_count = owner._positive_int((item or {}).get("season_count"), 0)
+    single_season = season_count == 1 or (season_count <= 0 and tracking_season == 1)
+    detail_seasons = {
+        v91_extract_season(value) for value in context_values
+    } - {0}
+    if detail_seasons and tracking_season not in detail_seasons and not single_season:
+        return ResourceIdentityDecision(False, "detail_season_conflict", "conflict", relaxed=True)
+
+    if identity_evidence:
+        return ResourceIdentityDecision(
+            True, "detail_external_id_match", "verified", relaxed=True,
+            evidence=identity_evidence,
+        )
+
+    aliases = {
+        owner._normalize_media_title(v91_standardize_resource_name(value))
+        for value in owner._follow_title_alias_values(item or {})
+    } - {""}
+    for raw_title in raw_titles:
+        restored = v91_standardize_resource_name(raw_title)
+        normalized = owner._normalize_media_title(restored)
+        if normalized in aliases or owner._resource_decorated_alias(restored, aliases):
+            evidence = ["detail_title"]
+            if detail_type:
+                evidence.append("detail_type")
+            if target_year and target_year in detail_years:
+                evidence.append("detail_year")
+            if tracking_season in detail_seasons:
+                evidence.append("detail_season")
+            return ResourceIdentityDecision(
+                True, "detail_title_match", "verified", relaxed=True,
+                evidence=tuple(evidence),
+            )
+    return ResourceIdentityDecision(
+        False, "detail_identity_insufficient", "insufficient", relaxed=True,
+    )
+
+def v92_follow_preheat_status(owner, item):
+    current = owner._follow_preheat_current_item(item)
+    if owner._follow_route_binding_ready(current):
+        return "已预热"
+    if owner._entry_resource_preheat_pending(current):
+        return "预热中"
+    if owner._resource_binding_resource_id(current):
+        return "已绑定资源"
+    route = current.get("last_play_route") if isinstance(current.get("last_play_route"), dict) else {}
+    if route:
+        return "预热线路待刷新"
+    return ""
+
+V91_PREHEAT_AUDIT_VERSION = 1
+
+V91_PREHEAT_AUDIT_WORK_LIMIT = 64
+
+V91_PREHEAT_AUDIT_ENTRY_LIMIT = 48
+
+V91_PREHEAT_AUDIT_CARD_LIMIT = 17
+
+V91_PREHEAT_SHADOW_LIMIT = 2
+
+V91_PREHEAT_AUDIT_REASON_LABELS = {
+    "missing_title": "缺少可识别标题",
+    "denied_variant": "变体黑名单",
+    "season_conflict": "季度冲突",
+    "year_conflict": "年份冲突",
+    "non_exact_title": "标题未精确命中",
+    "candidate_order_limit": "排序或配额淘汰",
+    "invalid_resource_id": "资源标识无效",
+    "link_not_allowlisted": "链接不在检查白名单",
+    "link_check_failed": "白名单链接失效",
+    "detail_or_route_failed": "详情或线路验活失败",
+    "detail_missing": "详情缺失",
+    "detail_identity_insufficient": "详情身份不足",
+    "detail_type_conflict": "详情类型冲突",
+    "detail_year_conflict": "详情年份冲突",
+    "detail_season_conflict": "详情季度冲突",
+    "tmdb_id_conflict": "TMDB身份冲突",
+    "douban_id_conflict": "豆瓣身份冲突",
+    "target_episode_missing": "未覆盖目标集",
+    "route_unreachable": "线路验活不可达",
+    "timeout": "线路验活超时",
+    "transport": "线路传输失败",
+    "http_status": "线路返回异常状态",
+    "resolution_failed": "播放地址解析失败",
+    "invalid_headers": "播放请求头无效",
+    "redirect_rejected": "播放重定向被拒绝",
+    "shadow_budget_exhausted": "影子验活预算不足",
+    "generation_changed": "运行代次已变化",
+    "shadow_playable": "影子验活可播放",
+    "shadow_reachable": "影子验活确认可达",
+    "shadow_parse_verified": "影子验活解析通过",
+    "shadow_unreachable": "影子验活不可达",
+    "shadow_ineligible": "不满足安全影子验活条件",
+}
+
+def _bounded_text(value, limit=128):
+    text = str(value or "").strip()
+    return text[:limit]
+
+def v91_preheat_work_fingerprint(item):
+    item = item if isinstance(item, dict) else {}
+    identity = str(item.get("tmdb_id") or item.get("source_id") or "").strip()
+    title = re.sub(r"\s+", "", str(item.get("title") or "").casefold())
+    season = str(item.get("trackingSeason") or item.get("tracking_season") or "")
+    target = str(
+        item.get("history_episode") or item.get("latest_episode")
+        or item.get("tracked_episode") or ""
+    ).upper()
+    raw = "%s|%s|%s|%s" % (identity, title, season, target)
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
+
+def v91_preheat_candidate_fingerprint(work_fingerprint, mode, identity):
+    raw = "%s|%s|%s" % (
+        str(work_fingerprint or ""),
+        str(mode or "").strip().lower(),
+        str(identity or "").strip(),
+    )
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
+
+def v91_preheat_audit_entry(
+        item, stage, reason, mode="", provider="", candidate_identity="",
+        score=0, shadow="", checked_at=None):
+    work_fingerprint = v91_preheat_work_fingerprint(item)
+    candidate_fingerprint = ""
+    if candidate_identity:
+        candidate_fingerprint = v91_preheat_candidate_fingerprint(
+            work_fingerprint, mode, candidate_identity,
+        )
+    try:
+        safe_score = max(0, int(score or 0))
+    except Exception:
+        safe_score = 0
+    return {
+        "work": work_fingerprint,
+        "candidate": candidate_fingerprint,
+        "stage": _bounded_text(stage, 48),
+        "reason": _bounded_text(reason, 64),
+        "mode": _bounded_text(mode, 24).lower(),
+        "provider": _bounded_text(provider, 24).lower(),
+        "score": safe_score,
+        "shadow": _bounded_text(shadow, 32).lower(),
+        "checked_at": float(checked_at if checked_at is not None else time.time()),
+    }
+
+def v91_preheat_audit_summary(state):
+    state = state if isinstance(state, dict) else {}
+    works = state.get("works") if isinstance(state.get("works"), dict) else {}
+    totals = {
+        "works": len(works),
+        "failed": 0,
+        "title_rejected": 0,
+        "link_rejected": 0,
+        "validation_failed": 0,
+        "route_failed": 0,
+        "shadow_tested": 0,
+        "shadow_playable": 0,
+        "shadow_reachable": 0,
+        "shadow_parse_verified": 0,
+        "shadow_unreachable": 0,
+        "shadow_skipped": 0,
+    }
+    rows = []
+    for work_key, raw in works.items():
+        if not isinstance(raw, dict):
+            continue
+        entries = [entry for entry in raw.get("entries") or [] if isinstance(entry, dict)]
+        reasons = {}
+        shadow_tested = 0
+        shadow_playable = 0
+        shadow_reachable = 0
+        shadow_parse_verified = 0
+        shadow_unreachable = 0
+        shadow_skipped = 0
+        candidate_rows = {}
+        for entry in entries:
+            reason = str(entry.get("reason") or "")
+            if reason:
+                reasons[reason] = reasons.get(reason, 0) + 1
+            stage = str(entry.get("stage") or "")
+            if stage == "title_filter":
+                totals["title_rejected"] += 1
+            elif stage == "link_gate":
+                totals["link_rejected"] += 1
+            elif stage in ("detail_validation", "target_coverage"):
+                totals["validation_failed"] += 1
+            elif stage == "route_probe":
+                totals["route_failed"] += 1
+            shadow = str(entry.get("shadow") or "")
+            if shadow in ("reachable", "parse_verified", "unreachable", "not_target"):
+                shadow_tested += 1
+                totals["shadow_tested"] += 1
+            elif shadow in ("skipped", "cancelled"):
+                shadow_skipped += 1
+                totals["shadow_skipped"] += 1
+            if reason in ("shadow_playable", "shadow_reachable", "shadow_parse_verified"):
+                shadow_playable += 1
+                totals["shadow_playable"] += 1
+            if reason == "shadow_reachable":
+                shadow_reachable += 1
+                totals["shadow_reachable"] += 1
+            elif reason == "shadow_parse_verified":
+                shadow_parse_verified += 1
+                totals["shadow_parse_verified"] += 1
+            elif reason == "shadow_unreachable":
+                shadow_unreachable += 1
+                totals["shadow_unreachable"] += 1
+            candidate = str(entry.get("candidate") or "")
+            if candidate:
+                candidate_row = candidate_rows.setdefault(candidate, {
+                    "candidate": candidate[:10],
+                    "stage": "",
+                    "reason": "",
+                    "shadow": "",
+                })
+                if stage != "shadow_probe" and not candidate_row["reason"]:
+                    candidate_row["stage"] = stage[:48]
+                    candidate_row["reason"] = reason[:64]
+                if shadow:
+                    candidate_row["shadow"] = shadow[:32]
+        ready = raw.get("ready") is True
+        if raw.get("completed") and not ready:
+            totals["failed"] += 1
+        top_reasons = sorted(reasons.items(), key=lambda value: (-value[1], value[0]))[:3]
+        rows.append({
+            "work": str(work_key or "")[:64],
+            "title": _bounded_text(raw.get("title"), 96),
+            "ready": ready,
+            "completed": bool(raw.get("completed")),
+            "search_counts": dict(raw.get("search_counts") or {}),
+            "raw_candidates": max(0, int(raw.get("raw_candidates") or 0)),
+            "accepted_candidates": max(0, int(raw.get("accepted_candidates") or 0)),
+            "reasons": top_reasons,
+            "candidates": list(candidate_rows.values())[:6],
+            "shadow_tested": shadow_tested,
+            "shadow_playable": shadow_playable,
+            "shadow_reachable": shadow_reachable,
+            "shadow_parse_verified": shadow_parse_verified,
+            "shadow_unreachable": shadow_unreachable,
+            "shadow_skipped": shadow_skipped,
+        })
+    rows.sort(key=lambda row: (0 if row["completed"] and not row["ready"] else 1, row["title"]))
+    return {"version": V91_PREHEAT_AUDIT_VERSION, "totals": totals, "works": rows}
+
+V91_PLAYBACK_FEEDBACK_VERSION = 1
+
+V91_PLAYBACK_FEEDBACK_LIMIT = 50
+
+def v91_playback_feedback_marker(parsed, generation):
+    """Keep only a pre-hashed route identity in the in-memory playback window."""
+    if not isinstance(parsed, dict):
+        return None
+    route_key = str(parsed.get("_playbackFeedbackKey") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", route_key):
+        return None
+    try:
+        generation_value = int(generation)
+    except Exception:
+        return None
+    if generation_value < 0:
+        return None
+    return {
+        "version": V91_PLAYBACK_FEEDBACK_VERSION,
+        "route_key": route_key,
+        "generation": generation_value,
+    }
+
+def v91_playback_feedback_confirmation(
+        marker, history, current_generation, minimum_seconds=5, checked_at=None):
+    """Confirm a play only from meaningful native History progress."""
+    if not isinstance(marker, dict) or not isinstance(history, dict):
+        return None
+    if marker.get("version") != V91_PLAYBACK_FEEDBACK_VERSION:
+        return None
+    route_key = str(marker.get("route_key") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", route_key):
+        return None
+    try:
+        marker_generation = int(marker.get("generation"))
+        active_generation = int(current_generation)
+        position = max(0, int(history.get("position") or 0))
+        duration = max(0, int(history.get("duration") or 0))
+        threshold = max(1, int(minimum_seconds)) * 1000
+    except Exception:
+        return None
+    if marker_generation != active_generation or position < threshold:
+        return None
+    completed = bool(
+        duration > 0
+        and (position >= int(duration * 0.9) or duration - position <= 180000)
+    )
+    return {
+        "route_key": route_key,
+        "signals": {
+            "playback_confirmed": True,
+            "playback_completed": completed,
+            "confirmed_at": int(time.time() if checked_at is None else checked_at),
+        },
+    }
+
+def v91_route_quality_update(record, success, startup_ms=0, signals=None, updated_at=None):
+    """Update route-quality counters without persisting playback payloads."""
+    output = dict(record or {})
+    signals = signals if isinstance(signals, dict) else {}
+
+    def positive_int(value):
+        try:
+            result = int(value or 0)
+        except Exception:
+            return 0
+        return result if result > 0 else 0
+
+    confirmed = signals.get("playback_confirmed") is True
+    if confirmed:
+        plays = positive_int(output.get("confirmedPlays"))
+        completions = positive_int(output.get("confirmedCompletions"))
+        if plays >= V91_PLAYBACK_FEEDBACK_LIMIT:
+            plays //= 2
+            completions //= 2
+        plays += 1
+        if signals.get("playback_completed") is True:
+            completions += 1
+        output["confirmedPlays"] = plays
+        output["confirmedCompletions"] = min(plays, completions)
+        output["lastConfirmedAt"] = positive_int(signals.get("confirmed_at")) or int(
+            time.time() if updated_at is None else updated_at
+        )
+    else:
+        successes = positive_int(output.get("successes"))
+        failures = positive_int(output.get("failures"))
+        if successes + failures >= V91_PLAYBACK_FEEDBACK_LIMIT:
+            successes //= 2
+            failures //= 2
+        if success:
+            successes += 1
+        else:
+            failures += 1
+        output["successes"] = successes
+        output["failures"] = failures
+
+        startup = positive_int(startup_ms or signals.get("startup_ms"))
+        if success and startup:
+            timed = positive_int(output.get("timedSuccesses"))
+            average = positive_int(output.get("avgStartupMs"))
+            output["avgStartupMs"] = int(round(
+                (average * timed + startup) / float(timed + 1)
+            ))
+            output["timedSuccesses"] = min(V91_PLAYBACK_FEEDBACK_LIMIT, timed + 1)
+
+    codec = str(signals.get("codec") or "").strip().lower()
+    if codec:
+        output["codec"] = codec
+    height = positive_int(signals.get("height"))
+    if height:
+        output["height"] = height
+    if isinstance(signals.get("subtitle"), bool):
+        output["subtitle"] = signals.get("subtitle")
+    output["updatedAt"] = int(time.time() if updated_at is None else updated_at)
+    return output
+
+def v91_playback_feedback_rank(record):
+    """Return an ordinal rank; this is not a second weighted scoring system."""
+    record = record if isinstance(record, dict) else {}
+
+    def positive_int(value):
+        try:
+            result = int(value or 0)
+        except Exception:
+            return 0
+        return result if result > 0 else 0
+
+    plays = min(V91_PLAYBACK_FEEDBACK_LIMIT, positive_int(record.get("confirmedPlays")))
+    completions = min(plays, positive_int(record.get("confirmedCompletions")))
+    confirmed_at = positive_int(record.get("lastConfirmedAt"))
+    return (1 if plays else 0, plays, completions, confirmed_at)
+
+def v91_order_preheat_targets(owner, records, item, limit):
+    """Return bounded preheat targets without introducing another score model."""
+    records = records if isinstance(records, list) else []
+    item = item if isinstance(item, dict) else {}
+    try:
+        target_limit = max(0, int(limit))
+    except Exception:
+        target_limit = 0
+    if target_limit <= 0:
+        return []
+
+    resume = re.match(
+        r"^S0*(\d{1,2})E0*(\d{1,3})$",
+        str(item.get("history_episode") or ""),
+        re.I,
+    )
+    target_key = (int(resume.group(1)), int(resume.group(2))) if resume else None
+    if target_key is None:
+        target_key = next((
+            record.get("episode_key") for record in records
+            if isinstance(record, dict)
+            and isinstance(record.get("episode_key"), tuple)
+            and len(record["episode_key"]) == 2
+            and all(isinstance(value, int) and value > 0 for value in record["episode_key"])
+        ), None)
+    if target_key is None:
+        return []
+
+    backend = owner._resource_capability_identity()
+    bound = item.get("last_play_route") if isinstance(item.get("last_play_route"), dict) else {}
+    bound_play_id = str(bound.get("playId") or "").strip()
+    bound_resource_id = str(bound.get("resourceId") or item.get("alist_vod_id") or "").strip()
+    ranked = []
+    seen_identities = set()
+
+    for order, record in enumerate(records):
+        if not isinstance(record, dict) or record.get("episode_key") != target_key:
+            continue
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        target = str(payload.get("url") or "").strip()
+        resource_id = str(record.get("resource_id") or payload.get("resourceId") or "").strip()
+        resource_mode = str(payload.get("resourceMode") or "vod").strip().lower() or "vod"
+        probe_key = owner._route_probe_key(
+            target, resource_id, resource_mode, backend=backend,
+        )
+        if not target or not resource_id or not probe_key or probe_key in seen_identities:
+            continue
+        seen_identities.add(probe_key)
+
+        route_payload = dict(payload)
+        route_payload.setdefault("tmdbId", item.get("tmdb_id"))
+        route_payload.setdefault("sourceId", item.get("source_id"))
+        route_payload.setdefault("resourceId", resource_id)
+        route_payload.setdefault("resourceMode", resource_mode)
+        route_payload.setdefault("season", target_key[0])
+        route_payload.setdefault("episode", target_key[1])
+        route_payload.setdefault("name", record.get("name"))
+
+        route_quality = owner._route_quality_score(target, text=record.get("name"))
+        route_record = owner._route_quality_record(target)
+        feedback_rank = v91_playback_feedback_rank(route_record)
+        resource_quality = (
+            record.get("resource_quality")
+            if isinstance(record.get("resource_quality"), dict)
+            else {}
+        )
+        bound_rank = 2 if bound_play_id and target == bound_play_id else (
+            1 if bound_resource_id and resource_id == bound_resource_id else 0
+        )
+        rank = (
+            bound_rank,
+            *feedback_rank,
+            1 if route_quality.get("observed") else 0,
+            int(route_quality.get("total") or 0),
+            int(route_quality.get("resolution") or 0),
+            int(route_quality.get("stability") or 0),
+            int(route_quality.get("startup") or 0),
+            int(resource_quality.get("total") or 0),
+            int(resource_quality.get("resolution") or 0),
+            int(resource_quality.get("stability") or 0),
+            int(resource_quality.get("startup") or 0),
+            -order,
+        )
+        ranked.append((rank, {
+            "target": target,
+            "resource_id": resource_id,
+            "resource_mode": resource_mode,
+            "payload": route_payload,
+        }))
+
+    ranked.sort(key=lambda row: row[0], reverse=True)
+    return [row[1] for row in ranked[:target_limit]]
+
+V91_HISTORY_CANONICAL_KEY = "douban_tmdb_follow_single"
+
+V91_HISTORY_FAMILY_KEYS = frozenset((
+    "douban_tmdb_follow_single",
+    "douban_tmdb_follow_single_v80_private",
+    "douban_tmdb_follow_single_v91_private",
+    "豆瓣TMDB追更单入口",
+))
+
+def v91_history_key_parts(row):
+    key = str((row or {}).get("key") or "").strip() if isinstance(row, dict) else ""
+    if not key:
+        return "", "", ""
+    parts = key.split("@@@")
+    if len(parts) >= 2 and parts[0] and parts[1]:
+        return parts[0], parts[1], parts[2] if len(parts) >= 3 else ""
+    return "csp_AList", key, ""
+
+def v91_history_is_family_row(row, runtime_key=""):
+    source_key, _vod_id, _cid = v91_history_key_parts(row)
+    if not source_key:
+        return False
+    family = set(V91_HISTORY_FAMILY_KEYS)
+    runtime = str(runtime_key or "").strip()
+    if runtime:
+        family.add(runtime)
+    if source_key in family:
+        return True
+    episode_url = str((row or {}).get("episodeUrl") or "") if isinstance(row, dict) else ""
+    return bool(
+        (source_key == "csp_AList" or re.match(r"^plugin-\d+$", source_key))
+        and re.search(r"(?:followplay_|followplay://)[A-Za-z0-9_-]+", episode_url)
+    )
+
+def v91_history_identity(row, runtime_key=""):
+    source_key, vod_id, _cid = v91_history_key_parts(row)
+    if not source_key or not vod_id:
+        return None
+    if v91_history_is_family_row(row, runtime_key):
+        source_key = str(runtime_key or "").strip() or V91_HISTORY_CANONICAL_KEY
+    return source_key, vod_id
+
+def v91_history_canonicalize(row, runtime_key=""):
+    if not isinstance(row, dict):
+        return None
+    source_key, vod_id, cid = v91_history_key_parts(row)
+    if not source_key or not vod_id:
+        return None
+    output = dict(row)
+    if v91_history_is_family_row(row, runtime_key):
+        source_key = str(runtime_key or "").strip() or V91_HISTORY_CANONICAL_KEY
+    output["key"] = "@@@".join(
+        [source_key, vod_id] + ([cid] if cid else [])
+    )
+    return output
+
+def v91_dedupe_history_rows(rows, runtime_key, ranker, limit=2048):
+    try:
+        cap = max(1, int(limit))
+    except Exception:
+        cap = 2048
+    by_identity = {}
+    exact_keys = {}
+    for raw in rows if isinstance(rows, (list, tuple)) else ():
+        canonical = v91_history_canonicalize(raw, runtime_key)
+        identity = v91_history_identity(raw, runtime_key)
+        if canonical is None or identity is None:
+            continue
+        exact = str(raw.get("key") or "").strip()
+        if exact:
+            exact_keys.setdefault(identity, set()).add(exact)
+        previous = by_identity.get(identity)
+        if previous is None or ranker(canonical) >= ranker(previous):
+            by_identity[identity] = canonical
+
+    values = list(by_identity.values())
+    values.sort(key=ranker, reverse=True)
+    values = values[:cap]
+    cleanup = []
+    migrations = []
+    for row in values:
+        identity = v91_history_identity(row, runtime_key)
+        if identity is None or not v91_history_is_family_row(row, runtime_key):
+            continue
+        canonical_key = str(row.get("key") or "").strip()
+        aliases = sorted(
+            key for key in exact_keys.get(identity, set())
+            if key and key != canonical_key
+        )
+        if aliases:
+            cleanup.append({
+                "canonical_key": canonical_key,
+                "delete_keys": aliases,
+            })
+            migrations.append(dict(row))
+    return {
+        "rows": values,
+        "cleanup": cleanup,
+        "migrations": migrations,
+    }
+
+def v91_merge_history_import_rows(rows, migrations, runtime_key, ranker, limit=2048):
+    combined = list(rows or []) + list(migrations or [])
+    return v91_dedupe_history_rows(
+        combined, runtime_key, ranker, limit=limit,
+    )["rows"]
+
+def v91_history_dedupe_import_rows(owner, rows):
+    return v91_merge_history_import_rows(
+        rows,
+        getattr(owner, "_v91_native_history_migrations", []),
+        str(getattr(owner, "siteKey", "") or "").strip(),
+        owner._history_merge_rank,
+        limit=owner.HISTORY_ROW_LIMIT,
+    )
+
+def v91_cleanup_native_history_duplicates(owner):
+    plans = list(getattr(owner, "_v91_native_history_cleanup", []) or [])
+    owner._v91_native_history_cleanup = []
+    owner._v91_native_history_migrations = []
+    if not plans:
+        return 0
+    try:
+        from java import jclass
+    except Exception:
+        return 0
+    history_cls = jclass("com.fongmi.android.tv.bean.History")
+    deleted = 0
+    for plan in plans:
+        canonical_key = str((plan or {}).get("canonical_key") or "").strip()
+        if not canonical_key or history_cls.find(canonical_key) is None:
+            continue
+        for key in dict.fromkeys(
+                str(value or "").strip()
+                for value in (plan or {}).get("delete_keys") or []):
+            if not key or key == canonical_key:
+                continue
+            row = history_cls.find(key)
+            if row is None:
+                continue
+            row.delete()
+            if history_cls.find(key) is None:
+                deleted += 1
+    if deleted:
+        owner._refresh_native_history_views()
+    return deleted
+
+V91_PREHEAT_REFRESH_SOURCES = frozenset((
+    "resource-entry-preheat",
+    "route-preheat",
+))
+
+V91_DETAIL_REFRESH_COOLDOWN = 8.0
+
+V91_DETAIL_REFRESH_DELAY = 1.2
+
+V91_DETAIL_REFRESH_GUARD_LIMIT = 64
+
+V91_DETAIL_REFRESH_RETRY_DELAY = 0.8
+
+V91_DETAIL_REFRESH_RETRY_LIMIT = 4
+
+def v91_is_background_preheat_refresh(source):
+    return str(source or "").strip().lower() in V91_PREHEAT_REFRESH_SOURCES
+
+def v91_detail_refresh_key(item):
+    item = item if isinstance(item, dict) else {}
+    for field in ("source_id", "tmdb_id", "local_source_id"):
+        value = str(item.get(field) or "").strip()
+        if value:
+            return field + ":" + value
+    return ""
+
+def v91_admit_detail_refresh(
+        guard, item, generation, signature="", now=None,
+        cooldown=V91_DETAIL_REFRESH_COOLDOWN,
+        limit=V91_DETAIL_REFRESH_GUARD_LIMIT):
+    if not isinstance(guard, dict):
+        return False
+    key = v91_detail_refresh_key(item)
+    try:
+        current_generation = int(generation)
+    except Exception:
+        return False
+    if not key or current_generation < 0:
+        return False
+    try:
+        current_time = time.monotonic() if now is None else float(now)
+        refresh_cooldown = max(0.0, float(cooldown))
+        guard_limit = max(1, int(limit))
+    except Exception:
+        return False
+    refresh_signature = str(signature or "").strip()[:128] or (
+        "item:" + key
+    )
+
+    stale = []
+    for existing_key, raw in guard.items():
+        if not isinstance(raw, dict):
+            stale.append(existing_key)
+            continue
+        try:
+            existing_generation = int(raw.get("generation"))
+            refreshed_at = float(raw.get("refreshed_at") or raw.get("requested_at") or 0.0)
+        except Exception:
+            stale.append(existing_key)
+            continue
+        if existing_generation != current_generation or current_time - refreshed_at > 60.0:
+            stale.append(existing_key)
+    for existing_key in stale:
+        guard.pop(existing_key, None)
+
+    previous = guard.get(key)
+    if isinstance(previous, dict):
+        try:
+            if (
+                    int(previous.get("generation")) == current_generation
+                    and (
+                        str(previous.get("pending_signature") or "") == refresh_signature
+                        or str(previous.get("last_signature") or "") == refresh_signature
+                    )):
+                return False
+            if (
+                    int(previous.get("generation")) == current_generation
+                    and not signature
+                    and current_time - float(previous.get("refreshed_at") or 0.0)
+                    < refresh_cooldown):
+                return False
+        except Exception:
+            pass
+
+    updated = dict(previous or {})
+    updated.update({
+        "generation": current_generation,
+        "pending_signature": refresh_signature,
+        "requested_at": current_time,
+    })
+    guard[key] = updated
+    overflow = len(guard) - guard_limit
+    if overflow > 0:
+        oldest = sorted(
+            guard,
+            key=lambda existing_key: float(
+                (guard.get(existing_key) or {}).get("refreshed_at") or 0.0
+            ),
+        )
+        for existing_key in oldest[:overflow]:
+            if existing_key != key:
+                guard.pop(existing_key, None)
+    return True
+
+def v91_complete_detail_refresh(
+        guard, key, generation, signature, refreshed_at=None):
+    if not isinstance(guard, dict) or not key:
+        return False
+    current = guard.get(key)
+    if not isinstance(current, dict):
+        return False
+    try:
+        if int(current.get("generation")) != int(generation):
+            return False
+        completed_at = time.monotonic() if refreshed_at is None else float(refreshed_at)
+    except Exception:
+        return False
+    refresh_signature = str(signature or "").strip()[:128]
+    if refresh_signature and str(current.get("pending_signature") or "") != refresh_signature:
+        return False
+    current["last_signature"] = refresh_signature
+    current["refreshed_at"] = completed_at
+    current.pop("pending_signature", None)
+    current.pop("pending_owner", None)
+    current.pop("requested_at", None)
+    return True
+
+def v91_active_detail_refresh_owned(
+        owner, key, pending_owner, item, expected_generation, signature, attempt=0):
+    with owner._cache_lock:
+        guard = getattr(owner, "_v91_detail_refresh_guard", {})
+        current = guard.get(key) if isinstance(guard, dict) else None
+        if (
+                not isinstance(current, dict)
+                or current.get("pending_owner") is not pending_owner
+                or expected_generation != owner._cache_generation):
+            return False
+    refreshed = owner._refresh_active_detail(item)
+    if not refreshed:
+        try:
+            next_attempt = int(attempt) + 1
+        except Exception:
+            next_attempt = V91_DETAIL_REFRESH_RETRY_LIMIT
+        if next_attempt < V91_DETAIL_REFRESH_RETRY_LIMIT:
+            try:
+                owner._tasks.start_timer(
+                    V91_DETAIL_REFRESH_RETRY_DELAY,
+                    v91_active_detail_refresh_owned,
+                    args=(
+                        owner, key, pending_owner, dict(item or {}),
+                        expected_generation, signature, next_attempt,
+                    ),
+                    name="detail-refresh-return",
+                )
+                return True
+            except Exception:
+                pass
+        with owner._cache_lock:
+            current = guard.get(key) if isinstance(guard, dict) else None
+            if isinstance(current, dict) and current.get("pending_owner") is pending_owner:
+                guard.pop(key, None)
+        return False
+    with owner._cache_lock:
+        current = guard.get(key) if isinstance(guard, dict) else None
+        if isinstance(current, dict) and current.get("pending_owner") is pending_owner:
+            v91_complete_detail_refresh(
+                guard, key, expected_generation, signature,
+            )
+    return refreshed
+
+def v91_schedule_playback_exit_refresh(owner, playback_key, marker, item):
+    playback_key = str(playback_key or "").strip()
+    if not playback_key or not isinstance(marker, dict) or not isinstance(item, dict):
+        return False
+    with owner._playback_sync_lock:
+        current = owner._playback_sync_pending.get(playback_key)
+        if (
+                not isinstance(current, dict)
+                or current.get("owner") is not marker.get("owner")):
+            return False
+    if owner._playback_activity_active():
+        return False
+    try:
+        window_started = int(round(float(marker.get("started_at") or 0.0) * 1000))
+    except Exception:
+        window_started = 0
+    if window_started <= 0:
+        return False
+    return owner._schedule_active_detail_refresh(
+        item,
+        reason="playback-return",
+        signature="playback:%s:%s" % (playback_key, window_started),
+    )
+
+def v91_follow_route_signature(route):
+    if not isinstance(route, dict):
+        return ""
+    quality = route.get("quality") if isinstance(route.get("quality"), dict) else {}
+    safe = {
+        "version": route.get("version"),
+        "backend": str(route.get("backend") or ""),
+        "resourceId": str(route.get("resourceId") or ""),
+        "resourceMode": str(route.get("resourceMode") or ""),
+        "resourceProvider": str(route.get("resourceProvider") or ""),
+        "playId": str(route.get("playId") or ""),
+        "season": route.get("season"),
+        "episode": route.get("episode"),
+        "name": str(route.get("name") or ""),
+        "quality": {
+            "height": quality.get("height"),
+            "codec": str(quality.get("codec") or ""),
+            "subtitle": quality.get("subtitle"),
+        },
+    }
+    raw = json.dumps(safe, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+def v91_follow_route_changed(previous, current):
+    signature = v91_follow_route_signature(current)
+    return bool(signature and signature != v91_follow_route_signature(previous))
+
+V91_ROUTE_PROBE_FAILURE_TTLS = {
+    "timeout": 15,
+    "resolution_failed": 30,
+    "http_status": 60,
+    "empty_body": 20,
+    "html_body": 30,
+    "redirect_rejected": 120,
+    "invalid_headers": 300,
+    "transport": 15,
+    "cancelled": 0,
+}
+
+def v91_route_probe_failure(kind, status=0, checked_at=None):
+    failure_kind = str(kind or "transport")
+    if failure_kind not in V91_ROUTE_PROBE_FAILURE_TTLS:
+        failure_kind = "transport"
+    try:
+        status_code = int(status or 0)
+    except Exception:
+        status_code = 0
+    if status_code < 100 or status_code > 599:
+        status_code = 0
+    result = {
+        "checked_at": time.time() if checked_at is None else float(checked_at),
+        "reachable": False,
+        "failure_kind": failure_kind,
+        "status": status_code,
+        "fingerprint": "",
+    }
+    return result
+
+def v91_route_probe_unknown(output, checked_at=None):
+    """Preserve V90's cross-origin fallback without treating it as a negative."""
+    return {
+        "checked_at": time.time() if checked_at is None else float(checked_at),
+        "reachable": None,
+        "fingerprint": "",
+        "output": output,
+        "cross_origin": True,
+    }
+
+def v91_route_probe_exception(exc, checked_at=None):
+    """Map redacted reliability fields without inspecting exception text."""
+    reliability_kind = str(getattr(exc, "kind", "") or "").strip().lower()
+    status = getattr(exc, "status", 0)
+    try:
+        status_code = int(status or 0)
+    except Exception:
+        status_code = 0
+    if 100 <= status_code <= 599:
+        return v91_route_probe_failure("http_status", status_code, checked_at=checked_at)
+    if reliability_kind in ("cancelled", "bulkhead_rejected"):
+        return v91_route_probe_failure("cancelled", checked_at=checked_at)
+    if reliability_kind in ("timeout", "budget_exhausted"):
+        return v91_route_probe_failure("timeout", checked_at=checked_at)
+    if reliability_kind == "dns":
+        return v91_route_probe_failure("resolution_failed", checked_at=checked_at)
+    if reliability_kind in ("configuration", "payload"):
+        return v91_route_probe_failure("invalid_headers", checked_at=checked_at)
+    return v91_route_probe_failure("transport", checked_at=checked_at)
+
+def v91_route_probe_ttl(result, positive_ttl):
+    positive = max(0.0, float(positive_ttl or 0))
+    if isinstance(result, dict):
+        if result.get("reachable") is True:
+            return positive
+        if result.get("reachable") is None and isinstance(result.get("output"), dict):
+            return positive
+    kind = str((result or {}).get("failure_kind") or "transport")
+    negative = float(V91_ROUTE_PROBE_FAILURE_TTLS.get(kind, V91_ROUTE_PROBE_FAILURE_TTLS["transport"]))
+    if kind == "http_status":
+        status = int((result or {}).get("status") or 0)
+        if status in (408, 425, 429) or status >= 500:
+            negative = 15.0
+        elif status in (401, 403):
+            negative = 30.0
+        elif status in (404, 410):
+            negative = 120.0
+    return min(positive, negative) if positive > 0 else negative
+
+def v91_route_probe_preheat_action(cached_probe, inflight):
+    if isinstance(cached_probe, dict):
+        if cached_probe.get("reachable") is True:
+            return "reuse"
+        if cached_probe.get("reachable") is False:
+            return "skip"
+    return "skip" if inflight else "start"
+
+def v91_probe_media_output(owner, output, deadline=None):
+    started_at = time.monotonic()
+    clean_output = owner._sanitize_route_output(output)
+    if not isinstance(clean_output, dict):
+        return v91_route_probe_failure("invalid_headers")
+    media_url = Filter._first_http_url(clean_output.get("url"))
+    if not media_url:
+        return v91_route_probe_failure("transport")
+    try:
+        security_policy = owner._route_security_policy()
+        playback_headers = v80_security_filter_headers(
+            dict(clean_output.get("header") or {}),
+            same_origin=True,
+            allow_sensitive=True,
+        )
+    except (V80SecurityPolicyError, TypeError, ValueError):
+        return v91_route_probe_failure("invalid_headers")
+    headers = dict(playback_headers)
+    headers.setdefault("User-Agent", owner.user_agent)
+    headers.setdefault("Accept", "*/*")
+    headers["Range"] = "bytes=0-%d" % (owner.ROUTE_PROBE_MAX_BYTES - 1)
+    current = media_url
+    previous_url = None
+    crossed_origin = False
+
+    def failure(kind, status=0):
+        if crossed_origin:
+            playback_output = dict(clean_output)
+            playback_output["url"] = current
+            playback_output["header"] = playback_headers
+            playback_output = owner._sanitize_route_output(playback_output)
+            if isinstance(playback_output, dict):
+                return v91_route_probe_unknown(playback_output)
+        return v91_route_probe_failure(kind, status=status)
+
+    absolute_deadline = deadline if deadline is not None else time.monotonic() + 8
+    for redirect_count in range(V80_SECURITY_LIMITS["redirect_hops"] + 1):
+        if absolute_deadline - time.monotonic() <= 0:
+            return failure("timeout")
+        resolved = owner._resolved_media_target(current, deadline=absolute_deadline)
+        if resolved is None:
+            return failure(
+                "timeout" if absolute_deadline - time.monotonic() <= 0 else "resolution_failed"
+            )
+        parsed, addresses = resolved
+        if previous_url is not None:
+            decision = security_policy.redirect(
+                previous_url,
+                current,
+                resolved_addresses=addresses,
+                headers=headers,
+                redirect_count=redirect_count - 1,
+            )
+            if not decision.allowed:
+                return failure("redirect_rejected")
+            if not decision.same_origin:
+                crossed_origin = True
+            headers = dict(decision.headers)
+            try:
+                playback_headers = v80_security_filter_headers(
+                    playback_headers,
+                    same_origin=decision.same_origin,
+                    allow_sensitive=decision.same_origin,
+                )
+            except V80SecurityPolicyError:
+                return failure("invalid_headers")
+        response = None
+        for index, address in enumerate(addresses):
+            remaining = absolute_deadline - time.monotonic()
+            if remaining <= 0:
+                return failure("timeout")
+            attempts_left = len(addresses) - index
+            attempt_deadline = min(
+                absolute_deadline,
+                time.monotonic() + max(0.2, remaining / max(1, attempts_left)),
+            )
+            response = owner._pinned_media_request(parsed, address, headers, attempt_deadline)
+            if response is not None:
+                break
+        if response is None:
+            return failure(
+                "timeout" if absolute_deadline - time.monotonic() <= 0 else "transport"
+            )
+        status = int(response.get("status") or 0)
+        response_headers = response.get("headers") or {}
+        if status in V80_SECURITY_REDIRECT_STATUSES:
+            if redirect_count >= V80_SECURITY_LIMITS["redirect_hops"]:
+                return failure("redirect_rejected", status=status)
+            location = str(
+                response_headers.get("Location") or response_headers.get("location") or ""
+            ).strip()
+            if not location:
+                return failure("redirect_rejected", status=status)
+            previous_url = current
+            current = urljoin(current, location)
+            continue
+        if status not in (200, 206):
+            return failure("http_status", status=status)
+        chunk = bytes(response.get("body") or b"")[:owner.ROUTE_PROBE_MAX_BYTES]
+        if not chunk:
+            return failure("empty_body", status=status)
+        content_type = str(
+            response_headers.get("Content-Type") or response_headers.get("content-type") or ""
+        ).lower()
+        if "text/html" in content_type and b"<html" in chunk[:512].lower():
+            return failure("html_body", status=status)
+        content_range = str(
+            response_headers.get("Content-Range") or response_headers.get("content-range") or ""
+        )
+        total_match = re.search(r"/(\d+)\s*$", content_range)
+        total = int(total_match.group(1)) if total_match else 0
+        if not total and status == 200:
+            total = owner._positive_int(
+                response_headers.get("Content-Length") or response_headers.get("content-length"), 0,
+            )
+        signals = owner._media_quality_signals(current, content_type, chunk)
+        playback_output = dict(clean_output)
+        playback_output["url"] = current
+        playback_output["header"] = playback_headers
+        playback_output = owner._sanitize_route_output(playback_output)
+        if not isinstance(playback_output, dict):
+            return failure("invalid_headers", status=status)
+        return {
+            "checked_at": time.time(),
+            "reachable": True,
+            "failure_kind": "",
+            "status": status,
+            "fingerprint": "range-v1:%s:%s" % (
+                total or "unknown", hashlib.sha256(chunk).hexdigest(),
+            ),
+            "content_length": total,
+            "range_status": status,
+            "startup_ms": max(1, int(round((time.monotonic() - started_at) * 1000))),
+            "content_type": content_type,
+            "codec": signals.get("codec") or "",
+            "height": signals.get("height") or 0,
+            "subtitle": signals.get("subtitle"),
+            "output": playback_output,
+        }
+    return failure("redirect_rejected")
 
 
 class Filter:
@@ -1333,7 +2736,7 @@ class Filter:
 
 
 class Spider(BaseSpider):
-    name = "豆瓣TMDB追更助手 v90"
+    name = "豆瓣TMDB追更助手 v92"
     host = "https://m.douban.com"
     backend_parse = False
     category_mode = False
@@ -2008,6 +3411,9 @@ class Spider(BaseSpider):
             self._atvp_job_owners.clear()
         with self._cache_lock:
             self._cache_generation += 1
+            self._cache_health_controller.cancel_foreground_misses(
+                "cache generation changed",
+            )
             init_generation = self._cache_generation
             self._timeout_budget_controller.reset(init_generation, closed=False)
             self._background_bulkhead_controller.reset(init_generation)
@@ -2168,6 +3574,9 @@ class Spider(BaseSpider):
             with self._cache_persist_lock:
                 with self._cache_lock:
                     self._cache_generation += 1
+                    self._cache_health_controller.cancel_foreground_misses(
+                        "cache generation changed",
+                    )
                     self._timeout_budget_controller.reset(
                         self._cache_generation, closed=True,
                     )
@@ -2643,8 +4052,9 @@ class Spider(BaseSpider):
         with self._cache_lock:
             if generation != self._cache_generation:
                 return []
-        return self._resource_fair_candidate_order(
-            rows, item, bound=self._resource_binding_resource_id(item), modes=("plugin",),
+        return v92_admit_resource_candidates(
+            self, rows, item, bound=self._resource_binding_resource_id(item),
+            modes=("plugin",),
         )
 
     def _atvp_plugin_play_handle(self, plugin_id, raw_resource_id, flag, raw_play_id, kind):
@@ -3264,6 +4674,7 @@ class Spider(BaseSpider):
                                 or player_backend != self._resource_capability_identity()):
                             raise ReliabilityFailure("cancelled", operation="player")
                     self._timeout_budget_controller.current().checkpoint()
+                    effective["_playbackFeedbackKey"] = self._route_quality_key(quality_id)
                     self._register_playback_sync_window(effective)
                     self._schedule_native_history_ui_refresh()
                     return output
@@ -3370,6 +4781,10 @@ class Spider(BaseSpider):
             return self._start_atvp_job("sync")
         if value == self.FOLLOW_PREHEAT_ACTION:
             return self._start_follow_preheat()
+        if value == "tmdb-follow:preheat-audit":
+            return json.dumps({
+                "msg": self._v91_preheat_audit_message(),
+            }, ensure_ascii=False)
         if value.startswith(self.HISTORY_SHARE_ACTION_PREFIX):
             return self._toggle_history_share_policy(
                 value[len(self.HISTORY_SHARE_ACTION_PREFIX):]
@@ -3996,6 +5411,9 @@ class Spider(BaseSpider):
             prefix_cards = self._history_alert_cards() + prefix_cards
         if page == 1:
             prefix_cards.append(self._follow_preheat_card())
+            audit_card = self._v91_preheat_audit_card()
+            if audit_card is not None:
+                prefix_cards.append(audit_card)
         if not followed:
             if page > 1:
                 return self._page_result([], page, 1, 0, self.follow_page_size)
@@ -4321,6 +5739,11 @@ class Spider(BaseSpider):
             remark = "可直接播放 %d/%d · 点击预热全部追更剧集" % (ready, total)
         else:
             remark = "当前没有可预热的追更剧集"
+        audit = self._v91_preheat_audit_snapshot().get("totals") or {}
+        if audit.get("shadow_tested"):
+            remark += " · 误杀复核 %d/%d" % (
+                audit.get("shadow_playable", 0), audit.get("shadow_tested", 0),
+            )
         return {
             "vod_id": self.FOLLOW_PREHEAT_ACTION,
             "vod_name": "主动预热追更线路",
@@ -5079,13 +6502,36 @@ class Spider(BaseSpider):
             return False
         return self._refresh_native_view("detail")
 
-    def _schedule_active_detail_refresh(self, item):
+    def _schedule_active_detail_refresh(self, item, reason="resource-ready", signature=""):
+        key = v91_detail_refresh_key(item)
+        refresh_signature = str(signature or "").strip()[:128] or (
+            str(reason or "resource-ready").strip()[:48] + ":" + key
+        )
+        owner = object()
+        with self._cache_lock:
+            guard = getattr(self, "_v91_detail_refresh_guard", None)
+            if not isinstance(guard, dict):
+                guard = {}
+                self._v91_detail_refresh_guard = guard
+            if not v91_admit_detail_refresh(
+                    guard, item, self._cache_generation,
+                    signature=refresh_signature):
+                return False
+            guard[key]["pending_owner"] = owner
+            generation = self._cache_generation
         try:
-            self._tasks.start_thread(
-                self._refresh_active_detail, args=(dict(item or {}),), name="detail-refresh",
+            self._tasks.start_timer(
+                V91_DETAIL_REFRESH_DELAY,
+                v91_active_detail_refresh_owned,
+                args=(self, key, owner, dict(item or {}), generation, refresh_signature),
+                name="detail-refresh-coalesced",
             )
             return True
         except Exception:
+            with self._cache_lock:
+                current = guard.get(key)
+                if isinstance(current, dict) and current.get("pending_owner") is owner:
+                    guard.pop(key, None)
             return False
 
     def _refresh_follow_categories(self, source=""):
@@ -5095,28 +6541,37 @@ class Spider(BaseSpider):
                 time.monotonic() - last_native < 3.0):
             print("[follow-refresh] suppressed source=%s reason=recent-native-category" % source)
             return False
-        direct = self._queue_instantiated_follow_refresh()
-        if direct:
-            self._follow_native_category_refresh_at = time.monotonic()
-            print("[follow-refresh] direct=true fallback=none")
-            return True
+        background_preheat = v91_is_background_preheat_refresh(source)
+        if not background_preheat:
+            direct = self._queue_instantiated_follow_refresh()
+            if direct:
+                self._follow_native_category_refresh_at = time.monotonic()
+                print("[follow-refresh] direct=true fallback=none")
+                return True
         with self._follow_refresh_lock:
             self._follow_refresh_generation += 1
             generation = self._follow_refresh_generation
         try:
             self._tasks.start_thread(
-                self._refresh_follow_categories_worker, args=(generation,), name="category-refresh",
+                self._refresh_follow_categories_worker,
+                args=(generation, source), name="category-refresh",
             )
         except Exception:
             return False
-        print("[follow-refresh] direct=false fallback=scheduled")
+        print("[follow-refresh] direct=false fallback=scheduled source=%s" % (source or "manual"))
         return True
 
-    def _refresh_follow_categories_worker(self, generation):
+    def _refresh_follow_categories_worker(self, generation, source=""):
         time.sleep(1.0)
         with self._follow_refresh_lock:
             if generation != self._follow_refresh_generation:
                 return
+        if self._queue_instantiated_follow_refresh():
+            self._follow_native_category_refresh_at = time.monotonic()
+            return
+        if v91_is_background_preheat_refresh(source):
+            print("[follow-refresh] suppressed source=%s reason=not-visible" % source)
+            return
         if not self._refresh_visible_follow_category():
             self._refresh_native_category()
 
@@ -5248,6 +6703,10 @@ class Spider(BaseSpider):
     def _invoke_fragment_refresh_listener(fragment):
         try:
             if hasattr(fragment, "isAdded") and not fragment.isAdded():
+                return False
+            if hasattr(fragment, "isVisible") and not fragment.isVisible():
+                return False
+            if hasattr(fragment, "isResumed") and not fragment.isResumed():
                 return False
             if hasattr(fragment, "getView") and fragment.getView() is None:
                 return False
@@ -5901,11 +7360,15 @@ class Spider(BaseSpider):
         vod_id = "tmdb:tv:%s" % tmdb_id if tmdb_id else str(
             item.get("source_id") or item.get("douban_id") or self.ERROR_PREFIX + quote(title, safe="")
         )
+        remark = self._follow_remark(item, history)
+        status = v92_follow_preheat_status(self, item)
+        if status:
+            remark = status + ((" · " + remark) if remark else "")
         card = {
             "vod_id": vod_id,
             "vod_name": title,
             "vod_pic": str(item.get("pic") or ""),
-            "vod_remarks": self._follow_remark(item, history),
+            "vod_remarks": remark,
         }
         if action_mode == "seen" and item_key:
             card["action"] = self.FOLLOW_SEEN_PREFIX + item_key
@@ -6078,6 +7541,9 @@ class Spider(BaseSpider):
             "season": self._positive_int(parsed.get("season"), 0),
             "episode": self._positive_int(parsed.get("episode"), 0),
         }
+        feedback = v91_playback_feedback_marker(parsed, self._cache_generation)
+        if feedback is not None:
+            marker["feedback"] = feedback
         with self._playback_sync_lock:
             old = self._playback_sync_pending.get(key)
             if old and float(old.get("started_at") or 0) >= marker["started_at"] - 5:
@@ -6207,10 +7673,29 @@ class Spider(BaseSpider):
                 return self._schedule_playback_sync_check(
                     key, self.PLAYBACK_SYNC_RETRY_SECONDS, expected_owner=marker.get("owner"),
                 )
+            feedback = None if marker.get("feedback_recorded") else (
+                v91_playback_feedback_confirmation(
+                    marker.get("feedback"), history, self._cache_generation,
+                    minimum_seconds=self.PLAYBACK_SYNC_MIN_SECONDS,
+                )
+            )
+            if feedback is not None:
+                self._record_route_quality(
+                    feedback["route_key"], True, signals=feedback["signals"],
+                    expected_generation=self._cache_generation, prehashed=True,
+                )
+                with self._playback_sync_lock:
+                    current = self._playback_sync_pending.get(key)
+                    if (
+                            isinstance(current, dict)
+                            and current.get("owner") is marker.get("owner")):
+                        current["feedback_recorded"] = True
+                        marker["feedback_recorded"] = True
         except Exception:
             return self._schedule_playback_sync_check(
                 key, self.PLAYBACK_SYNC_RETRY_SECONDS, expected_owner=marker.get("owner"),
             )
+        v91_schedule_playback_exit_refresh(self, key, marker, item)
         # Linearize the final ownership check with dispatch. A new playback
         # window cannot be installed between validation and the History trigger.
         with self._playback_sync_lock:
@@ -6514,10 +7999,12 @@ class Spider(BaseSpider):
         # where it matters: a cloud row appears newer than the first local
         # snapshot and could otherwise overwrite playback that just finished.
         import_rows = self._history_import_rows(merged, local_rows)
+        import_rows = v91_history_dedupe_import_rows(self, import_rows)
         if import_rows:
             try:
                 latest_local_rows = self._capture_native_history()
                 import_rows = self._history_import_rows(merged, latest_local_rows)
+                import_rows = v91_history_dedupe_import_rows(self, import_rows)
                 self._diagnostic_event(
                     "history_sync.local_reread", count=len(latest_local_rows),
                 )
@@ -6527,6 +8014,7 @@ class Spider(BaseSpider):
                 "history_sync.import_delta", count=len(import_rows),
             )
         imported = 0
+        deduplicated = 0
         try:
             with self._history_context_lock:
                 self._require_history_generation(expected_generation)
@@ -6543,6 +8031,10 @@ class Spider(BaseSpider):
                 # FongMi History.sync returns void and may skip equal or older title matches.
                 v80_history_commit(self, imported=imported, expected=0)
                 self._diagnostic_event("history_sync.import_finish", count=imported)
+                deduplicated = v91_cleanup_native_history_duplicates(self)
+                self._diagnostic_event(
+                    "history_sync.deduplicate", count=deduplicated,
+                )
         except _HistorySyncCancelled:
             raise
         except Exception as exc:
@@ -6557,6 +8049,7 @@ class Spider(BaseSpider):
             "upload_blocked": upload_blocked,
             "uploaded": uploaded,
             "imported": imported,
+            "deduplicated": deduplicated,
             # Keep the complete reconciliation snapshot separate from the
             # smaller native-import delta.  An empty import delta must not
             # erase progress already present in the cloud snapshot.
@@ -6587,9 +8080,10 @@ class Spider(BaseSpider):
     def _history_sync_message(result):
         skipped = max(0, int(result.get("upload_allowed") or 0) - int(result.get("uploaded") or 0))
         blocked = max(0, int(result.get("upload_blocked") or 0))
-        detail = "本机 %s，云端 %s，上传 %s，导入 %s，追更进度 %s" % (
+        detail = "本机 %s，云端 %s，上传 %s，导入 %s，去重 %s，追更进度 %s" % (
             result.get("local", 0), result.get("cloud", 0), result.get("uploaded", 0),
-            result.get("imported", 0), result.get("progress", 0),
+            result.get("imported", 0), result.get("deduplicated", 0),
+            result.get("progress", 0),
         )
         if blocked:
             detail += "，本机共享设置跳过上传 %s" % blocked
@@ -6818,6 +8312,7 @@ class Spider(BaseSpider):
                 "cloud": result["cloud"],
                 "uploaded": result["uploaded"],
                 "imported": result["imported"],
+                "deduplicated": result.get("deduplicated", 0),
                 "progress": result["progress"],
             }, ensure_ascii=False)
         except _HistorySyncCancelled:
@@ -7418,7 +8913,16 @@ class Spider(BaseSpider):
         exported = self._native_history_export()
         if not self.atvp_api and exported.get("config"):
             self._apply_native_subscription_config(exported.get("config"))
-        return self._normalize_history_rows(exported.get("rows") or [])
+        rows = self._normalize_history_rows(exported.get("rows") or [])
+        plan = v91_dedupe_history_rows(
+            rows,
+            str(getattr(self, "siteKey", "") or "").strip(),
+            self._history_merge_rank,
+            limit=self.HISTORY_ROW_LIMIT,
+        )
+        self._v91_native_history_cleanup = list(plan.get("cleanup") or [])
+        self._v91_native_history_migrations = list(plan.get("migrations") or [])
+        return list(plan.get("rows") or [])
 
     def _import_native_history(self, cloud_rows):
         rows = []
@@ -8258,16 +9762,15 @@ class Spider(BaseSpider):
         return output
 
     def _history_for_local(self, row):
-        return v80_history_for_local(self, row)
+        canonical = v91_history_canonicalize(
+            row, str(getattr(self, "siteKey", "") or "").strip(),
+        )
+        return v80_history_for_local(self, canonical) if canonical is not None else None
 
     def _history_identity(self, row):
-        key = str(row.get("key") or "").strip() if isinstance(row, dict) else ""
-        if not key:
-            return None
-        parts = key.split("@@@")
-        if len(parts) >= 2 and parts[0] and parts[1]:
-            return parts[0], parts[1]
-        return "csp_AList", key
+        return v91_history_identity(
+            row, str(getattr(self, "siteKey", "") or "").strip(),
+        )
 
     def _sync_site_keys(self):
         keys = set(self.SYNC_SITE_KEYS)
@@ -8911,35 +10414,7 @@ class Spider(BaseSpider):
 
     @staticmethod
     def _standardize_resource_name(value):
-        """Mirror the bounded part of AList TextUtils.cleanMediaTitle()."""
-        text = unicodedata.normalize("NFKC", str(value or "")).strip()
-        if not text:
-            return ""
-        text = re.sub(r"^[\s·•●✅✔✓★☆【】\[\]()（）{}]+", "", text)
-        # Telegram/VOD rows commonly carry a one-letter source marker such as
-        # `C沧元图`; remove only a leading marker before CJK text.
-        text = re.sub(r"^(?:[Cc]|资源标记)\s*(?=[\u3400-\u9fff])", "", text)
-        year = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", text)
-        text = re.sub(r"(?i)(?:系列更新中|更新中|连载中|全季更新|更新至\s*\d+|更至\s*\d+)", " ", text)
-        text = re.sub(
-            r"(?i)[\[【(（][^\]】)）]{0,96}(?:4k|8k|2160p|1080p|720p|web[- .]?dl|bluray|remux|更新|更至|完结|字幕|中字)[^\]】)）]{0,96}[\]】)）]",
-            " ", text,
-        )
-        text = re.sub(
-            r"(?i)\b(?:4k|8k|2160p|1080p|720p|uhd|hdr10?\+?|dv|remux|bluray|web[- .]?dl|webrip|h26[45]|hevc|mkv|mp4)\b.*$",
-            " ", text,
-        )
-        text = re.sub(r"(?i)\b\d{1,3}\s*[-~至]\s*\d{1,3}\s*(?:集|话|期)?\b", " ", text)
-        text = re.sub(r"\s+", " ", text).replace(" .", ".")
-        text = text.strip(" .-_·|/\\")
-        # Keep the season token readable for both display and matching.
-        text = re.sub(
-            r"(?<=[\u3400-\u9fff])(?=(?:第[零〇一二两三四五六七八九十百\d]{1,6}[季部]|Season\s*\d+|S\s*\d+))",
-            " ", text, flags=re.I,
-        )
-        if year and year.group(1) not in text:
-            text = "%s(%s)" % (text, year.group(1))
-        return text.strip()
+        return v91_standardize_resource_name(value)
 
     @staticmethod
     def _format_millis(value):
@@ -9890,6 +11365,7 @@ class Spider(BaseSpider):
         with self._cache_lock:
             if expected_generation != self._cache_generation:
                 return []
+        self._v91_preheat_audit_search_modes(item, mode_rows)
         for mode in sorted(modes, key=lambda value: self.RESOURCE_MODE_PRIORITY.get(value, 99)):
             for value in mode_rows.get(mode) or []:
                 if isinstance(value, dict):
@@ -9921,6 +11397,7 @@ class Spider(BaseSpider):
             cached_rows=cached_rows if supplement_modes else (),
             modes=sorted(modes, key=lambda value: self.RESOURCE_MODE_PRIORITY.get(value, 99)),
         )
+        self._v91_preheat_audit_candidates(item, rows, ordered, bound)
         self._diagnostic_event(
             "resource_candidates.finish", "INFO" if ordered else "WARN",
             duration_ms=int((time.monotonic() - started_at) * 1000),
@@ -10198,6 +11675,7 @@ class Spider(BaseSpider):
                 "started_at": int(time.time()),
                 "draining": False,
             }
+        self._v91_preheat_audit_reset(source_items, self._cache_generation)
         self._drain_follow_preheat_batch()
         result = self._follow_preheat_snapshot()
         result["accepted"] = True
@@ -10288,6 +11766,7 @@ class Spider(BaseSpider):
             state["processed"] = len(completed)
             if not resource_ready:
                 state["resource_failed"] = self._positive_int(state.get("resource_failed"), 0) + 1
+        self._v91_preheat_audit_complete(item, resource_ready)
         self._refresh_follow_categories()
         self._drain_follow_preheat_batch()
 
@@ -10459,8 +11938,14 @@ class Spider(BaseSpider):
                         source_item, deadline=deadline, background=True,
                         expected_generation=expected_generation,
                     )
+                    attempted_candidates = list(
+                        candidates[:self.RESOURCE_HOT_VALIDATION_ATTEMPT_LIMIT]
+                    )
                     candidates = self._checked_resource_rows(
-                        candidates[:self.RESOURCE_HOT_VALIDATION_ATTEMPT_LIMIT], deadline,
+                        attempted_candidates, deadline,
+                    )
+                    self._v91_preheat_audit_checked_rows(
+                        source_item, attempted_candidates, candidates,
                     )
 
                     def publish_partial(current):
@@ -10472,12 +11957,18 @@ class Spider(BaseSpider):
                             group_count = self._validated_resource_group_count(current)
                             if group_count > 0 and first_refreshed_groups <= 0:
                                 first_refreshed_groups = group_count
-                                self._schedule_active_detail_refresh(source_item)
+                                self._schedule_active_detail_refresh(
+                                    source_item, reason="empty-detail-fallback",
+                                    signature="empty-detail-fallback",
+                                )
 
                     all_playable = self._playable_resource_rows(
                         candidates, source_item, deadline,
                         expected_generation=expected_generation,
                         on_update=publish_partial,
+                    )
+                    self._v91_preheat_audit_playable_rows(
+                        source_item, candidates, all_playable,
                     )
                     if self._atvp_plugin_candidate_gap(all_playable, source_item):
                         plugin_deadline = min(
@@ -10490,9 +11981,17 @@ class Spider(BaseSpider):
                             source_item, deadline=plugin_deadline,
                             expected_generation=expected_generation,
                         )
+                        self._v91_preheat_audit_extra_candidates(
+                            source_item, "plugin-fallback", plugin_candidates,
+                        )
+                        plugin_attempted = list(
+                            plugin_candidates[:self.RESOURCE_HOT_VALIDATION_ATTEMPT_LIMIT]
+                        )
                         plugin_checked = self._checked_resource_rows(
-                            plugin_candidates[:self.RESOURCE_HOT_VALIDATION_ATTEMPT_LIMIT],
-                            plugin_deadline,
+                            plugin_attempted, plugin_deadline,
+                        )
+                        self._v91_preheat_audit_checked_rows(
+                            source_item, plugin_attempted, plugin_checked,
                         )
                         base_playable = list(all_playable)
 
@@ -10509,6 +12008,9 @@ class Spider(BaseSpider):
                             expected_generation=expected_generation,
                             on_update=publish_plugin_partial,
                         )
+                        self._v91_preheat_audit_playable_rows(
+                            source_item, plugin_checked, plugin_playable,
+                        )
                         if plugin_playable:
                             all_playable = self._resource_output_candidate_order(
                                 base_playable + list(plugin_playable), source_item,
@@ -10516,6 +12018,13 @@ class Spider(BaseSpider):
                                 modes=self.RESOURCE_SEARCH_MODES,
                             )
                     target_row = self._target_covering_resource_row(all_playable, source_item)
+                    if target_row is None:
+                        shadow_deadline = time.monotonic() + min(
+                            12, max(6, self.timeout),
+                        )
+                        self._v91_shadow_validate_preheat_rejections(
+                            source_item, shadow_deadline, expected_generation,
+                        )
                     playable = list(all_playable[:self.RESOURCE_HOT_ROUTE_LIMIT])
                     if target_row is not None and all(
                             str(row.get("vod_id") or row.get("id") or "")
@@ -10543,7 +12052,7 @@ class Spider(BaseSpider):
                             )
                         final_group_count = self._validated_resource_group_count(playable)
                         if final_group_count > first_refreshed_groups:
-                            self._schedule_active_detail_refresh(source_item)
+                            first_refreshed_groups = final_group_count
                 except Exception:
                     pass
                 finally:
@@ -10551,7 +12060,8 @@ class Spider(BaseSpider):
                         if self._resource_entry_preheat_jobs.get(cache_key) is job_owner:
                             self._resource_entry_preheat_jobs.pop(cache_key, None)
                     self._complete_follow_preheat_resource(source_item, resource_ready)
-                    self._refresh_follow_categories()
+                    if resource_ready:
+                        self._refresh_follow_categories("resource-entry-preheat")
 
             try:
                 submitted = self._submit_background_bulkhead_task(
@@ -10666,7 +12176,7 @@ class Spider(BaseSpider):
                         group_count = self._validated_resource_group_count(current)
                         if group_count > 0 and first_refreshed_groups <= 0:
                             first_refreshed_groups = group_count
-                            self._schedule_active_detail_refresh(item)
+                            first_refreshed_groups = group_count
                 playable = self._playable_resource_rows(
                     checked, item, validation_deadline, expected_generation=generation,
                     on_update=publish_partial,
@@ -10681,7 +12191,7 @@ class Spider(BaseSpider):
                 if committed:
                     final_group_count = self._validated_resource_group_count(playable)
                     if final_group_count > first_refreshed_groups:
-                        self._schedule_active_detail_refresh(item)
+                        first_refreshed_groups = final_group_count
                     if shadow_rows is not None:
                         shadow_payload = (
                             legacy_candidates if legacy_candidates is not None else candidates,
@@ -10830,6 +12340,14 @@ class Spider(BaseSpider):
                 break
             try:
                 detail = self._resource_detail(row, deadline=deadline, use_validated_cache=False)
+                identity_decision = v92_resource_detail_identity(
+                    self, row, item, detail,
+                )
+                if not identity_decision.accepted:
+                    self._v91_preheat_audit_record(
+                        item, "detail_identity", identity_decision.reason, row=row,
+                    )
+                    continue
                 validated_detail = self._validated_playable_detail(
                     detail, item, deadline, 1,
                     resource_id=row.get("vod_id") or row.get("id"),
@@ -12161,53 +13679,7 @@ class Spider(BaseSpider):
         return values
 
     def _resource_score(self, row, item, bound):
-        resource_id = str(row.get("vod_id") or row.get("id") or "").strip()
-        aliases = {
-            self._normalize_media_title(value)
-            for value in self._follow_title_alias_values(item)
-        } - {""}
-        work_titles = self._resource_work_title_values(row)
-        title_values = work_titles or self._resource_title_values(row)
-        if not title_values:
-            return 0
-        if all(self._resource_has_denied_variant(value) for value in title_values):
-            return 0
-        tracking_season = self._tracking_season(item)
-        season_count = self._positive_int(item.get("season_count"), 0)
-        single_season = season_count == 1 or (season_count <= 0 and tracking_season == 1)
-        year = str(item.get("year") or "")[:4]
-        if bound and resource_id == bound:
-            return 10000
-        best = 0
-        for raw_actual in title_values:
-            actual = self._normalize_media_title(raw_actual)
-            if not actual or self._resource_has_denied_variant(raw_actual):
-                continue
-            row_season = Filter._season(raw_actual)
-            if row_season and row_season != tracking_season and not single_season:
-                continue
-            year_text = " ".join(
-                str(row.get(key) or "")
-                for key in (
-                    "vod_name", "name", "title", "work_title", "note",
-                    "vod_year", "vod_remarks",
-                )
-            )
-            row_years = set(re.findall(r"(?<!\d)((?:19|20)\d{2})(?!\d)", year_text))
-            if year and row_years and year not in row_years and row_season != tracking_season:
-                continue
-            if actual in aliases:
-                score = 500
-            elif self._resource_decorated_alias(raw_actual, aliases):
-                score = 470
-            else:
-                continue
-            if row_season == tracking_season:
-                score += 80
-            if year and year in row_years:
-                score += 30
-            best = max(best, score)
-        return best
+        return v91_resource_score(self, row, item, bound)
 
     @staticmethod
     def _resource_provider_key(*values):
@@ -13029,6 +14501,12 @@ class Spider(BaseSpider):
                     "play_id": play_id,
                     "resource_id": resource_id,
                     "provider": group_providers[group_index] if group_index < len(group_providers) else "",
+                    "resource_quality": (
+                        dict(quality_scores[group_index])
+                        if group_index < len(quality_scores)
+                        and isinstance(quality_scores[group_index], dict)
+                        else {}
+                    ),
                     "origin_part": part_index,
                     "episode_key": episode_key,
                     "payload": payload,
@@ -13613,9 +15091,8 @@ class Spider(BaseSpider):
         expired = [
             key for key, value in self._route_probe_cache.items()
             if not isinstance(value, dict)
-            or now - float(value.get("checked_at") or 0) > (
-                min(self.route_probe_ttl, self.ROUTE_PROBE_NEGATIVE_TTL)
-                if value.get("reachable") is False else self.route_probe_ttl
+            or now - float(value.get("checked_at") or 0) > v91_route_probe_ttl(
+                value, self.route_probe_ttl,
             )
         ]
         for key in expired:
@@ -13670,6 +15147,9 @@ class Spider(BaseSpider):
             updated_at = self._positive_int(raw.get("updatedAt"), 0)
             if updated_at <= 0 or now - updated_at > self.ROUTE_QUALITY_MAX_AGE:
                 continue
+            confirmed_plays = min(
+                50, self._positive_int(raw.get("confirmedPlays"), 0),
+            )
             restored[str(key)] = {
                 "successes": self._positive_int(raw.get("successes"), 0),
                 "failures": self._positive_int(raw.get("failures"), 0),
@@ -13678,6 +15158,12 @@ class Spider(BaseSpider):
                 "codec": str(raw.get("codec") or ""),
                 "height": self._positive_int(raw.get("height"), 0),
                 "subtitle": raw.get("subtitle") if isinstance(raw.get("subtitle"), bool) else None,
+                "confirmedPlays": confirmed_plays,
+                "confirmedCompletions": min(
+                    confirmed_plays,
+                    self._positive_int(raw.get("confirmedCompletions"), 0),
+                ),
+                "lastConfirmedAt": self._positive_int(raw.get("lastConfirmedAt"), 0),
                 "updatedAt": updated_at,
             }
         with self._cache_lock:
@@ -13813,7 +15299,8 @@ class Spider(BaseSpider):
             return dict(self._route_quality_history.get(key) or {})
 
     def _record_route_quality(self, play_id, success, startup_ms=0, signals=None,
-                              expected_generation=None, expected_backend=None):
+                              expected_generation=None, expected_backend=None,
+                              prehashed=False):
         signals = signals if isinstance(signals, dict) else {}
         with self._history_context_lock:
             with self._cache_lock:
@@ -13825,7 +15312,10 @@ class Spider(BaseSpider):
                         expected_backend is not None
                         and expected_backend != self._resource_capability_identity()):
                     return
-            key = self._route_quality_key(play_id)
+            raw_key = str(play_id or "").strip().lower()
+            key = raw_key if prehashed and re.fullmatch(r"[0-9a-f]{64}", raw_key) else (
+                self._route_quality_key(play_id) if not prehashed else ""
+            )
             if not key:
                 return
             self._load_route_quality_history()
@@ -13838,38 +15328,19 @@ class Spider(BaseSpider):
                     expected_backend is not None
                     and expected_backend != self._resource_capability_identity()):
                 return
-            record = dict(self._route_quality_history.get(key) or {})
-            successes = self._positive_int(record.get("successes"), 0)
-            failures = self._positive_int(record.get("failures"), 0)
-            if successes + failures >= 50:
-                successes //= 2
-                failures //= 2
-            if success:
-                successes += 1
-            else:
-                failures += 1
-            record["successes"] = successes
-            record["failures"] = failures
-            startup = self._positive_int(startup_ms or signals.get("startup_ms"), 0)
-            if success and startup:
-                timed = self._positive_int(record.get("timedSuccesses"), 0)
-                average = self._positive_int(record.get("avgStartupMs"), 0)
-                record["avgStartupMs"] = int(round((average * timed + startup) / float(timed + 1)))
-                record["timedSuccesses"] = min(50, timed + 1)
-            codec = str(signals.get("codec") or "").strip().lower()
-            if codec:
-                record["codec"] = codec
-            height = self._positive_int(signals.get("height"), 0)
-            if height:
-                record["height"] = height
-            if isinstance(signals.get("subtitle"), bool):
-                record["subtitle"] = signals.get("subtitle")
-            record["updatedAt"] = int(time.time())
+            record = v91_route_quality_update(
+                self._route_quality_history.get(key),
+                success,
+                startup_ms=startup_ms,
+                signals=signals,
+            )
             self._route_quality_history[key] = record
             if len(self._route_quality_history) > self.ROUTE_QUALITY_LIMIT * 2:
                 oldest = sorted(
                     self._route_quality_history,
-                    key=lambda item: self._positive_int(self._route_quality_history[item].get("updatedAt"), 0),
+                    key=lambda item: self._positive_int(
+                        self._route_quality_history[item].get("updatedAt"), 0,
+                    ),
                 )[:self.ROUTE_QUALITY_LIMIT]
                 for item in oldest:
                     self._route_quality_history.pop(item, None)
@@ -14201,165 +15672,44 @@ class Spider(BaseSpider):
         media_url = Filter._first_http_url(output.get("url"))
         return bool(media_url and self._media_url_allowed(media_url, deadline=deadline))
 
-    def _probe_media_output(self, output, deadline=None):
+    def _probe_media_output(self, output, deadline=None, structured=False):
         with self._v80_timeout_child_scope(
                 "probe_media", self.RESOURCE_FOREGROUND_BUDGET,
                 deadline=deadline) as operation:
-            return self._v80_probe_media_output_unbounded(
+            result = self._v80_probe_media_output_unbounded(
                 output, deadline=operation.deadline,
             )
+        if structured or result.get("reachable") is True or isinstance(result.get("output"), dict):
+            return result
+        return None
 
     def _v80_probe_media_output_unbounded(self, output, deadline=None):
-        started_at = time.monotonic()
-        clean_output = self._sanitize_route_output(output)
-        if not isinstance(clean_output, dict):
-            return None
-        media_url = Filter._first_http_url(clean_output.get("url"))
-        if not media_url:
-            return None
-        try:
-            security_policy = self._route_security_policy()
-            playback_headers = v80_security_filter_headers(
-                dict(clean_output.get("header") or {}),
-                same_origin=True,
-                allow_sensitive=True,
-            )
-        except V80SecurityPolicyError:
-            return None
-        headers = dict(playback_headers)
-        headers.setdefault("User-Agent", self.user_agent)
-        headers.setdefault("Accept", "*/*")
-        headers["Range"] = "bytes=0-%d" % (self.ROUTE_PROBE_MAX_BYTES - 1)
-        current = media_url
-        previous_url = None
-        crossed_origin = False
-
-        def redirected_output():
-            if not crossed_origin:
-                return None
-            playback_output = dict(clean_output)
-            playback_output["url"] = current
-            playback_output["header"] = playback_headers
-            playback_output = self._sanitize_route_output(playback_output)
-            if not isinstance(playback_output, dict):
-                return None
-            return {
-                "checked_at": time.time(),
-                "reachable": None,
-                "fingerprint": "",
-                "output": playback_output,
-                "cross_origin": True,
-            }
-
-        absolute_deadline = deadline if deadline is not None else time.monotonic() + 8
-        for redirect_count in range(V80_SECURITY_LIMITS["redirect_hops"] + 1):
-            resolved = self._resolved_media_target(current, deadline=absolute_deadline)
-            if resolved is None:
-                return None
-            parsed, addresses = resolved
-            if previous_url is not None:
-                decision = security_policy.redirect(
-                    previous_url,
-                    current,
-                    resolved_addresses=addresses,
-                    headers=headers,
-                    redirect_count=redirect_count - 1,
-                )
-                if not decision.allowed:
-                    return None
-                if not decision.same_origin:
-                    crossed_origin = True
-                headers = dict(decision.headers)
-                try:
-                    playback_headers = v80_security_filter_headers(
-                        playback_headers,
-                        same_origin=decision.same_origin,
-                        allow_sensitive=decision.same_origin,
-                    )
-                except V80SecurityPolicyError:
-                    return None
-            if absolute_deadline - time.monotonic() <= 0:
-                return redirected_output()
-            response = None
-            for index, address in enumerate(addresses):
-                remaining = absolute_deadline - time.monotonic()
-                if remaining <= 0:
-                    return redirected_output()
-                attempts_left = len(addresses) - index
-                attempt_deadline = min(
-                    absolute_deadline,
-                    time.monotonic() + max(0.2, remaining / max(1, attempts_left)),
-                )
-                response = self._pinned_media_request(
-                    parsed, address, headers, attempt_deadline,
-                )
-                if response is not None:
-                    break
-            if response is None:
-                return redirected_output()
-            status = int(response.get("status") or 0)
-            response_headers = response.get("headers") or {}
-            if status in V80_SECURITY_REDIRECT_STATUSES:
-                if redirect_count >= V80_SECURITY_LIMITS["redirect_hops"]:
-                    return None
-                location = str(response_headers.get("Location") or response_headers.get("location") or "").strip()
-                if not location:
-                    return None
-                previous_url = current
-                current = urljoin(current, location)
-                continue
-            if status not in (200, 206):
-                return redirected_output()
-            chunk = bytes(response.get("body") or b"")[:self.ROUTE_PROBE_MAX_BYTES]
-            if not chunk:
-                return redirected_output()
-            content_type = str(response_headers.get("Content-Type") or response_headers.get("content-type") or "").lower()
-            if "text/html" in content_type and b"<html" in chunk[:512].lower():
-                return redirected_output()
-            content_range = str(response_headers.get("Content-Range") or response_headers.get("content-range") or "")
-            total_match = re.search(r"/(\d+)\s*$", content_range)
-            total = int(total_match.group(1)) if total_match else 0
-            if not total and status == 200:
-                total = self._positive_int(
-                    response_headers.get("Content-Length") or response_headers.get("content-length"), 0,
-                )
-            signals = self._media_quality_signals(current, content_type, chunk)
-            playback_output = dict(clean_output)
-            playback_output["url"] = current
-            playback_output["header"] = playback_headers
-            playback_output = self._sanitize_route_output(playback_output)
-            if not isinstance(playback_output, dict):
-                return None
-            return {
-                "checked_at": time.time(),
-                "reachable": True,
-                "fingerprint": "range-v1:%s:%s" % (
-                    total or "unknown", hashlib.sha256(chunk).hexdigest(),
-                ),
-                "content_length": total,
-                "range_status": status,
-                "startup_ms": max(1, int(round((time.monotonic() - started_at) * 1000))),
-                "content_type": content_type,
-                "codec": signals.get("codec") or "",
-                "height": signals.get("height") or 0,
-                "subtitle": signals.get("subtitle"),
-                "output": playback_output,
-            }
-        return None
+        return v91_probe_media_output(self, output, deadline=deadline)
 
     def _cache_route_probe(self, play_id, probe, resource_id="", resource_mode="vod",
                            expected_generation=None, expected_backend=None):
         key = self._route_probe_key(play_id, resource_id, resource_mode)
         if not key or not isinstance(probe, dict):
             return
-        cached_probe = dict(probe)
-        if cached_probe.get("reachable") is True or "output" in cached_probe:
-            cached_output = self._sanitize_route_output(cached_probe.get("output"))
-            if not isinstance(cached_output, dict) or not Filter._first_http_url(cached_output.get("url")):
+        if probe.get("reachable") is False:
+            cached_probe = v91_route_probe_failure(
+                probe.get("failure_kind"),
+                status=probe.get("status"),
+                checked_at=probe.get("checked_at"),
+            )
+            if v91_route_probe_ttl(cached_probe, self.route_probe_ttl) <= 0:
                 return
-            cached_probe["output"] = cached_output
         else:
-            cached_probe.pop("output", None)
+            cached_probe = dict(probe)
+            if cached_probe.get("reachable") is True or "output" in cached_probe:
+                cached_output = self._sanitize_route_output(cached_probe.get("output"))
+                if (
+                        not isinstance(cached_output, dict)
+                        or not Filter._first_http_url(cached_output.get("url"))):
+                    return
+                cached_probe["output"] = cached_output
+            else:
+                cached_probe.pop("output", None)
         with self._history_context_lock:
             with self._cache_lock:
                 if (
@@ -14453,6 +15803,18 @@ class Spider(BaseSpider):
                     return
                 state_items = dict(items)
                 item = dict(state_items.get(item_key) or {})
+                previous_route = item.get("last_play_route")
+                resource_changed = bool(
+                    resource_id and str(item.get("alist_vod_id") or "") != resource_id
+                )
+                previous_provider = self._resource_provider_key(
+                    item.get("alist_resource_provider")
+                )
+                provider_changed = previous_provider != resource_provider
+                if not (
+                        v91_follow_route_changed(previous_route, route)
+                        or resource_changed or provider_changed):
+                    return False
                 item["last_play_route"] = route
                 if resource_id:
                     item["alist_vod_id"] = resource_id
@@ -14463,59 +15825,40 @@ class Spider(BaseSpider):
                 state_items[item_key] = item
                 try:
                     self._save_follow_state(state_items)
+                    return True
                 except Exception:
-                    pass
+                    return False
 
     def _probe_route_candidate(self, target, expected_generation=None, expected_backend=None):
-        output = dict(self._atvp_play(
-            target,
-            timeout_seconds=max(6, min(15, self.timeout)),
-            deadline=time.monotonic() + min(30, self.FOLLOWPLAY_PLAY_BUDGET),
-            expected_generation=expected_generation,
-            expected_backend=expected_backend,
-        ) or {})
-        result = self._probe_media_output(
-            output, deadline=time.monotonic() + min(15, self.FOLLOWPLAY_PLAY_BUDGET),
+        try:
+            output = dict(self._atvp_play(
+                target,
+                timeout_seconds=max(6, min(15, self.timeout)),
+                deadline=time.monotonic() + min(30, self.FOLLOWPLAY_PLAY_BUDGET),
+                expected_generation=expected_generation,
+                expected_backend=expected_backend,
+            ) or {})
+        except Exception as exc:
+            return v91_route_probe_exception(exc)
+        return self._probe_media_output(
+            output,
+            deadline=time.monotonic() + min(15, self.FOLLOWPLAY_PLAY_BUDGET),
+            structured=True,
         )
-        if result is None:
-            raise RuntimeError("媒体Range验证失败")
-        return result
 
     def _schedule_route_preheat(self, records, item):
         if not self.route_preheat or not self.atvp_api or not self.atvp_token or self._atvp_session is None:
             return
-        resume = re.match(r"^S0*(\d{1,2})E0*(\d{1,3})$", str(item.get("history_episode") or ""), re.I)
-        target_key = (int(resume.group(1)), int(resume.group(2))) if resume else None
-        if target_key is None:
-            target_key = next((
-                record.get("episode_key") for record in records
-                if isinstance(record.get("episode_key"), tuple)
-                and len(record["episode_key"]) == 2
-                and all(isinstance(value, int) and value > 0 for value in record["episode_key"])
-            ), None)
-        if target_key is None:
-            return
-        targets = []
-        for record in records:
-            if record.get("episode_key") != target_key:
-                continue
-            payload = record.get("payload") or {}
-            target = str(payload.get("url") or "").strip()
-            resource_id = str(record.get("resource_id") or payload.get("resourceId") or "").strip()
-            resource_mode = str(payload.get("resourceMode") or "vod").strip().lower() or "vod"
-            identity = (target, resource_id, resource_mode)
-            if target and identity not in targets:
-                route_payload = dict(payload) if isinstance(payload, dict) else {}
-                route_payload.setdefault("tmdbId", item.get("tmdb_id"))
-                route_payload.setdefault("sourceId", item.get("source_id"))
-                route_payload.setdefault("resourceId", resource_id)
-                route_payload.setdefault("resourceMode", resource_mode)
-                route_payload.setdefault("season", target_key[0])
-                route_payload.setdefault("episode", target_key[1])
-                route_payload.setdefault("name", record.get("name"))
-                targets.append((target, resource_id, resource_mode, route_payload))
-            if len(targets) >= self.FOLLOW_ROUTE_LIMIT:
-                break
+        targets = [
+            (row["target"], row["resource_id"], row["resource_mode"], row["payload"])
+            for row in v91_order_preheat_targets(
+                self, records, item, self.FOLLOW_ROUTE_LIMIT,
+            )
+        ]
+        if not targets:
+            self._v91_preheat_audit_record(
+                item, "target_coverage", "target_episode_missing",
+            )
         for target, resource_id, resource_mode, route_payload in targets:
             with self._history_context_lock:
                 with self._cache_lock:
@@ -14528,17 +15871,31 @@ class Spider(BaseSpider):
                     if not probe_key:
                         continue
                     cached_probe = self._route_probe_cache.get(probe_key)
-                    if isinstance(cached_probe, dict) and cached_probe.get("reachable") is True:
+                    probe_action = v91_route_probe_preheat_action(
+                        cached_probe, probe_key in self._route_probe_jobs,
+                    )
+                    if probe_action == "reuse":
                         cached_probe = dict(cached_probe)
                         job_owner = None
-                    elif probe_key in self._route_probe_jobs:
+                    elif probe_action == "skip":
+                        if (
+                                isinstance(cached_probe, dict)
+                                and cached_probe.get("reachable") is False):
+                            self._v91_preheat_audit_record(
+                                item, "route_probe",
+                                cached_probe.get("failure_kind") or "route_unreachable",
+                                row={
+                                    "vod_id": resource_id,
+                                    "_resource_mode": resource_mode,
+                                },
+                            )
                         continue
                     else:
                         cached_probe = None
                         job_owner = object()
                         self._route_probe_jobs[probe_key] = job_owner
             if cached_probe is not None:
-                self._remember_successful_follow_route(
+                route_changed = self._remember_successful_follow_route(
                     route_payload,
                     {
                         "_route_refresh_target": target,
@@ -14551,7 +15908,8 @@ class Spider(BaseSpider):
                     expected_generation=generation,
                     expected_backend=backend,
                 )
-                self._refresh_follow_categories()
+                if route_changed:
+                    self._refresh_follow_categories("route-preheat")
                 continue
 
             def worker(route=target, route_resource_id=resource_id, route_mode=resource_mode,
@@ -14601,8 +15959,17 @@ class Spider(BaseSpider):
                         expected_generation=expected_generation,
                         expected_backend=expected_backend,
                     )
+                    if result.get("reachable") is not True:
+                        self._v91_preheat_audit_record(
+                            item, "route_probe",
+                            result.get("failure_kind") or "route_unreachable",
+                            row={
+                                "vod_id": route_resource_id,
+                                "_resource_mode": route_mode,
+                            },
+                        )
                     if result.get("reachable") is True:
-                        self._remember_successful_follow_route(
+                        route_changed = self._remember_successful_follow_route(
                             route_payload,
                             {
                                 "_route_refresh_target": route,
@@ -14615,7 +15982,8 @@ class Spider(BaseSpider):
                             expected_generation=expected_generation,
                             expected_backend=expected_backend,
                         )
-                    self._refresh_follow_categories()
+                        if route_changed:
+                            self._refresh_follow_categories("route-preheat")
 
             try:
                 submitted = self._submit_background_bulkhead_task(
@@ -16403,6 +17771,379 @@ class Spider(BaseSpider):
         ).strip().replace("\r", " ").replace("\n", " ")
         limit = 512 if limit == 512 else 220
         return text[:limit] or "未知错误"
+
+
+    def _v91_preheat_audit_reset(self, items, generation):
+        works = {}
+        for item in list(items or [])[:V91_PREHEAT_AUDIT_WORK_LIMIT]:
+            if not isinstance(item, dict):
+                continue
+            work = v91_preheat_work_fingerprint(item)
+            if not work or work in works:
+                continue
+            works[work] = {
+                "title": str(item.get("title") or "").strip()[:96],
+                "target": self._resource_target_episode(item),
+                "search_counts": {},
+                "raw_candidates": 0,
+                "accepted_candidates": 0,
+                "entries": [],
+                "shadow_candidates": [],
+                "completed": False,
+                "ready": False,
+            }
+        with self._cache_lock:
+            self._v91_preheat_audit_state = {
+                "version": 1,
+                "generation": generation,
+                "started_at": int(time.time()),
+                "works": works,
+            }
+
+    def _v91_preheat_audit_work_locked(self, item):
+        state = getattr(self, "_v91_preheat_audit_state", None)
+        if not isinstance(state, dict) or state.get("generation") != self._cache_generation:
+            return None
+        works = state.get("works") if isinstance(state.get("works"), dict) else {}
+        work = works.get(v91_preheat_work_fingerprint(item))
+        return work if isinstance(work, dict) else None
+
+    def _v91_preheat_audit_record(
+            self, item, stage, reason, row=None, score=0, shadow=""):
+        row = row if isinstance(row, dict) else {}
+        mode = str(row.get("_resource_mode") or "").strip().lower()
+        identity = self._resource_row_identity(row) if row else ""
+        provider = self._resource_output_provider(row) if row else ""
+        entry = v91_preheat_audit_entry(
+            item, stage, reason, mode=mode, provider=provider,
+            candidate_identity=identity, score=score, shadow=shadow,
+        )
+        with self._cache_lock:
+            work = self._v91_preheat_audit_work_locked(item)
+            if work is None:
+                return False
+            entries = work.setdefault("entries", [])
+            marker = (
+                entry.get("candidate"), entry.get("stage"),
+                entry.get("reason"), entry.get("shadow"),
+            )
+            if any((
+                    value.get("candidate"), value.get("stage"),
+                    value.get("reason"), value.get("shadow"),
+            ) == marker for value in entries if isinstance(value, dict)):
+                return False
+            entries.append(entry)
+            if len(entries) > V91_PREHEAT_AUDIT_ENTRY_LIMIT:
+                del entries[:-V91_PREHEAT_AUDIT_ENTRY_LIMIT]
+        self._diagnostic_event(
+            "preheat.audit", "WARN" if reason in (
+                "shadow_playable", "shadow_reachable", "shadow_parse_verified",
+            ) else "INFO",
+            media_id=entry.get("work", "")[:12],
+            candidate=entry.get("candidate", "")[:12],
+            decision=reason, provider=provider or mode, audit_stage=stage,
+        )
+        return True
+
+    def _v91_preheat_audit_search_modes(self, item, mode_rows):
+        counts = {}
+        for mode, rows in (mode_rows or {}).items():
+            counts[str(mode or "")[:24]] = len(rows) if isinstance(rows, list) else 0
+        with self._cache_lock:
+            work = self._v91_preheat_audit_work_locked(item)
+            if work is not None:
+                work["search_counts"] = counts
+
+    def _v91_preheat_audit_extra_candidates(self, item, mode, rows):
+        count = len(rows) if isinstance(rows, list) else 0
+        with self._cache_lock:
+            work = self._v91_preheat_audit_work_locked(item)
+            if work is None:
+                return
+            search_counts = work.setdefault("search_counts", {})
+            search_counts[str(mode or "extra")[:24]] = count
+            work["raw_candidates"] = max(
+                0, int(work.get("raw_candidates") or 0),
+            ) + count
+            work["accepted_candidates"] = max(
+                0, int(work.get("accepted_candidates") or 0),
+            ) + count
+
+    def _v91_preheat_shadow_candidate_eligible(self, row):
+        if not isinstance(row, dict):
+            return False
+        mode = str(row.get("_resource_mode") or "").strip().lower()
+        resource_id = str(row.get("vod_id") or row.get("id") or row.get("url") or "").strip()
+        if mode == "plugin":
+            return self._atvp_plugin_decode_resource_id(resource_id) is not None
+        target = unquote(resource_id)
+        if target.startswith("push://"):
+            target = target[7:].strip()
+        if not target or len(target) > self.FOLLOWPLAY_MAX_URL_LENGTH:
+            return False
+        if target.startswith(("magnet:", "ed2k:")):
+            return True
+        try:
+            parsed = urlparse(target)
+            host = str(parsed.hostname or "").lower()
+            return bool(
+                parsed.scheme in ("http", "https")
+                and parsed.port in (None, 80, 443)
+                and not parsed.username and not parsed.password
+                and any(
+                    host == suffix or host.endswith("." + suffix)
+                    for suffix in self.RESOURCE_CHECK_LINK_HOSTS
+                )
+            )
+        except Exception:
+            return False
+
+    def _v91_preheat_audit_candidates(self, item, rows, ordered, bound):
+        rows = list(rows or [])
+        ordered = list(ordered or [])
+        accepted = {
+            self._resource_row_identity(row)
+            for row in ordered if isinstance(row, dict)
+        } - {""}
+        shadow = []
+        rejected_count = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            identity = self._resource_row_identity(row)
+            detail = v91_resource_score_detail(self, row, item, bound)
+            if detail.score > 0 and identity in accepted:
+                continue
+            rejected_count += 1
+            reason = detail.reason if detail.score <= 0 else "candidate_order_limit"
+            self._v91_preheat_audit_record(
+                item, "title_filter", reason, row=row, score=detail.score,
+            )
+            if (
+                    detail.score <= 0
+                    and len(shadow) < V91_PREHEAT_SHADOW_LIMIT
+                    and self._v91_preheat_shadow_candidate_eligible(row)):
+                shadow.append(dict(row))
+        with self._cache_lock:
+            work = self._v91_preheat_audit_work_locked(item)
+            if work is not None:
+                work["raw_candidates"] = len(rows)
+                work["accepted_candidates"] = len(ordered)
+                work["title_rejected"] = rejected_count
+                work["shadow_candidates"] = shadow
+
+    def _v91_preheat_audit_checked_rows(self, item, attempted, checked):
+        accepted = {
+            self._resource_row_identity(row)
+            for row in checked or [] if isinstance(row, dict)
+        } - {""}
+        for row in attempted or []:
+            if not isinstance(row, dict) or self._resource_row_identity(row) in accepted:
+                continue
+            reason = (
+                "link_check_failed"
+                if self._v91_preheat_shadow_candidate_eligible(row)
+                else "link_not_allowlisted"
+            )
+            self._v91_preheat_audit_record(item, "link_gate", reason, row=row)
+
+    def _v91_preheat_audit_playable_rows(self, item, attempted, playable):
+        playable_ids = {
+            self._resource_row_identity(row)
+            for row in playable or [] if isinstance(row, dict)
+        } - {""}
+        for row in attempted or []:
+            if not isinstance(row, dict) or self._resource_row_identity(row) in playable_ids:
+                continue
+            self._v91_preheat_audit_record(
+                item, "detail_validation", "detail_or_route_failed", row=row,
+            )
+        for row in playable or []:
+            detail = self._validated_resource_detail(row)
+            if detail is not None and not self._resource_detail_has_complete_target(detail, item):
+                self._v91_preheat_audit_record(
+                    item, "target_coverage", "target_episode_missing", row=row,
+                )
+
+    def _v91_shadow_validate_preheat_rejections(
+            self, item, deadline, expected_generation):
+        with self._cache_lock:
+            work = self._v91_preheat_audit_work_locked(item)
+            rows = list((work or {}).get("shadow_candidates") or [])[:V91_PREHEAT_SHADOW_LIMIT]
+            if work is not None:
+                work["shadow_candidates"] = []
+            backend = self._resource_capability_identity()
+        tested = 0
+        for row in rows:
+            if deadline is not None and deadline - time.monotonic() < 1:
+                self._v91_preheat_audit_record(
+                    item, "shadow_probe", "shadow_budget_exhausted", row=row,
+                    shadow="skipped",
+                )
+                break
+            if expected_generation != self._cache_generation:
+                self._v91_preheat_audit_record(
+                    item, "shadow_probe", "generation_changed", row=row,
+                    shadow="cancelled",
+                )
+                break
+            tested += 1
+            shadow_reason = "shadow_unreachable"
+            shadow_result = "unreachable"
+            try:
+                checked = self._checked_resource_rows([row], deadline)
+                if not checked:
+                    raise RuntimeError("shadow link rejected")
+                detail = self._resource_detail(
+                    checked[0], deadline=deadline, use_validated_cache=False,
+                )
+                if not self._resource_detail_covers_target(detail, item):
+                    self._v91_preheat_audit_record(
+                        item, "shadow_probe", "target_episode_missing", row=row,
+                        shadow="not_target",
+                    )
+                    continue
+                vod = self._payload_first_vod(detail)
+                groups, _limited = _split_bounded_shared(
+                    (vod or {}).get("vod_play_url"), "$$$",
+                    self.RESOURCE_PLAY_GROUP_SCAN_LIMIT,
+                )
+                for group in groups:
+                    for play_id in self._resource_preferred_play_ids(group, item)[:1]:
+                        output = self._atvp_play(
+                            play_id,
+                            timeout_seconds=max(6, min(12, self.timeout)),
+                            deadline=deadline,
+                            expected_generation=expected_generation,
+                            expected_backend=backend,
+                        )
+                        probe = self._probe_media_output(
+                            output, deadline=deadline, structured=True,
+                        )
+                        if probe.get("reachable") is True:
+                            shadow_reason = "shadow_reachable"
+                            shadow_result = "reachable"
+                            break
+                        if self._safe_atvp_play_output(output, deadline=deadline):
+                            shadow_reason = "shadow_parse_verified"
+                            shadow_result = "parse_verified"
+                            break
+                    if shadow_result != "unreachable":
+                        break
+            except Exception:
+                shadow_reason = "shadow_unreachable"
+                shadow_result = "unreachable"
+            self._v91_preheat_audit_record(
+                item, "shadow_probe", shadow_reason,
+                row=row, shadow=shadow_result,
+            )
+        return tested
+
+    def _v91_preheat_audit_complete(self, item, ready):
+        with self._cache_lock:
+            work = self._v91_preheat_audit_work_locked(item)
+            if work is not None:
+                work["completed"] = True
+                work["resource_ready"] = bool(ready)
+
+    def _v91_preheat_audit_snapshot(self):
+        with self._cache_lock:
+            state = getattr(self, "_v91_preheat_audit_state", None)
+            for item in (self._follow_memory.get("items") or {}).values():
+                if not isinstance(item, dict):
+                    continue
+                work = self._v91_preheat_audit_work_locked(item)
+                if work is not None:
+                    work["ready"] = self._follow_route_binding_ready(item)
+            return v91_preheat_audit_summary(state)
+
+    def _v91_preheat_audit_card(self):
+        summary = self._v91_preheat_audit_snapshot()
+        totals = summary.get("totals") or {}
+        if not totals.get("works"):
+            return None
+        remark = "失败 %d · 标题拦截 %d · 白名单/链接 %d · 详情/集数 %d · 线路 %d" % (
+            totals.get("failed", 0), totals.get("title_rejected", 0),
+            totals.get("link_rejected", 0), totals.get("validation_failed", 0),
+            totals.get("route_failed", 0),
+        )
+        if totals.get("shadow_tested"):
+            remark += " · 影子复核 %d/%d 通过" % (
+                totals.get("shadow_playable", 0), totals.get("shadow_tested", 0),
+            )
+        return {
+            "vod_id": "tmdb-follow:preheat-audit",
+            "vod_name": "查看主动预热淘汰审计",
+            "vod_pic": "",
+            "vod_remarks": remark,
+            "action": "tmdb-follow:preheat-audit",
+        }
+
+    def _v91_preheat_audit_message(self):
+        summary = self._v91_preheat_audit_snapshot()
+        rows = [
+            row for row in summary.get("works") or []
+            if row.get("completed") and not row.get("ready")
+        ]
+        if not rows:
+            return "主动预热审计：没有已完成的失败项目"
+        lines = []
+        for row in rows:
+            search_counts = row.get("search_counts") or {}
+            search = "/".join(
+                "%s:%d" % (mode, count)
+                for mode, count in sorted(search_counts.items())
+            ) or "无搜索层候选"
+            reasons = "、".join(
+                "%s×%d" % (V91_PREHEAT_AUDIT_REASON_LABELS.get(reason, reason), count)
+                for reason, count in row.get("reasons") or []
+            ) or "未形成候选"
+            shadow = ""
+            if row.get("shadow_tested"):
+                shadow = "；影子复核 %d/%d 通过（可达%d，解析通过%d）" % (
+                    row.get("shadow_playable", 0), row.get("shadow_tested", 0),
+                    row.get("shadow_reachable", 0),
+                    row.get("shadow_parse_verified", 0),
+                )
+            candidates = []
+            stage_labels = {
+                "title_filter": "标题识别",
+                "link_gate": "白名单/链接",
+                "detail_validation": "详情验活",
+                "detail_identity": "详情身份",
+                "target_coverage": "目标集覆盖",
+                "route_probe": "线路探测",
+            }
+            shadow_labels = {
+                "reachable": "确认可达",
+                "parse_verified": "解析通过",
+                "unreachable": "不可达",
+                "not_target": "未覆盖目标集",
+                "skipped": "预算不足未复核",
+                "cancelled": "代次变化已取消",
+                "": "未复核",
+            }
+            for candidate in (row.get("candidates") or [])[:2]:
+                shadow_value = str(candidate.get("shadow") or "")
+                result = shadow_labels.get(shadow_value, shadow_value or "未复核")
+                candidates.append("%s:%s/%s→%s" % (
+                    candidate.get("candidate") or "无指纹",
+                    stage_labels.get(
+                        candidate.get("stage"), candidate.get("stage") or "未知阶段",
+                    ),
+                    V91_PREHEAT_AUDIT_REASON_LABELS.get(
+                        candidate.get("reason"), candidate.get("reason") or "未知淘汰原因",
+                    ),
+                    result,
+                ))
+            candidate_text = "；候选 " + "，".join(candidates) if candidates else ""
+            lines.append("%s [%s]：层命中 %s；原始%d/识别通过%d；%s%s%s" % (
+                row.get("title") or "未命名影片",
+                str(row.get("work") or "")[:10], search,
+                row.get("raw_candidates", 0), row.get("accepted_candidates", 0),
+                reasons, shadow, candidate_text,
+            ))
+        return "主动预热淘汰审计\n" + "\n".join(lines[:17])
 # -*- coding: utf-8 -*-
 # Generated by tools/build_v80_resource_shadow_vendor.py.
 # The listed source modules are authoritative; do not edit generated bytes.
@@ -20534,12 +22275,13 @@ def _cache_key_id(key):
 
 
 class CacheHealthController(object):
-    """Own legacy failure backoff without owning cached payloads."""
+    """Own cache failure backoff and foreground miss ownership."""
 
     def __init__(self, owner, clock=None):
         self.owner = owner
         self._clock = time.time if clock is None else clock
         self._failure_kinds = {}
+        self._foreground_flights = {}
 
     def _retry_at(self, item):
         if len(item) >= 3:
@@ -20552,10 +22294,7 @@ class CacheHealthController(object):
             CACHE_FAILURE_MAX_ATTEMPTS,
             int(owner._failure_attempts.get(key, 0)) + 1,
         )
-        delay = min(
-            float(owner.failure_ttl),
-            max(1.0, 2.0 ** (attempts - 1)),
-        )
+        delay = min(float(owner.failure_ttl), max(1.0, 2.0 ** (attempts - 1)))
         owner._failure_attempts[key] = attempts
         owner._failures[key] = (now, now + delay, owner._short_error(exc))
         self._failure_kinds[key] = _cache_failure_kind(exc)
@@ -20611,6 +22350,7 @@ class CacheHealthController(object):
     def reset(self):
         owner = self.owner
         with owner._cache_lock:
+            self.cancel_foreground_misses("cache controller reset")
             owner._failures.clear()
             owner._failure_attempts.clear()
             self._failure_kinds.clear()
@@ -20630,6 +22370,114 @@ class CacheHealthController(object):
                 return None
             owner._refreshing_cache_keys[key] = job_owner
             return owner._cache_generation
+
+    def claim_foreground(self, key):
+        owner = self.owner
+        with owner._cache_lock:
+            generation = owner._cache_generation
+            identity = (generation, key)
+            flight = self._foreground_flights.get(identity)
+            if flight is not None:
+                if flight.leader_thread_id == threading.current_thread().ident:
+                    raise RuntimeError("foreground cache SingleFlight re-entry")
+                return flight, False
+            flight = _ForegroundCacheFlight(generation, key)
+            self._foreground_flights[identity] = flight
+            return flight, True
+
+    def _wait_budget(self, wait_timeout):
+        owner = self.owner
+        operation = None
+        controller = getattr(owner, "_timeout_budget_controller", None)
+        current = getattr(controller, "current", None)
+        if callable(current):
+            try:
+                operation = current(required=False)
+            except Exception:
+                operation = None
+        timeout = (
+            max(0.05, float(getattr(owner, "timeout", 8) or 8))
+            if wait_timeout is None else max(0.05, float(wait_timeout))
+        )
+        remaining = getattr(operation, "remaining", None)
+        if callable(remaining):
+            timeout = min(timeout, max(0.0, float(remaining())))
+        return timeout, operation
+
+    def wait_foreground(self, flight, wait_timeout=None):
+        timeout, operation = self._wait_budget(wait_timeout)
+        if timeout <= 0 or not flight.event.wait(timeout):
+            raise TimeoutError("foreground cache SingleFlight wait timed out")
+        checkpoint = getattr(operation, "checkpoint", None)
+        if callable(checkpoint):
+            checkpoint()
+        if flight.state == "succeeded":
+            return flight.value
+        if flight.state == "failed":
+            raise _clone_cache_exception(flight.exception)
+        raise RuntimeError("foreground cache SingleFlight cancelled")
+
+    def cancel_foreground_misses(self, reason="cancelled"):
+        owner = self.owner
+        with owner._cache_lock:
+            flights = list(self._foreground_flights.values())
+            self._foreground_flights.clear()
+            for flight in flights:
+                if flight.state == "running":
+                    flight.state = "cancelled"
+                    flight.exception = RuntimeError(str(reason or "cancelled"))
+                    flight.event.set()
+            return len(flights)
+
+    def finish_foreground_success(self, key, flight, value):
+        owner = self.owner
+        if owner._is_persistable_cache_key(key):
+            owner._load_response_cache()
+        identity = (flight.generation, key)
+        with owner._cache_lock:
+            if (
+                    self._foreground_flights.get(identity) is not flight
+                    or flight.generation != owner._cache_generation
+                    or flight.state != "running"):
+                if flight.state == "running":
+                    flight.state = "cancelled"
+                    flight.exception = RuntimeError("cache generation changed during foreground load")
+                    flight.event.set()
+                return False
+            owner._cache_set(key, value)
+            owner._failures.pop(key, None)
+            owner._failure_attempts.pop(key, None)
+            self._failure_kinds.pop(key, None)
+            self._foreground_flights.pop(identity, None)
+            flight.state = "succeeded"
+            flight.value = value
+            flight.event.set()
+            return True
+
+    def finish_foreground_failure(self, key, flight, exc):
+        owner = self.owner
+        identity = (flight.generation, key)
+        now = float(self._clock())
+        with owner._cache_lock:
+            if (
+                    self._foreground_flights.get(identity) is not flight
+                    or flight.generation != owner._cache_generation
+                    or flight.state != "running"):
+                if flight.state == "running":
+                    flight.state = "cancelled"
+                    flight.exception = RuntimeError("cache generation changed during foreground load")
+                    flight.event.set()
+                return False
+            delay = self._record_failure_locked(key, exc, now)
+            self._foreground_flights.pop(identity, None)
+            flight.state = "failed"
+            flight.exception = exc
+            flight.event.set()
+        owner._diagnostic_event(
+            "cache.failure", "WARN", exc=exc,
+            cache_key=_cache_key_id(key), backoff=delay,
+        )
+        return True
 
     def commit_foreground_success(self, key, value, generation):
         owner = self.owner
@@ -20706,37 +22554,33 @@ class CacheHealthController(object):
         ]
 
 
-def v80_cache_load(owner, key, ttl, loader, allow_stale=True):
-    """Preserve the legacy fresh/stale/miss decision in one call."""
-
+def v80_cache_load(owner, key, ttl, loader, allow_stale=True, wait_timeout=None):
+    """Coalesce only foreground misses; stale refresh ownership stays unchanged."""
     cached = owner._cache_get(key, ttl)
     if cached is not None:
         return cached
-    stale = None
     if allow_stale:
         stale = owner._cache_get(key, owner.stale_ttl, allow_expired=True)
         if stale is not None:
             owner._schedule_cache_refresh(key, loader)
             return stale
     owner._raise_cached_failure(key)
-    with owner._cache_lock:
-        generation = owner._cache_generation
+    controller = owner._cache_health_controller
+    flight, leader = controller.claim_foreground(key)
+    if not leader:
+        return controller.wait_foreground(flight, wait_timeout=wait_timeout)
     try:
         value = loader()
     except Exception as exc:
-        owner._cache_health_controller.commit_foreground_failure(
-            key, exc, generation,
-        )
+        controller.finish_foreground_failure(key, flight, exc)
         raise
-    owner._cache_health_controller.commit_foreground_success(
-        key, value, generation,
-    )
+    if not controller.finish_foreground_success(key, flight, value):
+        raise RuntimeError("cache generation changed during foreground load")
     return value
 
 
 def v80_cache_schedule_refresh(owner, key, loader):
     """Run one background refresh and fence its cache-health commits."""
-
     job_owner = object()
     generation = owner._cache_health_controller.claim_refresh(key, job_owner)
     if generation is None:
