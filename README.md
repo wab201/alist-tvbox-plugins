@@ -4,7 +4,7 @@
 
 目录层级参考 [`har01d5/tvbox`](https://github.com/har01d5/tvbox) 的公开发布方式：根目录提供仓库说明和订阅索引，`py/` 保存运行时 Python 文件。官方仓库中的弹幕、TMDB、直播和校验资产属于其自身业务，本仓库不机械复制。
 
-## 追更助手傻瓜级使用说明（AList-TVBox Web）
+## 追更助手使用说明（AList-TVBox Web）
 
 不需要手工修改订阅 JSON，也不要自己添加 `api`、`token`、`secret`、`loader`、`source` 或 `raw`。准备好一个 TMDB API Read Access Token 后，按下面步骤操作即可。
 
