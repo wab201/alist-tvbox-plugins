@@ -12,7 +12,7 @@ MissAV 作为独立插件发布，不加入根 `spiders_v2.json`，因此不会�
 https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/plugins/missav/spiders_v2.json
 ```
 
-- 插件 ID：`missav_subtitle`，版本 `1`，运行时文件为 `py/MissAV.py`。
+- 插件 ID：`missav_subtitle`，版本 `2`，运行时文件为 `py/MissAV.py`。
 - 同一个 Python 文件同时导出 `Spider` 和 `Filter`，可作为 MissAV 站点插件，也可作为通用番号中文字幕过滤器。
 - 过滤器推荐配置为拦截 `detail,player`、错误策略 `skip`、作用范围 `exclude`，并排除 MissAV 插件自身，避免重复字幕处理。
 - 默认使用 FongMi 原生 `subs` 字段追加字幕，不修改原视频 URL、请求头和解析路线；已有字幕默认保留。
@@ -147,7 +147,7 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMD
 | --- | ---: | --- | --- |
 | 豆瓣 TMDB 追更助手 | 93 | `py/豆瓣TMDB追更单入口.py` | 追更、播放进度同步、资源身份验证与线路预热 |
 | SeedHub 磁力与多网盘 | 1 | `py/SeedHub.py` | 磁力和多网盘资源搜索、详情与解析入口 |
-| MissAV 中文字幕 | 1 | `py/MissAV.py` | 独立 MissAV 站点插件与通用番号中文字幕过滤器 |
+| MissAV 中文字幕 | 2 | `py/MissAV.py` | 独立 MissAV 站点插件与通用番号中文字幕过滤器 |
 
 ## 豆瓣 TMDB 追更助手 V93
 

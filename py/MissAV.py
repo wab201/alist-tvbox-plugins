@@ -1,7 +1,9 @@
 # coding=utf-8
-# //@name:MissAV 中文字幕
-# //@id:missav_subtitle
-# //@version:1
+"""
+//@name:MissAV 中文字幕
+//@id:missav_subtitle
+//@version:2
+"""
 
 import ast
 import base64
@@ -29,7 +31,7 @@ PLUGIN_CONFIG_SCHEMA = {
     {"key": "subtitle_enabled", "label": "启用中文字幕", "type": "boolean", "required": false, "defaultValue": true},
     {"key": "subtitle_mode", "label": "字幕接入方式", "type": "string", "required": false, "defaultValue": "native", "description": "native=FongMi 原生 subs；hls=Worker 包装视频，仅用于旧客户端。"},
     {"key": "subtitle_worker_base_url", "label": "字幕 Worker 地址", "type": "string", "required": false, "description": "native 模式下用于 SRT 转 VTT；留空时直接使用字幕原地址。"},
-    {"key": "subtitle_sources", "label": "字幕来源顺序", "type": "string", "required": false, "defaultValue": "xunlei,subtitlecat"},
+    {"key": "subtitle_sources", "label": "字幕来源顺序", "type": "string", "required": false, "defaultValue": "xunlei|subtitlecat"},
     {"key": "subtitle_cache_ttl", "label": "字幕缓存秒数", "type": "number", "required": false, "defaultValue": 21600}
   ]
 }
@@ -42,7 +44,7 @@ FILTER_CONFIG_SCHEMA = {
     {"key": "enabled", "label": "启用过滤器", "type": "boolean", "required": false, "defaultValue": true},
     {"key": "subtitle_mode", "label": "字幕接入方式", "type": "string", "required": false, "defaultValue": "native"},
     {"key": "subtitle_worker_base_url", "label": "字幕 Worker 地址", "type": "string", "required": false},
-    {"key": "subtitle_sources", "label": "字幕来源顺序", "type": "string", "required": false, "defaultValue": "xunlei,subtitlecat"},
+    {"key": "subtitle_sources", "label": "字幕来源顺序", "type": "string", "required": false, "defaultValue": "xunlei|subtitlecat"},
     {"key": "timeout", "label": "字幕请求超时秒数", "type": "number", "required": false, "defaultValue": 10},
     {"key": "subtitle_cache_ttl", "label": "字幕缓存秒数", "type": "number", "required": false, "defaultValue": 21600},
     {"key": "mark_detail", "label": "详情标记识别到的番号", "type": "boolean", "required": false, "defaultValue": false},
@@ -64,7 +66,7 @@ PLUGIN_CONFIG_SCHEMA = {
         {"key": "subtitle_enabled", "label": "启用中文字幕", "type": "boolean", "required": False, "defaultValue": True},
         {"key": "subtitle_mode", "label": "字幕接入方式", "type": "string", "required": False, "defaultValue": "native", "description": "native=FongMi 原生 subs；hls=Worker 包装视频，仅用于旧客户端。"},
         {"key": "subtitle_worker_base_url", "label": "字幕 Worker 地址", "type": "string", "required": False, "description": "native 模式下用于 SRT 转 VTT；留空时直接使用字幕原地址。"},
-        {"key": "subtitle_sources", "label": "字幕来源顺序", "type": "string", "required": False, "defaultValue": "xunlei,subtitlecat"},
+        {"key": "subtitle_sources", "label": "字幕来源顺序", "type": "string", "required": False, "defaultValue": "xunlei|subtitlecat"},
         {"key": "subtitle_cache_ttl", "label": "字幕缓存秒数", "type": "number", "required": False, "defaultValue": 21600},
     ],
 }
@@ -77,7 +79,7 @@ FILTER_CONFIG_SCHEMA = {
         {"key": "enabled", "label": "启用过滤器", "type": "boolean", "required": False, "defaultValue": True},
         {"key": "subtitle_mode", "label": "字幕接入方式", "type": "string", "required": False, "defaultValue": "native"},
         {"key": "subtitle_worker_base_url", "label": "字幕 Worker 地址", "type": "string", "required": False},
-        {"key": "subtitle_sources", "label": "字幕来源顺序", "type": "string", "required": False, "defaultValue": "xunlei,subtitlecat"},
+        {"key": "subtitle_sources", "label": "字幕来源顺序", "type": "string", "required": False, "defaultValue": "xunlei|subtitlecat"},
         {"key": "timeout", "label": "字幕请求超时秒数", "type": "number", "required": False, "defaultValue": 10},
         {"key": "subtitle_cache_ttl", "label": "字幕缓存秒数", "type": "number", "required": False, "defaultValue": 21600},
         {"key": "mark_detail", "label": "详情标记识别到的番号", "type": "boolean", "required": False, "defaultValue": False},
@@ -234,7 +236,10 @@ class SubtitleResolver:
         mode = str(config.get("subtitle_mode") or "native").strip().lower()
         self._subtitle_mode = mode if mode in ("native", "hls") else "native"
         self._subtitle_worker = str(config.get("subtitle_worker_base_url") or "").strip().rstrip("/")
-        requested = [item.strip().lower() for item in str(config.get("subtitle_sources") or "xunlei,subtitlecat").split(",")]
+        requested = [
+            item.strip().lower()
+            for item in re.split(r"[,|]", str(config.get("subtitle_sources") or "xunlei|subtitlecat"))
+        ]
         self._subtitle_sources = tuple(item for item in requested if item in ("xunlei", "subtitlecat")) or ("xunlei",)
         self._subtitle_timeout = _bounded_int(config.get("timeout"), 10, 3, 30)
         self._subtitle_cache_ttl = _bounded_int(config.get("subtitle_cache_ttl"), 21600, 60, 604800)
