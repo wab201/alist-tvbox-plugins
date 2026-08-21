@@ -1,15 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-//@name:豆瓣TMDB追更助手 v92
+//@name:豆瓣TMDB追更助手 v93
 //@id:douban_tmdb_follow_single
-//@version:92
+//@version:93
 
 AList-TVBox raw Python plugin for Douban/TMDB browsing and follow-up playback.
 
 Deploy this source through AList-TVBox plugin management and load the generated
-subscription in FongMi/TvBox. The plugin Extend/data must contain
-``atvp_plugin_mode=alist-tvbox-raw`` for follow, History, and cloud-resource
-features. With an empty ext the same source remains a direct FongMi metadata
+subscription in FongMi/TvBox. The AList-TVBox Atvp wrapper is detected automatically for follow, History,
+and cloud-resource features; users only configure business fields. With an empty ext the same source remains a direct FongMi metadata
 site with category/search/detail and direct-URL player compatibility. The same
 source also exports ``Filter`` for AList-TVBox detail/player filter reuse.
 """
@@ -69,18 +68,86 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 
 
 
+r"""
+PLUGIN_CONFIG_SCHEMA = {
+  "source": "declared",
+  "description": "追更助手业务配置。AList-TVBox 运行地址、订阅 Token 和运行模式由容器自动注入，不需要填写。",
+  "allowAdditional": false,
+  "fields": [
+    {"key": "tmdb_access_token", "label": "TMDB API Read Access Token", "type": "secret", "required": true, "description": "填写 TMDB 的 API Read Access Token，不是较短的 API Key v3。", "placeholder": "eyJ..."},
+    {"key": "history_api", "label": "同步服务地址", "type": "string", "required": false, "description": "通常留空并自动使用当前 AList-TVBox 地址；只有独立同步入口时填写。", "placeholder": "https://example.com"},
+    {"key": "history_username", "label": "同步账号", "type": "string", "required": false, "description": "需要跨设备写回播放进度时填写 AList-TVBox USER 或 ADMIN 账号。"},
+    {"key": "history_password", "label": "同步密码", "type": "secret", "required": false, "description": "与同步账号同时填写；留空时按只读同步运行。"},
+    {"key": "route_preheat", "label": "主动预热线路", "type": "boolean", "required": false, "defaultValue": true, "description": "提前验证并绑定可播放线路，建议保持开启。"}
+  ]
+}
+V93_PLUGIN_SCHEMA_END = 1
+FILTER_CONFIG_SCHEMA = {
+  "source": "declared",
+  "description": "跨站追更选集拦截器，只配置实际生效的 History 缓存、请求和选集行为。",
+  "allowAdditional": false,
+  "fields": [
+    {"key": "history_cache_ttl", "label": "播放记录缓存秒数", "type": "number", "required": false, "defaultValue": 30},
+    {"key": "timeout", "label": "请求超时秒数", "type": "number", "required": false, "defaultValue": 8},
+    {"key": "verify_tls", "label": "校验 HTTPS 证书", "type": "boolean", "required": false, "defaultValue": true},
+    {"key": "canonicalize_title", "label": "统一续播标题", "type": "boolean", "required": false, "defaultValue": true},
+    {"key": "auto_select_episode", "label": "自动选中续播集", "type": "boolean", "required": false, "defaultValue": true},
+    {"key": "inject_position", "label": "注入播放位置", "type": "boolean", "required": false, "defaultValue": true}
+  ]
+}
+V93_FILTER_SCHEMA_END = 1
+"""
+
 FILTER_CONFIG_SCHEMA = {
     "source": "declared",
-    "description": "跨站追更选集过滤器，可配置标题统一、自动选集和播放位置注入；独立备选线路不共享直链",
-    "allowAdditional": True,
+    "description": (
+        "跨站追更选集拦截器，只配置实际生效的 History 缓存、请求和选集行为。"
+    ),
+    "allowAdditional": False,
     "example": {"history_cache_ttl": 30, "timeout": 8, "verify_tls": True},
     "fields": [
-        {"key": "history_cache_ttl", "label": "播放记录缓存秒数", "type": "number", "required": False, "defaultValue": 30},
-        {"key": "timeout", "label": "请求超时秒数", "type": "number", "required": False, "defaultValue": 8},
-        {"key": "verify_tls", "label": "校验HTTPS证书", "type": "boolean", "required": False, "defaultValue": True},
-        {"key": "canonicalize_title", "label": "统一续播标题", "type": "boolean", "required": False, "defaultValue": True},
-        {"key": "auto_select_episode", "label": "自动选中续播集", "type": "boolean", "required": False, "defaultValue": True},
-        {"key": "inject_position", "label": "注入播放位置", "type": "boolean", "required": False, "defaultValue": True},
+        {
+            "key": "history_cache_ttl",
+            "label": "播放记录缓存秒数",
+            "type": "number",
+            "required": False,
+            "defaultValue": 30,
+        },
+        {
+            "key": "timeout",
+            "label": "请求超时秒数",
+            "type": "number",
+            "required": False,
+            "defaultValue": 8,
+        },
+        {
+            "key": "verify_tls",
+            "label": "校验 HTTPS 证书",
+            "type": "boolean",
+            "required": False,
+            "defaultValue": True,
+        },
+        {
+            "key": "canonicalize_title",
+            "label": "统一续播标题",
+            "type": "boolean",
+            "required": False,
+            "defaultValue": True,
+        },
+        {
+            "key": "auto_select_episode",
+            "label": "自动选中续播集",
+            "type": "boolean",
+            "required": False,
+            "defaultValue": True,
+        },
+        {
+            "key": "inject_position",
+            "label": "注入播放位置",
+            "type": "boolean",
+            "required": False,
+            "defaultValue": True,
+        },
     ],
 }
 
@@ -587,6 +654,59 @@ class _DoubanClient:
 
 
 from dataclasses import dataclass
+
+PLUGIN_CONFIG_SCHEMA = {
+    "source": "declared",
+    "description": (
+        "追更助手业务配置。AList-TVBox 运行地址、订阅 Token 和运行模式"
+        "由容器自动注入，不需要填写。"
+    ),
+    "allowAdditional": False,
+    "fields": [
+        {
+            "key": "tmdb_access_token",
+            "label": "TMDB API Read Access Token",
+            "type": "secret",
+            "required": True,
+            "description": "填写 TMDB 的 API Read Access Token，不是较短的 API Key v3。",
+            "placeholder": "eyJ...",
+        },
+        {
+            "key": "history_api",
+            "label": "同步服务地址",
+            "type": "string",
+            "required": False,
+            "description": (
+                "通常留空并自动使用当前 AList-TVBox 地址；只有独立同步入口时填写。"
+            ),
+            "placeholder": "https://example.com",
+        },
+        {
+            "key": "history_username",
+            "label": "同步账号",
+            "type": "string",
+            "required": False,
+            "description": (
+                "需要跨设备写回播放进度时填写 AList-TVBox USER 或 ADMIN 账号。"
+            ),
+        },
+        {
+            "key": "history_password",
+            "label": "同步密码",
+            "type": "secret",
+            "required": False,
+            "description": "与同步账号同时填写；留空时按只读同步运行。",
+        },
+        {
+            "key": "route_preheat",
+            "label": "主动预热线路",
+            "type": "boolean",
+            "required": False,
+            "defaultValue": True,
+            "description": "提前验证并绑定可播放线路，建议保持开启。",
+        },
+    ],
+}
 
 def _clone_cache_exception(exc):
     try:
@@ -2736,7 +2856,7 @@ class Filter:
 
 
 class Spider(BaseSpider):
-    name = "豆瓣TMDB追更助手 v92"
+    name = "豆瓣TMDB追更助手 v93"
     host = "https://m.douban.com"
     backend_parse = False
     category_mode = False
@@ -3451,8 +3571,16 @@ class Spider(BaseSpider):
         self.follow_page_size = self._bounded_int(config.get("follow_page_size"), 20, 5, 40)
         self.follow_tv_ids = self._id_list(config.get("follow_tv_ids") or config.get("followTmdbIds"))
         self.keep_follow_scan_limit = self._bounded_int(config.get("keep_follow_scan_limit"), 50, 1, 200)
-        self.atvp_plugin_mode = self._first(config, "atvp_plugin_mode", "runtime_mode", "runtime").strip().lower()
-        self._alist_tvbox_plugin = self.atvp_plugin_mode == self.ATVP_PLUGIN_MODE
+        configured_runtime_mode = self._first(
+            config, "atvp_plugin_mode", "runtime_mode", "runtime",
+        ).strip().lower()
+        self._alist_tvbox_plugin = self._v93_is_alist_tvbox_runtime(
+            configured_runtime_mode,
+        )
+        self.atvp_plugin_mode = (
+            self.ATVP_PLUGIN_MODE
+            if self._alist_tvbox_plugin else configured_runtime_mode
+        )
         self._v80_resource_layered_output_enabled = (
             self._resource_layered_output_from_config(config)
         )
@@ -17772,6 +17900,14 @@ class Spider(BaseSpider):
         limit = 512 if limit == 512 else 220
         return text[:limit] or "未知错误"
 
+
+    def _v93_is_alist_tvbox_runtime(self, configured_mode=""):
+        module_name = str(getattr(self.__class__, "__module__", "") or "").strip()
+        legacy_mode = str(configured_mode or "").strip().lower()
+        return (
+            module_name == "atvp_inner_spider"
+            or legacy_mode == self.ATVP_PLUGIN_MODE
+        )
 
     def _v91_preheat_audit_reset(self, items, generation):
         works = {}
