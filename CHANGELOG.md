@@ -4,13 +4,13 @@
 
 V90 将 V80-V90 私有迭代线中的架构、同步、追更、预热、身份和候选源能力正式晋升为公开版本。V91 继续在私有模块化开发线补齐刷新、去重和预热审计，V92 将资源身份分层验证与用户可见预热状态晋升为公开版本，V93 收口运行时自动识别、声明式 Web 配置和独立拦截器刷新说明。本文按真实版本产物记录变化；没有形成独立产物的版本会明确标注，不补造不存在的发布。
 
-## 2026-08-21：MissAV 中文字幕独立插件 V2
+## 2026-08-21：通用番号中文字幕过滤器 V3
 
-- 新增 `py/MissAV.py`，同一运行时文件导出 `Spider` 和 `Filter`。
-- 新增 `plugins/missav/spiders_v2.json` 单插件索引，不修改根 `spiders_v2.json`，避免影响现有仓库导入。
-- 通用番号字幕过滤器使用 FongMi 原生 `subs`，推荐 `detail,player + skip + exclude` 并排除 MissAV 自身。
-- V2 将 `//@id`、`//@version` 放入有效 Python 文档字符串，确保容器刷新器识别插件身份和版本；字幕源表单默认值改用 `xunlei|subtitlecat`，避免静态配置解析器在逗号处截断，同时运行时继续兼容旧逗号配置。
-- 本地发布门禁覆盖单测、ATVP 原始运行时、直接 FongMi 双运行时和分类参数合同；服务器与客户端行为仍需部署后分别核对。
+- 新增 `filters/UniversalNumberSubtitle.py`，只导出 `Filter`，不加入根 `spiders_v2.json`。
+- 按 AList-TVBox 官方 `1.53.0` 源码契约，主插件仓库导入与过滤器 URL 管理保持两条独立链路。
+- 从详情与播放上下文识别番号，使用 FongMi 原生 `subs` 追加中文字幕，保留并去重已有字幕。
+- 支持 `parse=0` 和 `parse=1` 播放返回；外部 URL 只接受 HTTP/HTTPS，HLS Worker 仅包装 `.m3u8`。
+- MissAV 主插件撤出公开树，改为容器本地 `static/plugins/` 私有部署。
 
 ## 版本状态总览
 
