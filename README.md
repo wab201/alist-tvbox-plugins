@@ -4,6 +4,23 @@
 
 目录层级参考 [`har01d5/tvbox`](https://github.com/har01d5/tvbox) 的公开发布方式：根目录提供仓库说明和订阅索引，`py/` 保存运行时 Python 文件。官方仓库中的弹幕、TMDB、直播和校验资产属于其自身业务，本仓库不机械复制。
 
+## MissAV 中文字幕独立插件
+
+MissAV 作为独立插件发布，不加入根 `spiders_v2.json`，因此不会改变现有豆瓣追更助手和 SeedHub 的仓库导入结果。单独导入时使用：
+
+```text
+https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/plugins/missav/spiders_v2.json
+```
+
+- 插件 ID：`missav_subtitle`，版本 `1`，运行时文件为 `py/MissAV.py`。
+- 同一个 Python 文件同时导出 `Spider` 和 `Filter`，可作为 MissAV 站点插件，也可作为通用番号中文字幕过滤器。
+- 过滤器推荐配置为拦截 `detail,player`、错误策略 `skip`、作用范围 `exclude`，并排除 MissAV 插件自身，避免重复字幕处理。
+- 默认使用 FongMi 原生 `subs` 字段追加字幕，不修改原视频 URL、请求头和解析路线；已有字幕默认保留。
+- 过滤器只覆盖经过 AList-TVBox 包装、能识别到番号且播放器已经返回最终直连 URL 的来源。原生非 ATVP 站点、二次解析页、无番号或字幕源无结果时会跳过。
+- Cookie 仅在私有部署的 Web 配置中填写，不写入源码或公开仓库。遇到 Turnstile、CAPTCHA 或托管挑战时只返回明确错误，不尝试绕过。
+
+正式部署建议将 `master` 替换为本次发布提交 SHA，使用固定提交的单插件索引导入，避免后续仓库更新改变运行时来源。
+
 ## 追更助手使用说明（AList-TVBox Web）
 
 不需要手工修改订阅 JSON，也不要自己添加 `api`、`token`、`secret`、`loader`、`source` 或 `raw`。准备好一个 TMDB API Read Access Token 后，按下面步骤操作即可。
@@ -130,6 +147,7 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMD
 | --- | ---: | --- | --- |
 | 豆瓣 TMDB 追更助手 | 93 | `py/豆瓣TMDB追更单入口.py` | 追更、播放进度同步、资源身份验证与线路预热 |
 | SeedHub 磁力与多网盘 | 1 | `py/SeedHub.py` | 磁力和多网盘资源搜索、详情与解析入口 |
+| MissAV 中文字幕 | 1 | `py/MissAV.py` | 独立 MissAV 站点插件与通用番号中文字幕过滤器 |
 
 ## 豆瓣 TMDB 追更助手 V93
 
@@ -173,12 +191,17 @@ SeedHub 的 EXT 可以留空。不要在 EXT 中填写 AList-TVBox 管理员密�
 ├── ARCHITECTURE.md
 ├── CHANGELOG.md
 ├── spiders_v2.json
+├── plugins/
+│   └── missav/
+│       └── spiders_v2.json
 └── py/
+    ├── MissAV.py
     ├── SeedHub.py
     └── 豆瓣TMDB追更单入口.py
 ```
 
 - `spiders_v2.json`：AList-TVBox 仓库导入索引。
+- `plugins/missav/spiders_v2.json`：只导入 MissAV 的独立插件索引。
 - `py/`：可直接加载的运行时单文件。
 - [`ARCHITECTURE.md`](ARCHITECTURE.md)：公开架构、模块职责和边界。
 - [`CHANGELOG.md`](CHANGELOG.md)：V70 到 V93 的逐版本变化。
