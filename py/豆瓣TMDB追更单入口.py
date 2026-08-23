@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-//@name:豆瓣TMDB追更助手 v93
+//@name:豆瓣TMDB追更助手 v94
 //@id:douban_tmdb_follow_single
-//@version:93
+//@version:94
 
 AList-TVBox raw Python plugin for Douban/TMDB browsing and follow-up playback.
 
@@ -815,6 +815,7 @@ def v91_resource_score(owner, row, item, bound):
 def v91_resource_score_detail(owner, row, item, bound):
     """Return the V90 score together with the first strict rejection reason."""
     resource_id = str(row.get("vod_id") or row.get("id") or "").strip()
+    resource_mode = str(row.get("_resource_mode") or "vod").strip().lower() or "vod"
     aliases = {
         owner._normalize_media_title(value)
         for value in owner._follow_title_alias_values(item)
@@ -829,7 +830,10 @@ def v91_resource_score_detail(owner, row, item, bound):
     season_count = owner._positive_int(item.get("season_count"), 0)
     single_season = season_count == 1 or (season_count <= 0 and tracking_season == 1)
     year = str(item.get("year") or "")[:4]
-    if bound and resource_id == bound:
+    # V94's detail-trust policy is deliberately limited to providers whose
+    # detail endpoint was verified in the bound-resource experiment.
+    # Supplement search (notably pansou) stays under the strict title gate.
+    if bound and resource_id == bound and resource_mode in ("vod1", "vod", "telegram", "plugin"):
         return ResourceScore(
             10000, "match", "bound_resource",
             (("bound_resource", 10000),),
@@ -887,6 +891,78 @@ def v91_resource_score_detail(owner, row, item, bound):
         if reason in rejected:
             return ResourceScore(0, outcome, reason)
     return ResourceScore(0, "insufficient", "missing_title")
+
+V94_TRUSTED_DETAIL_MODES = frozenset(("vod1", "vod", "telegram"))
+
+V94_STRICT_DETAIL_MODES = frozenset(("pansou",))
+
+V94_DETAIL_TRUST_PENDING = "trusted_detail_pending"
+
+@dataclass(frozen=True)
+class V94ResourceAdmission:
+    accepted: bool
+    pending_detail: bool
+    reason: str
+    strict_score: int = 0
+
+def v94_resource_admission(owner, row, item, bound=""):
+    row = row if isinstance(row, dict) else {}
+    mode = str(row.get("_resource_mode") or "vod").strip().lower() or "vod"
+    strict = v91_resource_score_detail(owner, row, item, bound)
+    if strict.score > 0:
+        return V94ResourceAdmission(True, False, strict.reason, strict.score)
+    resource_id = str(row.get("vod_id") or row.get("id") or "").strip()
+    if mode in V94_TRUSTED_DETAIL_MODES and resource_id:
+        return V94ResourceAdmission(True, True, V94_DETAIL_TRUST_PENDING, 0)
+    return V94ResourceAdmission(False, False, strict.reason, strict.score)
+
+def v94_resource_candidate_order(owner, rows, item, bound="", modes=()):
+    candidates = owner._merge_resource_candidate_rows(rows, item, bound)
+    strict = {}
+    pending = {}
+    original_order = {}
+    for index, row in enumerate(candidates):
+        if not isinstance(row, dict):
+            continue
+        original_order[id(row)] = index
+        decision = v94_resource_admission(owner, row, item, bound)
+        if not decision.accepted:
+            continue
+        value = dict(row)
+        if decision.pending_detail:
+            value["_v94_detail_trust_pending"] = True
+            pending.setdefault(str(value.get("_resource_mode") or "vod"), []).append(value)
+        else:
+            strict.setdefault(str(value.get("_resource_mode") or "vod"), []).append(value)
+
+    def rank(value):
+        return (
+            owner._resource_row_preference(value, item, bound),
+            -original_order.get(id(value), 0),
+        )
+
+    for grouped in (strict, pending):
+        for values in grouped.values():
+            values.sort(key=rank, reverse=True)
+
+    mode_order = list(modes or owner.RESOURCE_SEARCH_MODES)
+    mode_order.extend(
+        mode for mode in list(pending) + list(strict) if mode not in mode_order
+    )
+    output = []
+    for grouped in (pending, strict):
+        depth = 0
+        while True:
+            added = False
+            for mode in mode_order:
+                values = grouped.get(mode) or []
+                if depth < len(values):
+                    output.append(values[depth])
+                    added = True
+            if not added:
+                break
+            depth += 1
+    return output
 
 V92_TRUSTED_PLUGIN_DETAIL_MARKER = "trusted_plugin_detail_required"
 
@@ -2856,7 +2932,7 @@ class Filter:
 
 
 class Spider(BaseSpider):
-    name = "豆瓣TMDB追更助手 v93"
+    name = "豆瓣TMDB追更助手 v94"
     host = "https://m.douban.com"
     backend_parse = False
     category_mode = False
@@ -11392,32 +11468,27 @@ class Spider(BaseSpider):
             self, rows, item, bound="", cached_rows=(), modes=None,
             legacy_bound=None):
         mode_order = tuple(modes or self.RESOURCE_SEARCH_MODES)
-        legacy_order_bound = bound if legacy_bound is None else legacy_bound
         if self._resource_layered_output_active():
-            try:
-                return combine_v70_layered_resource_rows(
-                    rows,
-                    merge_rows=lambda left, right: self._merge_resource_rows(
-                        left, right, item, bound,
-                    ),
-                    score_row=lambda row: self._resource_score(row, item, bound),
-                    preference_row=lambda row: self._resource_row_preference(
-                        row, item, bound,
-                    ),
-                    provider_row=self._resource_output_provider,
-                    cached_rows=cached_rows,
-                    recent_resource_id=self._resource_recent_resource_id(item),
-                    binding_resource_id=bound,
-                    available_modes=mode_order,
-                    modes=mode_order,
-                )
-            except Exception as exc:
-                self._diagnostic_event(
-                    "resource_output.combine_failed", "ERROR", exc=exc,
-                )
-                raise
-        return self._resource_fair_candidate_order(
-            rows, item, bound=legacy_order_bound, modes=mode_order,
+            return combine_v70_layered_resource_rows(
+                rows,
+                merge_rows=lambda left, right: self._merge_resource_rows(
+                    left, right, item, bound,
+                ),
+                score_row=lambda row: self._resource_score(row, item, bound),
+                preference_row=lambda row: self._resource_row_preference(
+                    row, item, bound,
+                ),
+                provider_row=self._resource_output_provider,
+                cached_rows=cached_rows,
+                recent_resource_id=self._resource_recent_resource_id(item),
+                binding_resource_id=bound,
+                available_modes=mode_order,
+                modes=mode_order,
+            )
+        return v94_resource_candidate_order(
+            self, rows, item,
+            bound=bound if legacy_bound is None else legacy_bound,
+            modes=mode_order,
         )
 
     def _resource_candidates(
@@ -16166,14 +16237,22 @@ class Spider(BaseSpider):
 
     @staticmethod
     def _episode_from_text_info(text, index, default_season=1):
+        """Parse explicit episode labels used by cloud-drive providers."""
         label = str(text or "")
-        found = re.search(r"(?i)S\s*0*(\d{1,2})\s*E(?:P)?\s*0*(\d{1,3})", label)
+        found = re.search(
+            r"(?i)S\s*0*(\d{1,2})\s*E(?:P)?\s*0*(\d{1,3})", label,
+        )
         if found:
             return int(found.group(1)), int(found.group(2)), True
-        found = re.search(r"第\s*(\d{1,2})\s*季.*?第\s*(\d{1,3})\s*[集话]", label)
+        found = re.search(
+            r"第\s*(\d{1,2})\s*季.*?第\s*(\d{1,3})\s*[集话]", label,
+        )
         if found:
             return int(found.group(1)), int(found.group(2)), True
-        found = re.search(r"(?i)\bSeason\s*0*(\d{1,2}).*?\b(?:Episode|EP?|E)\s*0*(\d{1,3})\b", label)
+        found = re.search(
+            r"(?i)\bSeason\s*0*(\d{1,2}).*?\b(?:Episode|EP?|E)\s*0*(\d{1,3})\b",
+            label,
+        )
         if found:
             return int(found.group(1)), int(found.group(2)), True
         found = re.search(r"(?i)\bEP?\s*0*(\d{1,3})\b", label)
@@ -16182,21 +16261,27 @@ class Spider(BaseSpider):
         found = re.search(r"(?i)(?:第\s*)?(\d{1,3})\s*(?:集|话|ep)\b", label)
         if found:
             return default_season or 1, int(found.group(1)), True
-        if re.match(r"^\s*\d+(?:\.\d+)?\s*(?:K|M|G|T)i?B\b", label, re.I):
-            return default_season or 1, index, False
         found = re.match(r"^\s*0*(\d{1,3})\s*$", label)
         if found:
             return default_season or 1, int(found.group(1)), True
-        # Cloud-drive labels commonly append size/resolution text to a leading
-        # episode number, e.g. ``01(413.43 MB)`` or ``01.4K.mkv``.
-        found = re.match(r"^\s*0*(\d{1,3})(?=\s*[.\-_\[(])", label)
+        # Providers such as vod/telegram commonly append resolution and size
+        # after a leading episode number: ``31 4K(3.75 GB)``.
+        found = re.match(r"^\s*0*(\d{1,3})(?P<suffix>.*)$", label)
         if found:
             episode = int(found.group(1))
-            suffix = label[found.end():]
+            suffix = found.group("suffix")
             common_resolutions = {144, 240, 360, 480, 540, 576, 720}
-            bracketed_size = bool(re.match(r"^\s*\(", suffix))
-            immediate_size_unit = re.match(r"^\s*[.\-_\[(]*\s*(?:K|M|G|T)?i?B\b", suffix, re.I)
-            if (episode not in common_resolutions or bracketed_size) and not immediate_size_unit:
+            has_size = bool(re.search(
+                r"(?i)\b\d+(?:\.\d+)?\s*(?:K|M|G|T)B\b", suffix,
+            ))
+            has_quality = bool(re.search(
+                r"(?i)(?:^|[\s(\[._-])(?:4|8)K\b|"
+                r"(?:2160|1080|720|576|540|480|360|240|144)P?\b|"
+                r"(?:HDR10?\+?|SDR|HEVC|H\.?\d+|WEB[- .]?DL|"
+                r"BLURAY|REMUX|MKV|MP4)\b",
+                suffix,
+            ))
+            if episode not in common_resolutions and (has_size or has_quality):
                 return default_season or 1, episode, True
         return default_season or 1, index, False
 
@@ -18049,6 +18134,8 @@ class Spider(BaseSpider):
             identity = self._resource_row_identity(row)
             detail = v91_resource_score_detail(self, row, item, bound)
             if detail.score > 0 and identity in accepted:
+                continue
+            if row.get("_v94_detail_trust_pending") and detail.score <= 0:
                 continue
             rejected_count += 1
             reason = detail.reason if detail.score <= 0 else "candidate_order_limit"

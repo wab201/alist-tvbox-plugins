@@ -37,7 +37,7 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/filters/Univ
 https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/spiders_v2.json
 ```
 
-4. 在插件列表中找到“豆瓣 TMDB 追更助手”，确认版本显示为 `93`。
+4. 在插件列表中找到“豆瓣 TMDB 追更助手”，确认版本显示为 `94`。
 
 以后升级仍然使用同一个地址重新导入。若还显示旧版本，先在 Web 界面重新导入仓库，不要修改插件 ID 或源码地址。
 
@@ -45,7 +45,7 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/spiders_v2.j
 
 1. 在左侧菜单进入“订阅” -> “订阅源管理”。
 2. 打开准备给 FongMi/TvBox 使用的订阅源。
-3. 在插件列表中加入或找到“豆瓣 TMDB 追更助手 v93”。
+3. 在插件列表中加入或找到“豆瓣 TMDB 追更助手 v94”。
 4. 点击插件所在行的“配置”。AList-TVBox `1.53.0+` 会直接显示声明式表单；旧版界面可能显示“EXT”或“JSON 编辑”。
 
 ### 第 3 步：在 Web 表单中填写业务配置
@@ -57,7 +57,7 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/spiders_v2.j
 3. `同步账号`、`同步密码`：只读同步可留空；需要跨设备写回播放进度时，同时填写当前 AList-TVBox 的 `USER` 或 `ADMIN` 账号和密码。
 4. `主动预热线路`：建议保持开启。
 
-V93 会自动识别 AList-TVBox raw 插件运行时。不要手工添加 `atvp_plugin_mode`、`api`、`token`、`secret`、`loader`、`source` 或 `raw`。
+V94 会自动识别 AList-TVBox raw 插件运行时。不要手工添加 `atvp_plugin_mode`、`api`、`token`、`secret`、`loader`、`source` 或 `raw`。
 
 只有旧版界面没有表单、必须使用 EXT/JSON 编辑器时，才粘贴下面示例。`_说明_*` 字段是合法 JSON 中的中文说明，插件会忽略：
 
@@ -91,7 +91,7 @@ V93 会自动识别 AList-TVBox raw 插件运行时。不要手工添加 `atvp_p
 1. 在表单或 EXT/JSON 配置窗口点击“保存”或“确定”。
 2. 回到订阅源页面，再点击一次“保存”或“更新”，确保配置已写入实际订阅。
 3. 打开 FongMi/TvBox，在设置或配置页面刷新正在使用的订阅。
-4. 回到首页，进入“豆瓣 TMDB 追更助手”。AList-TVBox 已显示 V93、但客户端仍是旧内容时，通常只是 FongMi/TvBox 尚未刷新订阅。
+4. 回到首页，进入“豆瓣 TMDB 追更助手”。AList-TVBox 已显示 V94、但客户端仍是旧内容时，通常只是 FongMi/TvBox 尚未刷新订阅。
 
 ### 第 5 步：配置独立拦截器（需要跨站续播时）
 
@@ -133,9 +133,9 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMD
 
 | 问题 | 处理方法 |
 | --- | --- |
-| Web 插件列表仍显示 V90/V91/V92 | 使用上面的仓库地址重新导入，然后确认插件版本为 `93`。 |
-| Web 已是 V93，FongMi/TvBox 还是旧内容 | 在客户端刷新实际使用的订阅；必要时回到 Web 订阅源页面再次保存。 |
-| 插件已是 V93，但跨站续播仍是旧逻辑 | 到“过滤器管理”对独立拦截器点击“刷新拦截器”，再保存订阅并刷新客户端。 |
+| Web 插件列表仍显示 V90/V91/V92/V93 | 使用上面的仓库地址重新导入，然后确认插件版本为 `94`。V91 是私有模块化迭代，V92 是历史公开版。 |
+| Web 已是 V94，FongMi/TvBox 还是旧内容 | 在客户端刷新实际使用的订阅；必要时回到 Web 订阅源页面再次保存。 |
+| 插件已是 V94，但跨站续播仍是旧逻辑 | 到“过滤器管理”对独立拦截器点击“刷新拦截器”，再保存订阅并刷新客户端。 |
 | EXT 保存时报 JSON 错误 | 整段重新复制，不要加入 `//` 注释，不要使用中文引号，也不要漏掉逗号或双引号。 |
 | 检查同步显示只读 | 同时填写 `history_username` 和 `history_password`，账号必须具有 `USER` 或 `ADMIN` 角色。 |
 | 追更条目暂时没有线路 | 在“追更管理”执行主动预热，等待进度完成后再打开卡片。 |
@@ -147,12 +147,12 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMD
 
 | 插件 | 版本 | 运行时文件 | 说明 |
 | --- | ---: | --- | --- |
-| 豆瓣 TMDB 追更助手 | 93 | `py/豆瓣TMDB追更单入口.py` | 追更、播放进度同步、资源身份验证与线路预热 |
+| 豆瓣 TMDB 追更助手 | 94 | `py/豆瓣TMDB追更单入口.py` | 追更、播放进度同步、资源身份验证与线路预热 |
 | SeedHub 磁力与多网盘 | 1 | `py/SeedHub.py` | 磁力和多网盘资源搜索、详情与解析入口 |
 
 独立过滤器不属于主插件索引，见 `filters/UniversalNumberSubtitle.py`。
 
-## 豆瓣 TMDB 追更助手 V93
+## 豆瓣 TMDB 追更助手 V94
 
 ### 主要能力
 
@@ -161,8 +161,9 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMD
 - 使用 AList-TVBox Playback/History 通道同步播放记录，支持增量变化、完整快照、墓碑和单调进度合并。
 - 主动预热全部追更条目，展示处理进度和可播放状态；已验证线路长期绑定，失效后才重新搜索。
 - 追更卡片显示“已预热”“预热中”“已绑定资源”或“预热线路待刷新”，不改变图片和导航行为。
-- 资源候选覆盖 AList、PanSou、Telegram 和受控订阅插件；白名单插件的弱搜索标题只能进入详情验证，不能直接证明影片身份。
+- 资源候选覆盖 AList、PanSou、Telegram 和受控订阅插件；`vod1`、`vod`、`telegram` 的弱搜索标题只能进入详情验证，不能直接证明影片身份；PanSou 始终保持严格标题门禁。
 - 搜索层拒绝错季、错年和禁用变体；持久化前还要独立核对详情标题或 TMDB/豆瓣 ID，并拒绝类型、年份和季号冲突。
+- 云盘资源标签会区分分辨率和容量，例如 `31 4K(3.75 GB)` 识别为第 31 集和 `3.75 GB`，不会把 `4K` 误作容量或集号。
 - TMDB 冷查询优先使用客户端通道，客户端过慢、返回空结果或失败时由服务端通道延迟补位，不形成无限重试。
 - 图片、分类、详情、身份、播放记录和线路质量使用有界缓存，过期内容可先返回旧值并在后台刷新。
 
@@ -205,13 +206,13 @@ SeedHub 的 EXT 可以留空。不要在 EXT 中填写 AList-TVBox 管理员密�
 - `py/`：可直接加载的运行时单文件。
 - `filters/`：通过 AList-TVBox 过滤器管理独立添加的 Python 过滤器，不进入主插件索引。
 - [`ARCHITECTURE.md`](ARCHITECTURE.md)：公开架构、模块职责和边界。
-- [`CHANGELOG.md`](CHANGELOG.md)：V70 到 V93 的逐版本变化。
+- [`CHANGELOG.md`](CHANGELOG.md)：V70 到 V94 的逐版本变化。
 
 开发态模块、owner、构建脚本、测试、门禁、源码取证和私有部署材料不进入公开仓库。公开 Python 文件是已验证的发布产物，不作为长期手工维护源。
 
 ## 发布边界
 
-- 当前公开活动入口为 V93。
+- 当前公开活动入口为 V94。
 - V70 只保留在 Git 标签 `v70` 供历史查看，不参与运行时回退。
 - 公开仓库升级不修改独立私有部署。
 - 本地兼容验证不等同于用户设备上的真实订阅刷新和播放验收。
