@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-//@name:豆瓣TMDB追更助手 v94
+//@name:豆瓣TMDB追更助手 v95
 //@id:douban_tmdb_follow_single
-//@version:94
+//@version:95
 
 AList-TVBox raw Python plugin for Douban/TMDB browsing and follow-up playback.
 
@@ -892,31 +892,29 @@ def v91_resource_score_detail(owner, row, item, bound):
             return ResourceScore(0, outcome, reason)
     return ResourceScore(0, "insufficient", "missing_title")
 
-V94_TRUSTED_DETAIL_MODES = frozenset(("vod1", "vod", "telegram"))
+V95_TRUSTED_DETAIL_MODES = frozenset(("vod1", "vod", "pansou", "telegram"))
 
-V94_STRICT_DETAIL_MODES = frozenset(("pansou",))
-
-V94_DETAIL_TRUST_PENDING = "trusted_detail_pending"
+V95_DETAIL_TRUST_PENDING = "trusted_detail_pending"
 
 @dataclass(frozen=True)
-class V94ResourceAdmission:
+class V95ResourceAdmission:
     accepted: bool
     pending_detail: bool
     reason: str
     strict_score: int = 0
 
-def v94_resource_admission(owner, row, item, bound=""):
+def v95_resource_admission(owner, row, item, bound=""):
     row = row if isinstance(row, dict) else {}
     mode = str(row.get("_resource_mode") or "vod").strip().lower() or "vod"
     strict = v91_resource_score_detail(owner, row, item, bound)
     if strict.score > 0:
-        return V94ResourceAdmission(True, False, strict.reason, strict.score)
+        return V95ResourceAdmission(True, False, strict.reason, strict.score)
     resource_id = str(row.get("vod_id") or row.get("id") or "").strip()
-    if mode in V94_TRUSTED_DETAIL_MODES and resource_id:
-        return V94ResourceAdmission(True, True, V94_DETAIL_TRUST_PENDING, 0)
-    return V94ResourceAdmission(False, False, strict.reason, strict.score)
+    if mode in V95_TRUSTED_DETAIL_MODES and resource_id:
+        return V95ResourceAdmission(True, True, V95_DETAIL_TRUST_PENDING, 0)
+    return V95ResourceAdmission(False, False, strict.reason, strict.score)
 
-def v94_resource_candidate_order(owner, rows, item, bound="", modes=()):
+def v95_resource_candidate_order(owner, rows, item, bound="", modes=()):
     candidates = owner._merge_resource_candidate_rows(rows, item, bound)
     strict = {}
     pending = {}
@@ -925,12 +923,12 @@ def v94_resource_candidate_order(owner, rows, item, bound="", modes=()):
         if not isinstance(row, dict):
             continue
         original_order[id(row)] = index
-        decision = v94_resource_admission(owner, row, item, bound)
+        decision = v95_resource_admission(owner, row, item, bound)
         if not decision.accepted:
             continue
         value = dict(row)
         if decision.pending_detail:
-            value["_v94_detail_trust_pending"] = True
+            value["_v95_detail_trust_pending"] = True
             pending.setdefault(str(value.get("_resource_mode") or "vod"), []).append(value)
         else:
             strict.setdefault(str(value.get("_resource_mode") or "vod"), []).append(value)
@@ -1155,6 +1153,31 @@ def v92_resource_detail_identity(owner, row, item, detail):
     return ResourceIdentityDecision(
         False, "detail_identity_insufficient", "insufficient", relaxed=True,
     )
+
+V95_EXTERNAL_ID_FIELDS = (
+    ("tmdb_id", ("tmdb_id", "tmdbId")),
+    ("douban_id", ("douban_id", "doubanId")),
+    ("imdb_id", ("imdb_id", "imdbId")),
+    ("tvdb_id", ("tvdb_id", "tvdbId")),
+)
+
+def v95_project_pansou_identity(item, vod, resource_modes=()):
+    """Keep final PanSou resource identity exclusively bound to the follow item."""
+    output = dict(vod) if isinstance(vod, dict) else {}
+    modes = {
+        str(mode or "").strip().lower()
+        for mode in resource_modes or ()
+    }
+    if "pansou" not in modes:
+        return output
+    item = item if isinstance(item, dict) else {}
+    for canonical, aliases in V95_EXTERNAL_ID_FIELDS:
+        for key in aliases:
+            output.pop(key, None)
+        value = str(item.get(canonical) or "").strip()
+        if value:
+            output[canonical] = value
+    return output
 
 def v92_follow_preheat_status(owner, item):
     current = owner._follow_preheat_current_item(item)
@@ -2932,7 +2955,7 @@ class Filter:
 
 
 class Spider(BaseSpider):
-    name = "豆瓣TMDB追更助手 v94"
+    name = "豆瓣TMDB追更助手 v95"
     host = "https://m.douban.com"
     backend_parse = False
     category_mode = False
@@ -14601,6 +14624,7 @@ class Spider(BaseSpider):
         group_seasons = []
         group_providers = []
         quality_scores = []
+        resource_modes = []
         candidate_parts = []
         for candidate in selected_candidates:
             parts, parts_limited = _split_bounded_shared(
@@ -14648,6 +14672,7 @@ class Spider(BaseSpider):
             group_seasons.append(candidate["season"] or self._resource_group_season(group_url))
             group_providers.append(candidate["provider"])
             quality_scores.append(candidate["quality"])
+            resource_modes.append(candidate["mode"])
         if not urls:
             return None
 
@@ -14655,7 +14680,10 @@ class Spider(BaseSpider):
         resume_part_index = -1
         if resume_match:
             group_index, resume_part_index = resume_match
-            for values in (sources, urls, resource_ids, group_seasons, group_providers, quality_scores):
+            for values in (
+                    sources, urls, resource_ids, group_seasons, group_providers, quality_scores,
+                    resource_modes,
+            ):
                 values.insert(0, values.pop(group_index))
         source_names = set()
         for group_index, base_source in enumerate(list(sources)):
@@ -14739,7 +14767,10 @@ class Spider(BaseSpider):
         group_remap = {group_index: index for index, group_index in enumerate(kept_group_order)}
         for record in records:
             record["group"] = group_remap[self._int_value(record.get("group"), -1)]
-        for values in (sources, urls, resource_ids, group_seasons, group_providers, quality_scores):
+        for values in (
+                sources, urls, resource_ids, group_seasons, group_providers, quality_scores,
+                resource_modes,
+        ):
             values[:] = [values[index] for index in kept_group_order]
 
         completion_total = sum(1 for record in records if record.get("completed"))
@@ -14872,7 +14903,7 @@ class Spider(BaseSpider):
             "vod_play_url": "$$$".join(prompted_urls),
             "vodFlags": flags,
         })
-        return output
+        return v95_project_pansou_identity(item, output, resource_modes)
 
     @classmethod
     def _payload_list(cls, value, limit=None):
