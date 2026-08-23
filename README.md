@@ -91,7 +91,7 @@ V95 会自动识别 AList-TVBox raw 插件运行时。不要手工添加 `atvp_p
 1. 在表单或 EXT/JSON 配置窗口点击“保存”或“确定”。
 2. 回到订阅源页面，再点击一次“保存”或“更新”，确保配置已写入实际订阅。
 3. 打开 FongMi/TvBox，在设置或配置页面刷新正在使用的订阅。
-4. 回到首页，进入“豆瓣 TMDB 追更助手”。AList-TVBox 已显示 V94、但客户端仍是旧内容时，通常只是 FongMi/TvBox 尚未刷新订阅。
+4. 回到首页，进入“豆瓣 TMDB 追更助手”。AList-TVBox 已显示 V95、但客户端仍是旧内容时，通常只是 FongMi/TvBox 尚未刷新订阅。
 
 ### 第 5 步：配置独立拦截器（需要跨站续播时）
 
@@ -102,7 +102,7 @@ V95 会自动识别 AList-TVBox raw 插件运行时。不要手工添加 `atvp_p
 3. 源码地址填写：
 
 ```text
-https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMDB追更单入口.py
+https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/filters/DoubanTmdbFollow.py
 ```
 
 4. 拦截点同时勾选 `详情` 和 `播放`。
@@ -150,7 +150,7 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/py/豆瓣TMD
 | 豆瓣 TMDB 追更助手 | 95 | `py/豆瓣TMDB追更单入口.py` | 追更、播放进度同步、资源身份验证与线路预热 |
 | SeedHub 磁力与多网盘 | 1 | `py/SeedHub.py` | 磁力和多网盘资源搜索、详情与解析入口 |
 
-独立过滤器不属于主插件索引，见 `filters/UniversalNumberSubtitle.py`。
+独立过滤器不属于主插件索引，见 `filters/DoubanTmdbFollow.py` 和 `filters/UniversalNumberSubtitle.py`。
 
 ## 豆瓣 TMDB 追更助手 V95
 
@@ -199,6 +199,7 @@ SeedHub 的 EXT 可以留空。不要在 EXT 中填写 AList-TVBox 管理员密�
 ├── CHANGELOG.md
 ├── spiders_v2.json
 ├── filters/
+│   ├── DoubanTmdbFollow.py
 │   └── UniversalNumberSubtitle.py
 └── py/
     ├── SeedHub.py
