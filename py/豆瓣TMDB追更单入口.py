@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-//@name:豆瓣TMDB追更助手 v95
+//@name:豆瓣TMDB追更助手 v96
 //@id:douban_tmdb_follow_single
-//@version:95
+//@version:96
 
 AList-TVBox raw Python plugin for Douban/TMDB browsing and follow-up playback.
 
@@ -2955,7 +2955,7 @@ class Filter:
 
 
 class Spider(BaseSpider):
-    name = "豆瓣TMDB追更助手 v95"
+    name = "豆瓣TMDB追更助手 v96"
     host = "https://m.douban.com"
     backend_parse = False
     category_mode = False

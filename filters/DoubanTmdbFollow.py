@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-//@name:豆瓣TMDB追更续播拦截器 v95
+//@name:豆瓣TMDB追更续播拦截器 v96
 //@id:douban_tmdb_follow_filter
-//@version:95
+//@version:96
 
 AList-TVBox standalone detail/player filter for follow-up playback.
 This file intentionally exports only Filter and is not part of spiders_v2.json.
