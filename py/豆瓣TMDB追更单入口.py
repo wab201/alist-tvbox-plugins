@@ -11508,7 +11508,7 @@ class Spider(BaseSpider):
                 available_modes=mode_order,
                 modes=mode_order,
             )
-        return v94_resource_candidate_order(
+        return v95_resource_candidate_order(
             self, rows, item,
             bound=bound if legacy_bound is None else legacy_bound,
             modes=mode_order,
