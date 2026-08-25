@@ -986,7 +986,9 @@ def _v92_plugin_identity(owner, row):
     resource_id = str(row.get("vod_id") or row.get("id") or "").strip()
     decoded = owner._atvp_plugin_decode_resource_id(resource_id)
     plugin_id = owner._positive_int((decoded or {}).get("plugin_id"), 0)
-    allowlist = owner.ATVP_PLUGIN_CANDIDATE_POLICY.get("allowlist") or {}
+    allowlist = getattr(owner, "_atvp_plugin_runtime_allowlist", None)
+    if not isinstance(allowlist, dict):
+        allowlist = owner.ATVP_PLUGIN_CANDIDATE_POLICY.get("allowlist") or {}
     return plugin_id if plugin_id in allowlist else 0
 
 def v92_resource_search_admission(owner, row, item, bound=""):
@@ -3034,8 +3036,12 @@ class Spider(BaseSpider):
     RESPONSE_CACHE_KEY = "douban_tmdb_response_cache_v1"
     RESPONSE_CACHE_VERSION = 1
     ATVP_PLUGIN_CANDIDATE_POLICY = {
-        "allowlist": {230: "欧歌[盘]", 243: "木偶[盘]"},
-        "self_ids": frozenset((416, 417, 421)),
+        # Deployment-specific trusted IDs are intentionally absent from the
+        # public artifact. A private/container policy may inject them at
+        # runtime; public expansion still requires exact title and playback
+        # validation before admission.
+        "allowlist": {},
+        "self_ids": frozenset(),
         "excluded_name_markers": ("豆瓣tmdb追更",),
         "resource_prefix": "atvp-plugin-resource:",
         "play_handle_base": 870000,
@@ -3392,6 +3398,8 @@ class Spider(BaseSpider):
             "server": {"samples": [], "consecutive_failures": 0, "degraded_until": 0.0},
         }
         self._atvp_plugin_sites = []
+        self._atvp_plugin_runtime_allowlist = {}
+        self._atvp_plugin_runtime_self_ids = frozenset()
         self._atvp_plugin_wrappers = {}
         self._atvp_plugin_call_locks = {}
         self._atvp_plugin_play_handles = OrderedDict()
@@ -3937,6 +3945,21 @@ class Spider(BaseSpider):
             raise RuntimeError("FongMi 当前订阅地址无效")
         prefix = "/" + "/".join(raw_parts[:index]) if index > 0 else ""
         subscription_origin = ("%s://%s%s" % (parsed.scheme, parsed.netloc, prefix)).rstrip("/")
+        runtime_self_ids = frozenset()
+        for site in value.get("sites") or []:
+            if not isinstance(site, dict):
+                continue
+            name = str(site.get("name") or site.get("key") or "").strip().casefold()
+            payload = self._atvp_plugin_decode_ext(site.get("ext"))
+            plugin_id = self._atvp_plugin_id_from_source(
+                (payload or {}).get("source"), subscription_origin,
+            )
+            if not plugin_id:
+                continue
+            if "豆瓣tmdb追更" in name:
+                runtime_self_ids = frozenset(set(runtime_self_ids) | {plugin_id})
+        self._atvp_plugin_runtime_allowlist = {}
+        self._atvp_plugin_runtime_self_ids = runtime_self_ids
         plugin_sites = self._atvp_plugin_sites_from_subscription(
             value, subscription_origin,
         )
@@ -3988,13 +4011,16 @@ class Spider(BaseSpider):
         )
         return cls._positive_int(match.group(1), 0) if match else 0
 
-    @classmethod
-    def _atvp_plugin_sites_from_subscription(cls, config, origin):
+    def _atvp_plugin_sites_from_subscription(self, config, origin):
         if not isinstance(config, dict):
             return []
-        policy = cls.ATVP_PLUGIN_CANDIDATE_POLICY
-        allowlist = policy.get("allowlist") or {}
-        self_ids = policy.get("self_ids") or frozenset()
+        policy = self.ATVP_PLUGIN_CANDIDATE_POLICY
+        allowlist = getattr(self, "_atvp_plugin_runtime_allowlist", None)
+        if not isinstance(allowlist, dict) or not allowlist:
+            allowlist = policy.get("allowlist") or {}
+        self_ids = getattr(self, "_atvp_plugin_runtime_self_ids", None)
+        if not isinstance(self_ids, (set, frozenset, tuple, list)):
+            self_ids = policy.get("self_ids") or frozenset()
         excluded = tuple(str(value).casefold() for value in policy.get("excluded_name_markers") or ())
         selected = []
         seen = set()
@@ -4005,10 +4031,10 @@ class Spider(BaseSpider):
             normalized_name = name.casefold()
             if not normalized_name or any(marker in normalized_name for marker in excluded):
                 continue
-            payload = cls._atvp_plugin_decode_ext(site.get("ext"))
+            payload = self._atvp_plugin_decode_ext(site.get("ext"))
             if not isinstance(payload, dict):
                 continue
-            plugin_id = cls._atvp_plugin_id_from_source(payload.get("source"), origin)
+            plugin_id = self._atvp_plugin_id_from_source(payload.get("source"), origin)
             expected_name = str(allowlist.get(plugin_id) or "").strip()
             if (
                     not plugin_id or plugin_id in self_ids or plugin_id in seen
@@ -4173,27 +4199,26 @@ class Spider(BaseSpider):
             or re.match(r"^(?:https?://|magnet:|ed2k:|thunder:)", decoded, re.I)
         )
 
-    @classmethod
-    def _atvp_plugin_encode_resource_id(cls, plugin_id, raw_id):
-        plugin_id = cls._positive_int(plugin_id, 0)
+    def _atvp_plugin_encode_resource_id(self, plugin_id, raw_id):
+        plugin_id = self._positive_int(plugin_id, 0)
         raw_id = str(raw_id or "").strip()
+        self_ids = getattr(self, "_atvp_plugin_runtime_self_ids", ()) or ()
         if (
                 plugin_id <= 0
-                or plugin_id in (cls.ATVP_PLUGIN_CANDIDATE_POLICY.get("self_ids") or ())
-                or not cls._atvp_plugin_raw_id_safe(raw_id)):
+                or plugin_id in self_ids
+                or not self._atvp_plugin_raw_id_safe(raw_id)):
             return ""
         payload = json.dumps(
             {"plugin": plugin_id, "id": raw_id}, ensure_ascii=False, separators=(",", ":"),
         ).encode("utf-8")
         encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
-        value = str(cls.ATVP_PLUGIN_CANDIDATE_POLICY.get("resource_prefix") or "") + encoded
-        return value if len(value) <= cls.RESOURCE_ID_MAX_LENGTH else ""
+        value = str(self.ATVP_PLUGIN_CANDIDATE_POLICY.get("resource_prefix") or "") + encoded
+        return value if len(value) <= self.RESOURCE_ID_MAX_LENGTH else ""
 
-    @classmethod
-    def _atvp_plugin_decode_resource_id(cls, value):
+    def _atvp_plugin_decode_resource_id(self, value):
         raw = str(value or "").strip()
-        prefix = str(cls.ATVP_PLUGIN_CANDIDATE_POLICY.get("resource_prefix") or "")
-        if not prefix or not raw.startswith(prefix) or len(raw) > cls.RESOURCE_ID_MAX_LENGTH:
+        prefix = str(self.ATVP_PLUGIN_CANDIDATE_POLICY.get("resource_prefix") or "")
+        if not prefix or not raw.startswith(prefix) or len(raw) > self.RESOURCE_ID_MAX_LENGTH:
             return None
         try:
             encoded = raw[len(prefix):]
@@ -4201,12 +4226,13 @@ class Spider(BaseSpider):
             payload = json.loads(base64.urlsafe_b64decode(encoded).decode("utf-8"))
         except Exception:
             return None
-        plugin_id = cls._positive_int((payload or {}).get("plugin"), 0)
+        plugin_id = self._positive_int((payload or {}).get("plugin"), 0)
         raw_id = str((payload or {}).get("id") or "").strip()
+        self_ids = getattr(self, "_atvp_plugin_runtime_self_ids", ()) or ()
         if (
                 plugin_id <= 0
-                or plugin_id in (cls.ATVP_PLUGIN_CANDIDATE_POLICY.get("self_ids") or ())
-                or not cls._atvp_plugin_raw_id_safe(raw_id)):
+                or plugin_id in self_ids
+                or not self._atvp_plugin_raw_id_safe(raw_id)):
             return None
         return {"plugin_id": plugin_id, "raw_id": raw_id}
 
@@ -18151,15 +18177,15 @@ class Spider(BaseSpider):
         )
         return True
 
-    @classmethod
-    def _v96_atvp_plugin_sites_from_subscription_all(cls, config, origin):
+    def _v96_atvp_plugin_sites_from_subscription_all(self, config, origin):
         """Collect non-self searchable plugins from the current same-origin subscription."""
         if not isinstance(config, dict):
             return []
         excluded = tuple(
             str(value).casefold()
-            for value in cls.ATVP_PLUGIN_CANDIDATE_POLICY.get("excluded_name_markers") or ()
+            for value in self.ATVP_PLUGIN_CANDIDATE_POLICY.get("excluded_name_markers") or ()
         )
+        runtime_self_ids = set(getattr(self, "_atvp_plugin_runtime_self_ids", ()) or ())
         selected = []
         seen = set()
         for position, site in enumerate(config.get("sites") or []):
@@ -18169,14 +18195,11 @@ class Spider(BaseSpider):
             normalized_name = name.casefold()
             if not normalized_name or any(marker in normalized_name for marker in excluded):
                 continue
-            payload = cls._atvp_plugin_decode_ext(site.get("ext"))
+            payload = self._atvp_plugin_decode_ext(site.get("ext"))
             if not isinstance(payload, dict):
                 continue
-            plugin_id = cls._atvp_plugin_id_from_source(payload.get("source"), origin)
-            if (
-                    not plugin_id
-                    or plugin_id in cls.ATVP_PLUGIN_CANDIDATE_POLICY.get("self_ids", frozenset())
-                    or plugin_id in seen):
+            plugin_id = self._atvp_plugin_id_from_source(payload.get("source"), origin)
+            if not plugin_id or plugin_id in runtime_self_ids or plugin_id in seen:
                 continue
             seen.add(plugin_id)
             selected.append({
