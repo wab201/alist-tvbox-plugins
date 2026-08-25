@@ -1203,6 +1203,8 @@ V91_PREHEAT_AUDIT_CARD_LIMIT = 17
 V91_PREHEAT_SHADOW_LIMIT = 2
 
 V91_PREHEAT_AUDIT_REASON_LABELS = {
+    "called_but_empty": "调用但无结果",
+    "search_backoff": "指数退避未调用",
     "missing_title": "缺少可识别标题",
     "denied_variant": "变体黑名单",
     "season_conflict": "季度冲突",
@@ -1615,7 +1617,6 @@ V91_HISTORY_CANONICAL_KEY = "douban_tmdb_follow_single"
 V91_HISTORY_FAMILY_KEYS = frozenset((
     "douban_tmdb_follow_single",
     "douban_tmdb_follow_single_v80_private",
-    "douban_tmdb_follow_single_v91_private",
     "豆瓣TMDB追更单入口",
 ))
 
@@ -3436,7 +3437,14 @@ class Spider(BaseSpider):
             return False
 
         budget_seconds = {
-            "resource_completion": self.RESOURCE_HOT_VALIDATION_BUDGET,
+            # V95 preheat traverses allowlisted plugins after the base
+            # providers; reserve their bounded window in the parent scope.
+            "resource_completion": (
+                self.RESOURCE_HOT_VALIDATION_BUDGET
+                + self._positive_int(
+                    self.ATVP_PLUGIN_CANDIDATE_POLICY.get("preheat_budget"), 40,
+                )
+            ),
             "history": self.RESOURCE_DETAIL_BUDGET,
             "route_probe": self.RESOURCE_FOREGROUND_BUDGET,
         }[lane]
@@ -3712,7 +3720,10 @@ class Spider(BaseSpider):
         self.resource_limit = self._bounded_int(
             config.get("resource_limit"), self.FOLLOW_ROUTE_LIMIT, 1, self.FOLLOW_ROUTE_LIMIT,
         )
-        self.resource_search_modes = self._resource_mode_list(config.get("resource_search_modes"))
+        configured_resource_modes = config.get("resource_search_modes")
+        if configured_resource_modes in (None, ""):
+            configured_resource_modes = ("vod", "vod1", "pansou", "telegram")
+        self.resource_search_modes = self._resource_mode_list(configured_resource_modes)
         self.resource_auto_discover = self._bool_value(config.get("resource_auto_discover"), True)
         self.resource_capability_ttl = self._bounded_int(
             config.get("resource_capability_ttl"), 600, 60, 3600,
@@ -3926,7 +3937,12 @@ class Spider(BaseSpider):
             raise RuntimeError("FongMi 当前订阅地址无效")
         prefix = "/" + "/".join(raw_parts[:index]) if index > 0 else ""
         subscription_origin = ("%s://%s%s" % (parsed.scheme, parsed.netloc, prefix)).rstrip("/")
-        plugin_sites = self._atvp_plugin_sites_from_subscription(value, subscription_origin)
+        plugin_sites = self._atvp_plugin_sites_from_subscription(
+            value, subscription_origin,
+        )
+        plugin_sites_all = self._v96_atvp_plugin_sites_from_subscription_all(
+            value, subscription_origin,
+        )
         self._remember_history_api_origin(subscription_origin)
         self._history_selected_origin = ""
         self.atvp_api = subscription_origin
@@ -3939,7 +3955,8 @@ class Spider(BaseSpider):
                     self._atvp_plugin_play_handles.clear()
                     self._atvp_plugin_atvp_source = ""
                     self._atvp_plugin_atvp_source_backend = subscription_origin
-                self._atvp_plugin_sites = plugin_sites
+                self._atvp_plugin_sites = plugin_sites_all
+                self._atvp_plugin_allowlist_sites = plugin_sites
         return self.atvp_api
 
     @staticmethod
@@ -4161,7 +4178,8 @@ class Spider(BaseSpider):
         plugin_id = cls._positive_int(plugin_id, 0)
         raw_id = str(raw_id or "").strip()
         if (
-                plugin_id not in (cls.ATVP_PLUGIN_CANDIDATE_POLICY.get("allowlist") or {})
+                plugin_id <= 0
+                or plugin_id in (cls.ATVP_PLUGIN_CANDIDATE_POLICY.get("self_ids") or ())
                 or not cls._atvp_plugin_raw_id_safe(raw_id)):
             return ""
         payload = json.dumps(
@@ -4186,7 +4204,8 @@ class Spider(BaseSpider):
         plugin_id = cls._positive_int((payload or {}).get("plugin"), 0)
         raw_id = str((payload or {}).get("id") or "").strip()
         if (
-                plugin_id not in (cls.ATVP_PLUGIN_CANDIDATE_POLICY.get("allowlist") or {})
+                plugin_id <= 0
+                or plugin_id in (cls.ATVP_PLUGIN_CANDIDATE_POLICY.get("self_ids") or ())
                 or not cls._atvp_plugin_raw_id_safe(raw_id)):
             return None
         return {"plugin_id": plugin_id, "raw_id": raw_id}
@@ -4208,7 +4227,7 @@ class Spider(BaseSpider):
             limit = self._positive_int(
                 self.ATVP_PLUGIN_CANDIDATE_POLICY.get("search_limit"), 8,
             )
-            for query in list(queries or [])[:2]:
+            for query in list(queries or [])[:8]:
                 if len(rows) >= limit:
                     break
                 result = wrapper.searchContent(str(query or ""), False, "1")
@@ -4233,12 +4252,16 @@ class Spider(BaseSpider):
         finally:
             call_lock.release()
 
-    def _atvp_plugin_candidates(self, item, deadline=None, expected_generation=None):
+    def _atvp_plugin_candidates(
+            self, item, deadline=None, expected_generation=None, sites=None):
         with self._cache_lock:
             generation = self._cache_generation if expected_generation is None else expected_generation
             if generation != self._cache_generation:
                 return []
-        sites = self._atvp_plugin_sites_snapshot()
+        sites = (
+            [dict(row) for row in sites]
+            if sites is not None else self._atvp_plugin_sites_snapshot()
+        )
         title = str((item or {}).get("title") or "").strip()
         if not sites or not title:
             return []
@@ -4254,7 +4277,9 @@ class Spider(BaseSpider):
         for site in sites:
             future = self._submit_atvp_plugin_task(
                 lambda source=dict(site): self._atvp_plugin_search_site(
-                    source, queries[:2], deadline=deadline,
+                    source,
+                    queries[:self._v96_resource_query_limit(item, "plugin")],
+                    deadline=deadline,
                 )
             )
             if future is not None:
@@ -11532,6 +11557,17 @@ class Spider(BaseSpider):
         mode_rows = {}
         foreground_modes = [mode for mode in modes if mode not in self.RESOURCE_SUPPLEMENT_MODES]
         supplement_modes = [mode for mode in modes if mode in self.RESOURCE_SUPPLEMENT_MODES]
+        for mode in list(foreground_modes) + list(supplement_modes):
+            if self._v96_resource_backoff_skip(item, mode):
+                mode_rows.setdefault(mode, [])
+        foreground_modes = [
+            mode for mode in foreground_modes
+            if not self._v96_resource_backoff_skip(item, mode)
+        ]
+        supplement_modes = [
+            mode for mode in supplement_modes
+            if not self._v96_resource_backoff_skip(item, mode)
+        ]
         sync_supplement_modes = False
         if supplement_modes:
             cache_key = self._resource_search_cache_key(item, "supplement")
@@ -11546,7 +11582,9 @@ class Spider(BaseSpider):
                 sync_supplement_modes = not cached_rows
                 if not sync_supplement_modes:
                     self._schedule_supplement_resource_search(
-                        supplement_modes, query_titles[:2], item, cache_key,
+                        supplement_modes,
+                        query_titles[:self._v96_resource_query_limit(item)],
+                        item, cache_key,
                         expected_generation=expected_generation,
                     )
         if sync_supplement_modes:
@@ -11562,7 +11600,9 @@ class Spider(BaseSpider):
                 futures = {}
                 for mode in foreground_modes:
                     future = self._submit_resource_mode_search(
-                        mode, query_titles[:2], deadline, background=background,
+                        mode,
+                        query_titles[:self._v96_resource_query_limit(item, mode)],
+                        deadline, background=background,
                         expected_generation=expected_generation,
                     )
                     if future is None:
@@ -11575,6 +11615,9 @@ class Spider(BaseSpider):
                         mode = futures[future]
                         try:
                             mode_rows[mode] = future.result()
+                            self._v96_resource_backoff_update(
+                                item, mode, mode_rows[mode],
+                            )
                         except Exception:
                             mode_rows[mode] = []
                 except FuturesTimeoutError:
@@ -12192,53 +12235,19 @@ class Spider(BaseSpider):
                     self._v91_preheat_audit_playable_rows(
                         source_item, candidates, all_playable,
                     )
-                    if self._atvp_plugin_candidate_gap(all_playable, source_item):
-                        plugin_deadline = min(
-                            deadline,
-                            time.monotonic() + self._positive_int(
-                                self.ATVP_PLUGIN_CANDIDATE_POLICY.get("preheat_budget"), 40,
-                            ),
+                    if (
+                            self._alist_tvbox_plugin
+                            and self._atvp_plugin_candidate_gap(all_playable, source_item)
+                    ):
+                        # The plugin pool is expanded only when the base
+                        # layers have no reliable target route.
+                        plugin_deadline = time.monotonic() + self._positive_int(
+                            self.ATVP_PLUGIN_CANDIDATE_POLICY.get("preheat_budget"), 40,
                         )
-                        plugin_candidates = self._atvp_plugin_candidates(
-                            source_item, deadline=plugin_deadline,
-                            expected_generation=expected_generation,
+                        all_playable, _plugin_candidates = self._v96_preheat_plugin_expand(
+                            source_item, all_playable, plugin_deadline,
+                            expected_generation, publish_partial,
                         )
-                        self._v91_preheat_audit_extra_candidates(
-                            source_item, "plugin-fallback", plugin_candidates,
-                        )
-                        plugin_attempted = list(
-                            plugin_candidates[:self.RESOURCE_HOT_VALIDATION_ATTEMPT_LIMIT]
-                        )
-                        plugin_checked = self._checked_resource_rows(
-                            plugin_attempted, plugin_deadline,
-                        )
-                        self._v91_preheat_audit_checked_rows(
-                            source_item, plugin_attempted, plugin_checked,
-                        )
-                        base_playable = list(all_playable)
-
-                        def publish_plugin_partial(current):
-                            combined = self._resource_output_candidate_order(
-                                base_playable + list(current), source_item,
-                                bound=self._resource_binding_resource_id(source_item),
-                                modes=self.RESOURCE_SEARCH_MODES,
-                            )
-                            publish_partial(combined)
-
-                        plugin_playable = self._playable_resource_rows(
-                            plugin_checked, source_item, plugin_deadline,
-                            expected_generation=expected_generation,
-                            on_update=publish_plugin_partial,
-                        )
-                        self._v91_preheat_audit_playable_rows(
-                            source_item, plugin_checked, plugin_playable,
-                        )
-                        if plugin_playable:
-                            all_playable = self._resource_output_candidate_order(
-                                base_playable + list(plugin_playable), source_item,
-                                bound=self._resource_binding_resource_id(source_item),
-                                modes=self.RESOURCE_SEARCH_MODES,
-                            )
                     target_row = self._target_covering_resource_row(all_playable, source_item)
                     if target_row is None:
                         shadow_deadline = time.monotonic() + min(
@@ -12275,8 +12284,10 @@ class Spider(BaseSpider):
                         final_group_count = self._validated_resource_group_count(playable)
                         if final_group_count > first_refreshed_groups:
                             first_refreshed_groups = final_group_count
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self._diagnostic_event(
+                        "resource_entry_preheat.error", "WARN", exc=exc,
+                    )
                 finally:
                     with self._cache_lock:
                         if self._resource_entry_preheat_jobs.get(cache_key) is job_owner:
@@ -12345,6 +12356,9 @@ class Spider(BaseSpider):
                         mode = search_futures[future]
                         try:
                             rows = future.result()
+                            self._v96_resource_backoff_update(
+                                item, mode, rows,
+                            )
                         except Exception:
                             rows = []
                         for row in rows:
@@ -12471,19 +12485,28 @@ class Spider(BaseSpider):
             )
 
     def _v80_checked_resource_rows_unbounded(self, rows, deadline=None):
+        """Keep opaque VOD IDs on the detail path; link-check only URL layers."""
+        direct_rows = []
         plugin_rows = []
         selected = []
         positions = {}
         items = []
         for row in rows or []:
-            if (
-                    str((row or {}).get("_resource_mode") or "").strip().lower() == "plugin"
-                    and self._atvp_plugin_decode_resource_id(
-                        (row or {}).get("vod_id") or (row or {}).get("id")
-                    ) is not None):
+            if not isinstance(row, dict):
+                continue
+            mode = str(row.get("_resource_mode") or "").strip().lower()
+            resource_id = str(
+                row.get("vod_id") or row.get("id") or row.get("url") or ""
+            ).strip()
+            identity = self._resource_row_identity(row)
+            if not resource_id or not identity:
+                continue
+            if mode == "plugin" and self._atvp_plugin_decode_resource_id(resource_id) is not None:
                 plugin_rows.append(row)
                 continue
-            resource_id = str(row.get("vod_id") or row.get("id") or row.get("url") or "").strip()
+            if mode in ("vod", "vod1") and not self._v91_preheat_shadow_candidate_eligible(row):
+                direct_rows.append(row)
+                continue
             target = unquote(resource_id)
             if target.startswith("push://"):
                 target = target[7:].strip()
@@ -12499,10 +12522,12 @@ class Spider(BaseSpider):
                 parsed.scheme in ("http", "https")
                 and port in (None, 80, 443)
                 and not parsed.username and not parsed.password
-                and any(host == suffix or host.endswith("." + suffix) for suffix in self.RESOURCE_CHECK_LINK_HOSTS)
+                and any(
+                    host == suffix or host.endswith("." + suffix)
+                    for suffix in self.RESOURCE_CHECK_LINK_HOSTS
+                )
             )
-            identity = self._resource_row_identity(row)
-            if not checkable or not identity:
+            if not checkable:
                 continue
             if identity in positions:
                 index = positions[identity]
@@ -12516,7 +12541,7 @@ class Spider(BaseSpider):
             selected.append((target, row))
             items.append({"url": target})
         if not items or not self._ensure_atvp_connection(force=True):
-            return plugin_rows
+            return direct_rows + plugin_rows
         response = self._atvp_session.post(
             self._atvp_endpoint("check-links"),
             json={"items": items},
@@ -12531,11 +12556,13 @@ class Spider(BaseSpider):
             closer = getattr(response, "close", None)
             if callable(closer):
                 closer()
-            return []
+            return direct_rows + plugin_rows
         try:
-            payload = self._read_bounded_json_response(response, "AList check-links", deadline=deadline)
+            payload = self._read_bounded_json_response(
+                response, "AList check-links", deadline=deadline,
+            )
         except Exception:
-            return []
+            return direct_rows + plugin_rows
         states = {}
         if isinstance(payload, dict):
             for entry in payload.get("results") or []:
@@ -12544,7 +12571,7 @@ class Spider(BaseSpider):
                 identity = self._resource_row_identity(entry.get("url"))
                 if identity:
                     states[identity] = str(entry.get("state") or "").lower()
-        return plugin_rows + [
+        return direct_rows + plugin_rows + [
             row for target, row in selected
             if states.get(self._resource_row_identity(target)) == "ok"
         ]
@@ -13724,7 +13751,7 @@ class Spider(BaseSpider):
             return []
         rows = []
         positions = {}
-        for query in list(queries or [])[:2]:
+        for query in list(queries or [])[:8]:
             if len(rows) >= self.RESOURCE_SEARCH_RESULT_LIMIT:
                 break
             if deadline is not None and deadline - time.monotonic() < 1:
@@ -18017,6 +18044,266 @@ class Spider(BaseSpider):
         return text[:limit] or "未知错误"
 
 
+    def _v96_resource_negative_key(self, item, mode):
+        scope = str(mode or "resource").strip().lower() or "resource"
+        return self._resource_search_cache_key(item, "empty:" + scope)
+
+    def _v96_resource_query_limit(self, item, mode=""):
+        modes = [str(mode or "").strip().lower()] if mode else [
+            "vod1", "vod", "pansou", "telegram", "plugin",
+        ]
+        attempts = 0
+        with self._cache_lock:
+            state = getattr(self, "_v96_resource_empty_backoff", {})
+            for value in modes:
+                key = self._v96_resource_negative_key(item, value)
+                current = state.get(key) if isinstance(state, dict) else None
+                if isinstance(current, dict):
+                    attempts = max(attempts, int(current.get("attempts") or 0))
+        return min(8, 2 + 2 * min(3, attempts))
+
+    def _v96_resource_backoff_active(self, key):
+        if not key:
+            return False
+        now = time.time()
+        with self._cache_lock:
+            states = getattr(self, "_v96_resource_empty_backoff", {})
+            state = states.get(key) if isinstance(states, dict) else None
+            if not isinstance(state, dict):
+                return False
+            if now < float(state.get("retry_at") or 0.0):
+                return True
+        return False
+
+    def _v96_resource_backoff_empty(self, key, scope=""):
+        if not key:
+            return False
+        label = str(scope or "resource").strip() or "resource"
+        try:
+            now = time.time()
+            with self._cache_lock:
+                state = getattr(self, "_v96_resource_empty_backoff", None)
+                current = state.get(key) if isinstance(state, dict) else None
+                if (
+                        isinstance(current, dict)
+                        and int(current.get("attempts") or 0) >= 3
+                        and now < float(current.get("retry_at") or 0.0)):
+                    return False
+                attempts = min(
+                    6, int((current or {}).get("attempts") or 0) + 1,
+                )
+                delay = min(
+                    float(getattr(self, "failure_ttl", 60) or 60),
+                    max(1.0, 2.0 ** (attempts - 1)),
+                )
+                if not isinstance(state, dict):
+                    state = {}
+                    self._v96_resource_empty_backoff = state
+                state[key] = {
+                    "attempts": attempts,
+                    "retry_at": now + delay,
+                    "scope": label,
+                }
+            self._diagnostic_event(
+                "resource_preheat.backoff", "WARN",
+                cache_key=key, scope=label, backoff=delay,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _v96_resource_backoff_clear(self, key):
+        if not key:
+            return False
+        with self._cache_lock:
+            state = getattr(self, "_v96_resource_empty_backoff", {})
+            if not isinstance(state, dict):
+                return False
+            return state.pop(key, None) is not None
+
+    def _v96_resource_backoff_update(self, item, mode, rows):
+        key = self._v96_resource_negative_key(item, mode)
+        values = list(rows or []) if isinstance(rows, list) else []
+        if values:
+            self._v96_resource_backoff_clear(key)
+            return "returned"
+        if self._v96_resource_backoff_empty(key, mode):
+            self._v91_preheat_audit_record(
+                item, "search", "called_but_empty",
+                row={"_resource_mode": str(mode or "").strip().lower()},
+            )
+            return "called_but_empty"
+        return "untracked"
+
+    def _v96_resource_backoff_skip(self, item, mode):
+        key = self._v96_resource_negative_key(item, mode)
+        if not self._v96_resource_backoff_active(key):
+            return False
+        with self._cache_lock:
+            state = getattr(self, "_v96_resource_empty_backoff", {})
+            current = state.get(key) if isinstance(state, dict) else None
+            attempts = int((current or {}).get("attempts") or 0)
+        if attempts < 3:
+            return False
+        self._v91_preheat_audit_record(
+            item, "search", "search_backoff",
+            row={"_resource_mode": str(mode or "").strip().lower()},
+        )
+        return True
+
+    @classmethod
+    def _v96_atvp_plugin_sites_from_subscription_all(cls, config, origin):
+        """Collect non-self searchable plugins from the current same-origin subscription."""
+        if not isinstance(config, dict):
+            return []
+        excluded = tuple(
+            str(value).casefold()
+            for value in cls.ATVP_PLUGIN_CANDIDATE_POLICY.get("excluded_name_markers") or ()
+        )
+        selected = []
+        seen = set()
+        for position, site in enumerate(config.get("sites") or []):
+            if not isinstance(site, dict) or site.get("searchable") in (0, False, "0"):
+                continue
+            name = str(site.get("name") or site.get("key") or "").strip()
+            normalized_name = name.casefold()
+            if not normalized_name or any(marker in normalized_name for marker in excluded):
+                continue
+            payload = cls._atvp_plugin_decode_ext(site.get("ext"))
+            if not isinstance(payload, dict):
+                continue
+            plugin_id = cls._atvp_plugin_id_from_source(payload.get("source"), origin)
+            if (
+                    not plugin_id
+                    or plugin_id in cls.ATVP_PLUGIN_CANDIDATE_POLICY.get("self_ids", frozenset())
+                    or plugin_id in seen):
+                continue
+            seen.add(plugin_id)
+            selected.append({
+                "position": position,
+                "plugin_id": plugin_id,
+                "name": name,
+                "ext": str(site.get("ext") or ""),
+            })
+        selected.sort(key=lambda row: (row["position"], row["plugin_id"]))
+        return selected
+
+    def _v96_atvp_plugin_allowlist_sites_snapshot(self):
+        allowlist = self.ATVP_PLUGIN_CANDIDATE_POLICY.get("allowlist") or {}
+        lock = getattr(self, "_atvp_plugin_lock", None)
+        configured = getattr(self, "_atvp_plugin_allowlist_sites", None)
+        if lock is not None:
+            with lock:
+                if isinstance(configured, list):
+                    return [dict(row) for row in configured]
+        elif isinstance(configured, list):
+            return [dict(row) for row in configured]
+        return [
+            row for row in self._atvp_plugin_sites_snapshot()
+            if self._positive_int(row.get("plugin_id"), 0) in allowlist
+        ]
+
+    def _v96_preheat_plugin_expand(
+            self, item, base_playable, deadline, expected_generation, publish_partial):
+        """Try managed plugins one by one until a reliable target route is playable."""
+        combined = list(base_playable or [])
+        all_candidates = []
+        sites = self._v96_atvp_plugin_allowlist_sites_snapshot()
+        all_sites = self._atvp_plugin_sites_snapshot()
+        if self._v96_resource_backoff_skip(item, "plugin"):
+            return combined, all_candidates
+        # A test/runtime without a subscription snapshot still gets one normal
+        # plugin call; a real managed pool is traversed strictly one site at a time.
+        seen_plugin_ids = set()
+        site_queue = [("allowlist", site) for site in sites]
+        site_queue.extend(
+            ("expanded", site) for site in all_sites
+            if self._positive_int(site.get("plugin_id"), 0)
+            not in {self._positive_int(row.get("plugin_id"), 0) for row in sites}
+        )
+        if not site_queue:
+            site_queue = [("allowlist", None)]
+        for stage, site in site_queue:
+            if deadline is not None and deadline - time.monotonic() < 1:
+                break
+            kwargs = {
+                "deadline": deadline,
+                "expected_generation": expected_generation,
+            }
+            if site is not None:
+                kwargs["sites"] = [site]
+            plugin_candidates = self._atvp_plugin_candidates(item, **kwargs)
+            if stage == "expanded":
+                trusted_candidates = []
+                for row in plugin_candidates or []:
+                    score = v91_resource_score_detail(
+                        self, row, item, self._resource_binding_resource_id(item),
+                    )
+                    if score.reason != "exact_title":
+                        self._v91_preheat_audit_record(
+                            item, "title_filter", score.reason or "non_exact_title", row=row,
+                        )
+                        continue
+                    trusted = dict(row)
+                    trusted["_v92_identity_admission"] = V92_TRUSTED_PLUGIN_DETAIL_MARKER
+                    trusted["_v92_identity_reason"] = "external_plugin_exact_title"
+                    trusted_candidates.append(trusted)
+                plugin_candidates = trusted_candidates
+            all_candidates.extend(plugin_candidates or [])
+            self._diagnostic_event(
+                "plugin_preheat.site", "INFO" if plugin_candidates else "WARN",
+                stage=stage,
+                plugin_id=(site or {}).get("plugin_id") if site else None,
+                candidate_count=len(plugin_candidates or []),
+            )
+            self._v91_preheat_audit_extra_candidates(
+                item, "plugin-fallback", plugin_candidates,
+            )
+            attempted = list(
+                (plugin_candidates or [])[:self.RESOURCE_HOT_VALIDATION_ATTEMPT_LIMIT]
+            )
+            checked = self._checked_resource_rows(attempted, deadline)
+            self._v91_preheat_audit_checked_rows(item, attempted, checked)
+
+            def publish_plugin_partial(current):
+                partial = self._resource_output_candidate_order(
+                    combined[:0] + list(base_playable or []) + list(current or []),
+                    item,
+                    bound=self._resource_binding_resource_id(item),
+                    modes=self.RESOURCE_SEARCH_MODES,
+                )
+                publish_partial(partial)
+
+            plugin_playable = self._playable_resource_rows(
+                checked,
+                item,
+                deadline,
+                expected_generation=expected_generation,
+                on_update=publish_plugin_partial,
+            )
+            self._v91_preheat_audit_playable_rows(
+                item, checked, plugin_playable,
+            )
+            if not plugin_playable:
+                continue
+            combined = self._resource_output_candidate_order(
+                list(base_playable or []) + list(plugin_playable),
+                item,
+                bound=self._resource_binding_resource_id(item),
+                modes=self.RESOURCE_SEARCH_MODES,
+            )
+            target = self._target_covering_resource_row(combined, item)
+            if target is not None:
+                self._diagnostic_event(
+                    "plugin_preheat.stop", "INFO",
+                    stage=stage,
+                    plugin_id=(site or {}).get("plugin_id") if site else None,
+                    reason="target_playable",
+                )
+                break
+        self._v96_resource_backoff_update(item, "plugin", all_candidates)
+        return combined, all_candidates
+
     def _v93_is_alist_tvbox_runtime(self, configured_mode=""):
         module_name = str(getattr(self.__class__, "__module__", "") or "").strip()
         legacy_mode = str(configured_mode or "").strip().lower()
@@ -18166,7 +18453,7 @@ class Spider(BaseSpider):
             detail = v91_resource_score_detail(self, row, item, bound)
             if detail.score > 0 and identity in accepted:
                 continue
-            if row.get("_v94_detail_trust_pending") and detail.score <= 0:
+            if row.get("_v95_detail_trust_pending") and detail.score <= 0:
                 continue
             rejected_count += 1
             reason = detail.reason if detail.score <= 0 else "candidate_order_limit"

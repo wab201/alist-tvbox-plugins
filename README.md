@@ -37,7 +37,7 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/filters/Univ
 https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/spiders_v2.json
 ```
 
-4. 在插件列表中找到“豆瓣 TMDB 追更助手”，确认版本显示为 `95`。
+4. 在插件列表中找到“豆瓣 TMDB 追更助手”，确认版本显示为 `96`。
 
 以后升级仍然使用同一个地址重新导入。若还显示旧版本，先在 Web 界面重新导入仓库，不要修改插件 ID 或源码地址。
 
@@ -161,7 +161,8 @@ https://raw.githubusercontent.com/wab201/alist-tvbox-plugins/master/filters/Doub
 - 使用 AList-TVBox Playback/History 通道同步播放记录，支持增量变化、完整快照、墓碑和单调进度合并。
 - 主动预热全部追更条目，展示处理进度和可播放状态；已验证线路长期绑定，失效后才重新搜索。
 - 追更卡片显示“已预热”“预热中”“已绑定资源”或“预热线路待刷新”，不改变图片和导航行为。
-- 资源候选覆盖 AList、PanSou、Telegram 和受控订阅插件；`vod1`、`vod`、`pansou`、`telegram` 的弱搜索标题只能进入待详情验证流程，不能直接证明影片身份。
+- 资源候选覆盖 AList、PanSou、Telegram 和当前同源订阅中的受管插件；`vod1`、`vod`、`pansou`、`telegram` 的弱搜索标题只能进入待详情验证流程，不能直接证明影片身份。
+- 当基础层和白名单插件均无可靠目标线路时，运行时按订阅顺序逐个尝试其他同源、可搜索插件。白名单外候选必须精确标题命中，并通过详情身份、类型/年份/季度冲突、播放组生成和媒体验活；跨源插件、自身插件和明确排除的站点不会被扩展调用。
 - 搜索层拒绝错季、错年和禁用变体；持久化前还要独立核对详情标题或 TMDB/豆瓣 ID，并拒绝类型、年份和季号冲突。
 - PanSou 详情只有在验证出可播放资源后才可成为线路；PanSou 自身携带的外部 ID 不作为追更身份依据。
 - PanSou 播放组与普通资源组保持独立，不折叠 `vod_play_from`、`vod_play_url` 或 `vodFlags`。
